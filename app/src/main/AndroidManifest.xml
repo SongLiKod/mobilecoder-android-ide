@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 最小权限原则（见 TECH.md 6. 权限清单） -->
+    <!-- Git 同步、SSH 连接 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 后台编译保活 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 任务完成通知 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 平台强制要求：用于承载“后台长时间任务保活”前台服务（WAKE_LOCK + 通知的载体） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- 平板、折叠屏自适应；横竖屏与深浅色切换不重建 Activity（主题全局切换无闪烁、无重启） -->
+    <application
+        android:name=".MobileCoderApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MobileCoder"
+        android:usesCleartextTraffic="false"
+        android:hardwareAccelerated="true"
+        tools:targetApi="35">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode|fontScale|locale|layoutDirection"
+            android:theme="@style/Theme.MobileCoder">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

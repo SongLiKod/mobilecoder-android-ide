@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 浅色主题固定色值（TECH.md 3.3 浅色主题） -->
+    <color name="light_primary">#2563EB</color>
+    <color name="light_background">#FFFFFF</color>
+    <color name="light_surface">#F8FAFC</color>
+    <color name="light_on_background">#111827</color>
+
+    <!-- 深色主题固定色值（TECH.md 3.3 深色主题） -->
+    <color name="dark_primary">#60A5FA</color>
+    <color name="dark_background">#0F172A</color>
+    <color name="dark_surface">#1E293B</color>
+    <color name="dark_on_background">#E2E8F0</color>
+
+    <color name="ic_launcher_background">#2563EB</color>
+</resources>
