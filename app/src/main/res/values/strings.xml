@@ -3,4 +3,11 @@
     <string name="app_name">移动码匠</string>
     <string name="app_full_name">MobileCoder 移动码匠</string>
     <string name="app_package">com.mobilecoder.ide</string>
+
+    <!-- PRD 2.1 全局主题系统 -->
+    <string name="theme_section_title">全局主题</string>
+    <string name="theme_light">浅色</string>
+    <string name="theme_dark">深色</string>
+    <string name="theme_system">跟随系统</string>
+    <string name="theme_scope_hint">生效范围：全部页面、代码高亮、终端配色、Git Diff 配色、日志高亮、弹窗组件</string>
 </resources>
