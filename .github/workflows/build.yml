@@ -37,6 +37,22 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # testDebugUnitTest 仍会校验 core_native 固定的 ndkVersion（缺失时报
+      # "NDK not configured"），因此单测作业同样必须安装 NDK。
+      - name: Install NDK & CMake
+        env:
+          NDK_VERSION: 26.3.11579264
+          CMAKE_VERSION: 3.22.1
+        run: |
+          set -e
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_HOME}/cmdline-tools" -name sdkmanager -type f | head -n 1)"
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          yes | "$SDKMANAGER" "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}" > /dev/null
+
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
