@@ -100,7 +100,7 @@ data class AppPalette(
             terminalMagenta = AppColor(0x9333EA),
             terminalCyan = AppColor(0x0E7490),
             terminalWhite = AppColor(0x334155),
-            diffAddedBackground = AppColor(0DCFCE7),
+            diffAddedBackground = AppColor(0xDCFCE7),
             diffAddedForeground = AppColor(0x166534),
             diffRemovedBackground = AppColor(0xFEE2E2),
             diffRemovedForeground = AppColor(0x991B1B),

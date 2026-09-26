@@ -280,7 +280,7 @@ static int mc_sideband_cb(const char *str, int len, void *payload) {
 }
 
 static int mc_push_progress_cb(unsigned int current, unsigned int total,
-                               unsigned long bytes, void *payload) {
+                               size_t bytes, void *payload) {
     (void) payload;
     (void) bytes;
     mc_emit_progress("push", "", (int) current, (int) total);
@@ -2274,7 +2274,7 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_resolveConflictContent(
         bytes = (*env)->GetByteArrayElements(env, content, NULL);
     }
 
-    if (mc_write_workdir_file(p, (const char *) (const void *) (bytes != NULL ? bytes : ""),
+    if (mc_write_workdir_file(p, bytes != NULL ? (const char *) bytes : "",
                               (size_t) (len > 0 ? len : 0)) != 0) {
         if (bytes != NULL) {
             (*env)->ReleaseByteArrayElements(env, content, bytes, JNI_ABORT);

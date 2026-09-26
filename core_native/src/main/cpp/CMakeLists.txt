@@ -15,7 +15,7 @@ file(MAKE_DIRECTORY "${TP_LIB_DIR}")
 
 # 证书包（HTTPS 仓库克隆），随 APK assets 打包，运行时通过
 # git_libgit2_opts(GIT_OPT_SET_SSL_CERT_LOCATIONS) 指向解压后的真实路径。
-set(MC_CA_BUNDLE "${CMAKE_CURRENT_SOURCE_DIR}/../../assets/certs/cacert.pem")
+set(MC_CA_BUNDLE "${CMAKE_CURRENT_SOURCE_DIR}/../assets/certs/cacert.pem")
 
 # ------------------------------------------------------------------
 # 第三方构建预设（必须在 add_subdirectory 之前写入 cache）
@@ -84,6 +84,17 @@ add_subdirectory("${TP_DIR}/libgit2")
 if(TARGET libgit2package)
     set_target_properties(libgit2package PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${TP_LIB_DIR}")
 endif()
+
+# Android 平台修正：libgit2 给 util/libgit2 目标硬编码了 C_STANDARD 90 且
+# C_EXTENSIONS OFF（即 -std=c90），而 bionic/NDK 头文件按 C99 编写
+# （如 sysroot 的 linux/swab.h 使用 inline），会导致编译失败：
+#   error: unknown type name 'inline'
+# libgit2 源码本身兼容 C99，此处统一提升到 C99，不修改第三方源码。
+foreach(_t util libgit2 libgit2package)
+    if(TARGET ${_t})
+        set_target_properties(${_t} PROPERTIES C_STANDARD 99)
+    endif()
+endforeach()
 
 # ------------------------------------------------------------------
 # MobileCoder JNI 共享库
