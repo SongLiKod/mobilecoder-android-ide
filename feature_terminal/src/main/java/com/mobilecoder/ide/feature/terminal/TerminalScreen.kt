@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.MoreVert
@@ -87,6 +88,7 @@ import com.mobilecoder.ide.core.common.theme.LocalAppPalette
 import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.feature.git.GitController
 import kotlinx.coroutines.launch
 
 /**
@@ -114,6 +116,12 @@ fun TerminalScreen(
     val activeId by TerminalManager.activeId.collectAsStateWithLifecycle()
     val errorMessage by TerminalManager.error.collectAsStateWithLifecycle()
     val noticeMessage by TerminalManager.notice.collectAsStateWithLifecycle()
+    val gitHead by GitController.head.collectAsStateWithLifecycle()
+
+    // ---- 绑定仓库：拿到当前分支（非 Git 仓库时 head 为 null，徽标隐藏） ----
+    LaunchedEffect(projectPath) {
+        runCatching { GitController.bind(projectPath) }
+    }
 
     val active = sessions.firstOrNull { it.id == activeId } ?: sessions.firstOrNull()
 
@@ -267,6 +275,15 @@ fun TerminalScreen(
                         tint = MaterialTheme.colorScheme.onSurface,
                     )
                 }
+            }
+            gitHead?.branch?.takeIf { it.isNotBlank() }?.let { branch ->
+                BranchBadge(
+                    branch = branch,
+                    ahead = gitHead?.ahead ?: 0,
+                    behind = gitHead?.behind ?: 0,
+                    detached = gitHead?.detached == true,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
             }
             IconButton(onClick = { menuOpen = true }) {
                 Icon(
@@ -553,6 +570,56 @@ fun TerminalScreen(
 // ---------------------------------------------------------------------------
 // 会话标签
 // ---------------------------------------------------------------------------
+
+/** 当前分支徽标（分支图标 + 名称 + 领先/落后计数；非仓库时由调用方隐藏）。 */
+@Composable
+private fun BranchBadge(
+    branch: String,
+    ahead: Int,
+    behind: Int,
+    detached: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val tint = MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Default.AccountTree,
+                contentDescription = "当前分支",
+                tint = tint,
+                modifier = Modifier
+                    .padding(start = 6.dp)
+                    .size(12.dp),
+            )
+            Text(
+                text = if (detached) "HEAD ($branch)" else branch,
+                style = MaterialTheme.typography.labelSmall,
+                color = tint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .padding(start = 4.dp, end = 6.dp)
+                    .widthIn(max = 110.dp),
+            )
+            if (ahead > 0 || behind > 0) {
+                Text(
+                    text = buildString {
+                        if (ahead > 0) append("↑$ahead")
+                        if (behind > 0) append(" ↓$behind")
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    modifier = Modifier.padding(end = 6.dp),
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun TerminalTab(

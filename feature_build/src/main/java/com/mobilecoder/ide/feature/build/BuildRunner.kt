@@ -4,7 +4,7 @@ import android.app.ActivityManager
 import android.content.Context
 import android.util.Log
 import com.mobilecoder.ide.core.common.cli.CliCommand
-import com.mobilecoder.ide.core.common.cli.OpencodeCli
+import com.mobilecoder.ide.core.common.cli.AptCli
 import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
@@ -35,10 +35,10 @@ import org.json.JSONObject
  *  3. `CliNative.exec("sh -c …")` 执行 Gradle，注入 JAVA_HOME / ANDROID_HOME / GRADLE_USER_HOME 等环境；
  *  4. 内存监控 [memory]：超限或系统已用 >90% 自动 kill，避免 OOM 崩溃；
  *  5. 前台服务保活 + 完成通知（[BuildForegroundService]）；
- *  6. 向 OpencodeCli 注册 `build` / `package`（group="构建"）。
+ *  6. 向 AptCli 注册 `build` / `package`（group="构建"）。
  *
  * **防自锁**：UI 按钮与 CLI 命令都只走 [start]（进程级单入口），
- * 不会再调用 `OpencodeCli.run`，因此不会与引擎自身的 Mutex 队列互相等待。
+ * 不会再调用 `AptCli.run`，因此不会与引擎自身的 Mutex 队列互相等待。
  *
  * 线程模型：JNI 回调发生在子进程读线程，只更新 StateFlow（快照不可变），
  * Compose 在主线程收集 —— UI 更新天然回到主线程。
@@ -158,15 +158,15 @@ object BuildRunner {
     }
 
     // ------------------------------------------------------------------
-    // CLI 命令注册（opencode build / opencode package）
+    // CLI 命令注册（apt build / apt package）
     // ------------------------------------------------------------------
 
     private fun registerCliCommands() {
-        OpencodeCli.register(
+        AptCli.register(
             CliCommand(
                 name = "build",
                 summary = "项目编译（Gradle assembleDebug/assembleRelease）",
-                usage = "opencode build [--release] [clean]",
+                usage = "apt build [--release] [clean]",
                 group = "构建",
             ) { args, cwd, emit ->
                 val variant = if (args.any { it.equals("--release", true) || it.equals("release", true) }) {
@@ -179,11 +179,11 @@ object BuildRunner {
                 awaitBuild(BuildRequest(cwd, variant, clean, extra), emit)
             },
         )
-        OpencodeCli.register(
+        AptCli.register(
             CliCommand(
                 name = "package",
                 summary = "打包 APK（等价 assemble 并列出产物）",
-                usage = "opencode package [--debug]",
+                usage = "apt package [--debug]",
                 group = "构建",
             ) { args, cwd, emit ->
                 val variant = if (args.any { it.equals("--debug", true) || it.equals("debug", true) }) {
@@ -195,11 +195,11 @@ object BuildRunner {
                 awaitBuild(BuildRequest(cwd, variant, false, extra), emit)
             },
         )
-        OpencodeCli.register(
+        AptCli.register(
             CliCommand(
                 name = "tools",
                 summary = "软件安装（Node.js / AI CLI / npm 源里的任意软件）",
-                usage = "opencode tools [install|uninstall|update|list|search] [<软件名>…]",
+                usage = "apt tools [install|uninstall|update|list|search] [<软件名>…]",
                 group = "系统",
             ) { args, _, emit ->
                 val source = runCatching {
@@ -225,7 +225,7 @@ object BuildRunner {
 
                     "search", "find" -> {
                         if (rest.isEmpty() || rest.any { !ToolInstaller.validToken(it) }) {
-                            emit("用法：opencode tools search <关键字>…")
+                            emit("用法：apt tools search <关键字>…")
                             1
                         } else {
                             ToolInstaller.search(appContext, source, emit, rest)
@@ -253,7 +253,7 @@ object BuildRunner {
                         }
 
                         rest.isEmpty() -> {
-                            emit("用法：opencode tools uninstall <软件名>…")
+                            emit("用法：apt tools uninstall <软件名>…")
                             1
                         }
 
@@ -332,7 +332,7 @@ object BuildRunner {
     // 构建入口
     // ------------------------------------------------------------------
 
-    /** 是否为可构建的 Gradle 工程（缺骨架时给出 `opencode init` 引导）。 */
+    /** 是否为可构建的 Gradle 工程（缺骨架时给出 `apt init` 引导）。 */
     fun isGradleProject(dir: File): Boolean =
         listOf("settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts", "gradlew")
             .any { File(dir, it).exists() }
@@ -473,7 +473,7 @@ object BuildRunner {
             return fail(
                 task, startedAt,
                 "未检测到 Gradle 工程（缺少 settings.gradle / build.gradle / gradlew）。" +
-                    "可在 CLI 面板执行 `opencode init` 生成安卓项目骨架后重试",
+                    "可在 CLI 面板执行 `apt init` 生成安卓项目骨架后重试",
             )
         }
 
@@ -1087,7 +1087,7 @@ object BuildRunner {
     /** 附加 Gradle 任务名校验（默认无附加任务，只有用户显式输入时才生效）。 */
     private fun isSafeTaskName(value: String): Boolean {
         if (value.isBlank() || value.startsWith("-")) return false
-        if (value.startsWith("opencode")) return false
+        if (value.startsWith("apt")) return false
         return value.matches(Regex("""^[A-Za-z0-9_.:\-]+$"""))
     }
 

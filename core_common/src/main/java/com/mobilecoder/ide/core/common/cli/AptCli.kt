@@ -18,17 +18,17 @@ import kotlin.coroutines.coroutineContext
 
 /** 一条 CLI 命令的定义。 */
 data class CliCommand(
-    /** 命令名，例如 `build`（用户输入 `opencode build`）。 */
+    /** 命令名，例如 `build`（用户输入 `apt build`）。 */
     val name: String,
     /** 一句话说明（CLI 面板卡片副标题）。 */
     val summary: String,
-    /** 用法示例，例如 `opencode build [--release]`。 */
-    val usage: String = "opencode $name",
+    /** 用法示例，例如 `apt build [--release]`。 */
+    val usage: String = "apt $name",
     /** 分组（项目 / 代码 / 构建 / 系统），用于面板分栏。 */
     val group: String = "通用",
     /**
      * 是否在终端里拦截同名命令行（如 `git`：Android 设备上没有同名可执行文件，
-     * 由进程内实现接管，见 feature_git/GitCli）。`opencode` 前缀始终拦截。
+     * 由进程内实现接管，见 feature_git/GitCli）。`apt` 前缀始终拦截。
      */
     val terminalIntercept: Boolean = false,
     /**
@@ -48,20 +48,20 @@ data class CliTask(
 )
 
 /**
- * OpenCode 风格 CLI 引擎（PRD 2.4 / TECH 4.3）。
+ * apt 风格 CLI 引擎（PRD 2.4 / TECH 4.3）。
  *
  * 设计要点：
  *  - **命令注册表**：内置命令与各 feature 注册的命令（`build`/`package` 由 feature_build 注册，
  *    `init`/`format`/`lint`/`clean` 由 feature_cli 注册）统一在此汇聚；
  *  - **协程任务队列**：Mutex 串行化，防止多指令并发冲突；
  *  - **实时日志**：`emit` 逐行回调，终端与 CLI 面板共享同一输出通道；
- *  - **两种使用方式**：终端输入 `opencode xxx`（拦截）与可视化面板一键执行。
+ *  - **两种使用方式**：终端输入 `apt xxx`（拦截）与可视化面板一键执行。
  *
  * 引擎位于 core_common，保证 feature_terminal / feature_cli / feature_build 之间无循环依赖。
  */
-object OpencodeCli {
+object AptCli {
 
-    private const val PREFIX = "opencode"
+    private const val PREFIX = "apt"
 
     private val registry = LinkedHashMap<String, CliCommand>()
     private val mutex = Mutex()
@@ -103,14 +103,14 @@ object OpencodeCli {
     @Synchronized
     fun find(name: String): CliCommand? = registry[name]
 
-    /** 是否为 CLI 命令行（终端据此拦截，避免把 `opencode` / `git` 交给 sh）。 */
+    /** 是否为 CLI 命令行（终端据此拦截，避免把 `apt` / `git` 交给 sh）。 */
     fun isCliLine(line: String): Boolean {
         val first = line.trim().split(Regex("\\s+"), limit = 2).firstOrNull() ?: return false
         return first == PREFIX || find(first)?.terminalIntercept == true
     }
 
     /**
-     * 终端拦截器需要识别的全部命令前缀：`opencode` + 标记了 [CliCommand.terminalIntercept]
+     * 终端拦截器需要识别的全部命令前缀：`apt` + 标记了 [CliCommand.terminalIntercept]
      * 的命令（如 `git`）。会话创建时调用，动态反映注册表。
      */
     @Synchronized
@@ -144,7 +144,7 @@ object OpencodeCli {
     /**
      * 执行一行命令。
      *
-     * @param line 完整命令行（可带或不带 `opencode` 前缀）
+     * @param line 完整命令行（可带或不带 `apt` 前缀）
      * @param cwd  工作目录
      * @param emit 输出回调（已切到 IO 线程）
      * @return 退出码
@@ -169,19 +169,19 @@ object OpencodeCli {
         val args = if (tokens.first() == PREFIX) tokens.drop(2) else tokens.drop(1)
 
         if (name.isNullOrBlank()) {
-            emit("MobileCoder OpenCode CLI")
-            emit("用法：opencode <命令> [参数]，`opencode help` 查看全部命令")
+            emit("MobileCoder apt CLI")
+            emit("用法：apt <命令> [参数]，`apt help` 查看全部命令")
             return 0
         }
 
         val command = find(name)
         if (command == null) {
-            emit("opencode: 未找到命令 `$name`")
+            emit("apt: 未找到命令 `$name`")
             val close = commands().filter { it.name.startsWith(name.take(1)) }.take(5)
             if (close.isNotEmpty()) {
-                emit("你是否想执行：${close.joinToString(" ") { "`opencode ${it.name}`" }}")
+                emit("你是否想执行：${close.joinToString(" ") { "`apt ${it.name}`" }}")
             }
-            emit("输入 `opencode help` 查看全部命令")
+            emit("输入 `apt help` 查看全部命令")
             return 127
         }
 
@@ -230,7 +230,7 @@ object OpencodeCli {
         _history.value = next.take(100)
     }
 
-    /** 支持引号：`opencode init "My App"`。 */
+    /** 支持引号：`apt init "My App"`。 */
     private fun tokenize(line: String): List<String> {
         val out = ArrayList<String>()
         val current = StringBuilder()
@@ -263,7 +263,7 @@ object OpencodeCli {
             CliCommand(
                 name = "help",
                 summary = "列出全部命令与用法",
-                usage = "opencode help [命令名]",
+                usage = "apt help [命令名]",
                 group = "系统",
             ) { args, _, emit ->
                 val target = args.firstOrNull()?.let(::find)
@@ -272,7 +272,7 @@ object OpencodeCli {
                     emit("  ${target.summary}")
                     return@CliCommand 0
                 }
-                emit("MobileCoder OpenCode CLI — 移动端开发工具链")
+                emit("MobileCoder apt CLI — 移动端开发工具链")
                 emit("")
                 commands().groupBy { it.group }.forEach { (group, list) ->
                     emit("[$group]")
@@ -287,10 +287,10 @@ object OpencodeCli {
             CliCommand(
                 name = "version",
                 summary = "显示 CLI 版本信息",
-                usage = "opencode version",
+                usage = "apt version",
                 group = "系统",
             ) { _, _, emit ->
-                emit("MobileCoder OpenCode CLI 1.0.0")
+                emit("MobileCoder apt CLI 1.0.0")
                 emit("宿主：Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})")
                 emit("ABI：${android.os.Build.SUPPORTED_ABIS.joinToString()}")
                 0

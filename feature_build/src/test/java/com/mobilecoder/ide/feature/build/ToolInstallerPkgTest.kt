@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * `opencode tools` 通用安装的纯逻辑：
+ * `apt tools` 通用安装的纯逻辑：
  * 简写 → npm 包名解析、包名/关键字合法性（防旗标注入）、
  * `files/lib/node_modules` 全局包扫描（含 `@scope` 与版本解析）。
  */

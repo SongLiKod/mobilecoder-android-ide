@@ -4,7 +4,7 @@
 #   终端引擎   PTY 伪终端（自研 C 实现，libtermux-terminal 风格 JNI 封装）
 #   Git 底层   libgit2 静态编译（不依赖系统 Git）
 #   SSH 底层   libssh2 静态编译（+ mbedTLS 加密后端；密钥生成由 BouncyCastle 完成）
-#   CLI 工具   OpenCode 移动端静态二进制的执行支撑
+#   CLI 工具   apt 移动端静态二进制的执行支撑
 #
 cmake_minimum_required(VERSION 3.18)
 project(mobilecoder LANGUAGES C CXX)

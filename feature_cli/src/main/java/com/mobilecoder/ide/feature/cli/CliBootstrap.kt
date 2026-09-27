@@ -1,7 +1,7 @@
 package com.mobilecoder.ide.feature.cli
 
 import com.mobilecoder.ide.core.common.cli.CliCommand
-import com.mobilecoder.ide.core.common.cli.OpencodeCli
+import com.mobilecoder.ide.core.common.cli.AptCli
 import java.io.File
 
 /**
@@ -21,7 +21,7 @@ object CliBootstrap {
         if (done) return
         synchronized(this) {
             if (done) return
-            OpencodeCli.registerAll(builtinCommands())
+            AptCli.registerAll(builtinCommands())
             done = true
         }
     }
@@ -31,7 +31,7 @@ object CliBootstrap {
         CliCommand(
             name = "init",
             summary = "初始化项目骨架（安卓 / Kotlin CLI / Vue / HTML / Node / Flutter / 空目录）",
-            usage = "opencode init [--android|--cli|--vue|--html|--node|--flutter|--empty]",
+            usage = "apt init [--android|--cli|--vue|--html|--node|--flutter|--empty]",
             group = "项目",
         ) { args, cwd, emit ->
             val template = when {
@@ -60,7 +60,7 @@ object CliBootstrap {
                     com.mobilecoder.ide.core.storage.ProjectTemplate.STATIC_HTML ->
                         emit("下一步：打开 index.html，或 `npx serve .` 启动静态服务器")
 
-                    else -> emit("下一步：`opencode lint` 检查，`opencode build` 编译")
+                    else -> emit("下一步：`apt lint` 检查，`apt build` 编译")
                 }
             }
             0
@@ -70,7 +70,7 @@ object CliBootstrap {
         CliCommand(
             name = "format",
             summary = "统一代码格式：行尾空白、缩进、文件末尾换行",
-            usage = "opencode format [目录]",
+            usage = "apt format [目录]",
             group = "代码",
         ) { args, cwd, emit ->
             val root = if (args.isNotEmpty()) File(cwd, args.first()) else cwd
@@ -99,7 +99,7 @@ object CliBootstrap {
         CliCommand(
             name = "lint",
             summary = "静态检查：括号配对、冲突标记、超长行、行尾空白",
-            usage = "opencode lint [目录]",
+            usage = "apt lint [目录]",
             group = "代码",
         ) { args, cwd, emit ->
             val root = if (args.isNotEmpty()) File(cwd, args.first()) else cwd
@@ -124,7 +124,7 @@ object CliBootstrap {
         CliCommand(
             name = "clean",
             summary = "清理构建缓存（build/、.gradle/、.cxx/）",
-            usage = "opencode clean",
+            usage = "apt clean",
             group = "构建",
         ) { _, cwd, emit ->
             val targets = listOf("build", "app/build", ".gradle", ".cxx", ".kotlin")
@@ -148,7 +148,7 @@ object CliBootstrap {
         CliCommand(
             name = "doctor",
             summary = "环境体检：存储、JDK/Gradle/SDK、Native 引擎状态",
-            usage = "opencode doctor",
+            usage = "apt doctor",
             group = "系统",
         ) { _, _, emit ->
             val storage = com.mobilecoder.ide.core.storage.AppStorage.paths
@@ -186,7 +186,7 @@ object CliBootstrap {
         CliCommand(
             name = "ls",
             summary = "列出目录内容",
-            usage = "opencode ls [路径]",
+            usage = "apt ls [路径]",
             group = "系统",
         ) { args, cwd, emit ->
             val dir = if (args.isNotEmpty()) File(cwd, args.first()) else cwd
@@ -206,11 +206,11 @@ object CliBootstrap {
         CliCommand(
             name = "cat",
             summary = "打印文件内容（前 200 行）",
-            usage = "opencode cat <路径>",
+            usage = "apt cat <路径>",
             group = "系统",
         ) { args, cwd, emit ->
             if (args.isEmpty()) {
-                emit("用法：opencode cat <路径>")
+                emit("用法：apt cat <路径>")
                 return@CliCommand 1
             }
             val file = File(cwd, args.first())

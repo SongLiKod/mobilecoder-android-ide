@@ -3,7 +3,7 @@ package com.mobilecoder.ide.feature.terminal
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import com.mobilecoder.ide.core.common.cli.OpencodeCli
+import com.mobilecoder.ide.core.common.cli.AptCli
 import com.mobilecoder.ide.core.nativebridge.TerminalCallback
 import com.mobilecoder.ide.core.nativebridge.TerminalNative
 import java.io.ByteArrayOutputStream
@@ -27,7 +27,7 @@ enum class TerminalSpecialKey { ESC, TAB, UP, DOWN, LEFT, RIGHT, HOME, END }
  * 一个独立的终端会话（PRD 2.3「多终端窗口并行」）。
  *
  * 每个会话持有：独立 PTY（native 层 sessionId）、独立屏幕缓冲 [emulator]、
- * 独立的 opencode 拦截器与滚动日志；切换标签即切换视图，进程级单例持有故
+ * 独立的 apt 拦截器与滚动日志；切换标签即切换视图，进程级单例持有故
  * 切走底部导航再回来仍在运行（后台长时间任务不中断）。
  *
  * 线程约定：
@@ -77,10 +77,9 @@ class TerminalSession(
     private val _cliRunning = MutableStateFlow(false)
     val cliRunning: StateFlow<Boolean> = _cliRunning.asStateFlow()
 
-    /** 命令拦截器（前缀缓冲 + 本地回显 + 回滚；目标来自 CLI 注册表：opencode / git）。 */
-    private val interceptor = OpencodeInterceptor(
-        targets = { OpencodeCli.interceptTargets() },
-        accept = { line -> acceptsBuiltIn(line) },
+    /** 命令拦截器（前缀缓冲 + 本地回显 + 回滚；目标来自 CLI 注册表：apt / git）。 */
+    private val interceptor = AptInterceptor(
+        targets = { AptCli.interceptTargets() },
         onWritePty = { bytes -> writeRaw(bytes) },
         onLocalEcho = { text -> onMain { emulator.feed(text) } },
         onRollback = { count -> onMain { emulator.erasePrinted(count) } },
@@ -151,7 +150,7 @@ class TerminalSession(
         if (value == 3) {
             interceptor.interrupt()
             // 进程内 CLI 正在执行（命令没交给 PTY，shell 那边无事可中断）→ 取消它
-            if (_cliRunning.value && runCatching { OpencodeCli.cancelCurrent() }.getOrDefault(false)) {
+            if (_cliRunning.value && runCatching { AptCli.cancelCurrent() }.getOrDefault(false)) {
                 postEmit("^C")
                 return
             }
@@ -163,34 +162,20 @@ class TerminalSession(
     fun sendBackspace() = interceptor.backspace()
 
     // ------------------------------------------------------------------
-    // opencode CLI（PRD 2.4：终端手动输入）
+    // 进程内 CLI（PRD 2.4：终端手动输入）
     // ------------------------------------------------------------------
-
-    /**
-     * Enter 二次校验：`opencode <子命令>` 未注册但已安装外部 opencode CLI
-     *（`opencode tools install` 装的 `files/bin/opencode`）时交回 shell，
-     * 让 npm 安装的真实 CLI 在 PTY 里可交互运行；其余仍走进程内引擎。
-     */
-    private fun acceptsBuiltIn(line: String): Boolean {
-        val tokens = line.trim().split(Regex("\\s+"))
-        if (tokens.firstOrNull() != "opencode") return true
-        val sub = tokens.getOrNull(1) ?: return true
-        if (sub.startsWith("-")) return true
-        if (OpencodeCli.find(sub) != null) return true
-        return !TerminalManager.externalBinExists("opencode")
-    }
 
     /**
      * CLI 执行（PRD 2.4：终端手动输入）。
      *
-     * 拦截器保证命令首词是 `opencode` 或已注册的进程内命令（如 `git`），
-     * 统一交给 OpencodeCli 按首词分发。
+     * 拦截器保证命令首词是 `apt` 或已注册的进程内命令（如 `git`），
+     * 统一交给 AptCli 按首词分发。
      */
     private fun runCli(commandLine: String) {
         // 命令本身已本地回显：换行开始输出
         onMain { emulator.feed("\r\n") }
 
-        if (!OpencodeCli.isIdle) {
+        if (!AptCli.isIdle) {
             onMain { emulator.feed("已有命令在执行中，请稍候再试\r\n") }
             writeRaw(BYTE_CR) // 让 shell 重新打印提示符
             return
@@ -200,7 +185,7 @@ class TerminalSession(
         _cliRunning.value = true
         scope.launch(Dispatchers.IO) {
             try {
-                OpencodeCli.run(commandLine, cwdFile) { line -> postEmit(line) }
+                AptCli.run(commandLine, cwdFile) { line -> postEmit(line) }
             } catch (e: CancellationException) {
                 // Ctrl+C 取消：引擎已回显「命令已取消」，这里不重复报错
                 throw e

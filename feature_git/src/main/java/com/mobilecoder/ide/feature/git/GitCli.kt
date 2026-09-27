@@ -1,7 +1,7 @@
 package com.mobilecoder.ide.feature.git
 
 import com.mobilecoder.ide.core.common.cli.CliCommand
-import com.mobilecoder.ide.core.common.cli.OpencodeCli
+import com.mobilecoder.ide.core.common.cli.AptCli
 import com.mobilecoder.ide.core.nativebridge.GitNative
 import java.io.File
 import java.text.SimpleDateFormat
@@ -72,7 +72,7 @@ object GitCli {
      * CLI 面板也会出现「版本控制」分组的 git 命令）。由 `GitController.init` 调用。
      */
     fun register() {
-        OpencodeCli.register(
+        AptCli.register(
             CliCommand(
                 name = "git",
                 summary = "Git 子命令（进程内 libgit2，Android 无 git 二进制）",
@@ -82,7 +82,7 @@ object GitCli {
             ) { args, cwd, emit -> execute(args, cwd, emit) },
         )
         // 用户点「停止」/ Ctrl+C 时，同时中止可能阻塞在 native 里的 fetch / push
-        OpencodeCli.onCancel = { GitNative.cancelNetwork() }
+        AptCli.onCancel = { GitNative.cancelNetwork() }
     }
 
     // ------------------------------------------------------------------

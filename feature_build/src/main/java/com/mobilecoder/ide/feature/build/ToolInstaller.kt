@@ -9,7 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * 终端软件安装（`opencode tools …`）：以 npm registry 为源，源里有的软件都能装。
+ * 终端软件安装（`apt tools …`）：以 npm registry 为源，源里有的软件都能装。
  *
  * 一键流程（[install] 不带包名，或带包名安装任意软件）：
  *  1. Node.js 未就绪 → [EnvDownloader.install] 在线下载并生成 `files/bin` 的 node/npm/npx 入口；
@@ -90,7 +90,7 @@ object ToolInstaller {
         return if (version != null) "$name@$version" else name
     }
 
-    /** 状态明细（`opencode tools` 无参输出）。 */
+    /** 状态明细（`apt tools` 无参输出）。 */
     fun statusLines(context: Context): List<String> {
         val files = context.filesDir
         val node = File(BuildEnvironment.sdkDir(context), "node/bin/node")
@@ -99,7 +99,7 @@ object ToolInstaller {
             add("—— 终端软件 ——")
             add(
                 "  Node.js    " + if (node.exists()) "就绪"
-                else "未安装（`opencode tools install` 在线下载）",
+                else "未安装（`apt tools install` 在线下载）",
             )
             add("  npm prefix ${files.absolutePath}（-g 全局包 → files/bin，PATH 已含）")
             if (installed.isEmpty()) {
@@ -113,7 +113,7 @@ object ToolInstaller {
         }
     }
 
-    /** `opencode tools list` 输出。 */
+    /** `apt tools list` 输出。 */
     fun listLines(context: Context): List<String> {
         val installed = installedPackages(File(context.filesDir, "lib/node_modules"))
         if (installed.isEmpty()) return listOf("（无已安装的全局软件）")
@@ -124,9 +124,9 @@ object ToolInstaller {
     fun usageLines(): List<String> = buildList { addUsageLines(this) }
 
     private fun addUsageLines(list: MutableList<String>) {
-        list += "安装：opencode tools install <软件名>…（npm 源里的任意软件，支持简写 gemini/codex/qwen）"
-        list += "一键：opencode tools install（Node.js + opencode + claude 全套）"
-        list += "其他：opencode tools uninstall <软件名>… / update / search <关键字> / list"
+        list += "安装：apt tools install <软件名>…（npm 源里的任意软件，支持简写 gemini/codex/qwen）"
+        list += "一键：apt tools install（Node.js + opencode + claude 全套）"
+        list += "其他：apt tools uninstall <软件名>… / update / search <关键字> / list"
         list += "源：官方 npm registry（「构建环境」页可切国内 npmmirror，失败自动回退）"
     }
 
@@ -193,7 +193,7 @@ object ToolInstaller {
                 emit("完成：在终端输入 " + TOOLS.joinToString(" / ") { "`${it.bin}`" } + " 即可使用")
                 0
             } else {
-                emit("[ERROR] 未安装：${missing.joinToString { it.pkg }}，可重试 `opencode tools install`")
+                emit("[ERROR] 未安装：${missing.joinToString { it.pkg }}，可重试 `apt tools install`")
                 1
             }
         } else {
@@ -224,7 +224,7 @@ object ToolInstaller {
             return@withContext 1
         }
         if (packages.isEmpty()) {
-            emit("用法：opencode tools uninstall <软件名>…")
+            emit("用法：apt tools uninstall <软件名>…")
             return@withContext 1
         }
         emit("npm uninstall -g ${packages.joinToString(" ")} …")
@@ -363,17 +363,26 @@ object ToolInstaller {
     }
 
     /**
-     * 修正 `files/bin` 下启动脚本的 shebang：Android 没有 `/bin/sh` 与 `/usr/bin/env`。
-     * npm 生成的 POSIX shim 以 `#!/bin/sh` 开头，部分包的 bin 直接是 `#!/usr/bin/env node`。
+     * 修正 `files/bin` 下启动脚本的 shebang，并为**全部**条目补执行位。
+     *
+     * Android 没有 `/bin/sh` 与 `/usr/bin/env`：npm 生成的 POSIX shim 以 `#!/bin/sh` 开头，
+     * 部分包的 bin 直接是 `#!/usr/bin/env node`。补执行位必须在任何早退之前进行——
+     * 无 shebang、甚至整个文件没有换行的二进制可执行文件同样要在终端里跑起来，
+     * 否则报 `Permission denied`。
      *
      * @return 修正的文件数
      */
     private fun fixBinScripts(context: Context): Int {
         val bin = BuildEnvironment.binDir(context)
-        val node = File(BuildEnvironment.sdkDir(context), "node/bin/node").absolutePath
+        val nodeFile = File(BuildEnvironment.sdkDir(context), "node/bin/node")
+        val node = nodeFile.absolutePath
         var fixed = 0
+        // node 解释器本体（shim 的 shebang 会指向它）
+        runCatching { nodeFile.setExecutable(true, false) }
         bin.listFiles()?.forEach { file ->
             if (!file.isFile) return@forEach
+            // 先补执行位：后续内容修正失败或无 shebang 也不能丢执行权限
+            grantExecutable(file)
             val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@forEach
             var nl = -1
             for (i in bytes.indices) {
@@ -397,8 +406,17 @@ object ToolInstaller {
                     fixed++
                 }
             }
-            runCatching { file.setExecutable(true, false) }
         }
         return fixed
+    }
+
+    /**
+     * 补执行位：文件本身 + 符号链接解析后的真实文件。
+     * npm 装到 `files/bin` 的命令常是指向 `lib/node_modules/<包>/bin/<入口>` 的符号链接，
+     * 终端执行时用的是目标文件的权限位。
+     */
+    private fun grantExecutable(file: File) {
+        runCatching { file.setExecutable(true, false) }
+        runCatching { file.canonicalFile.setExecutable(true, false) }
     }
 }

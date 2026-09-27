@@ -139,7 +139,8 @@ object TerminalManager {
 
     /**
      * `files/bin/<name>` 是否存在（npm 全局安装的外部 CLI，如 opencode-ai 的 `opencode`）。
-     * 拦截器据此决定：未注册的 `opencode <子命令>` 交回 shell 还是进程内报错。
+     * 内建前缀已改为 `apt`，外部 `opencode` 不再与内建命令冲突：输入 `opencode …`
+     * 会直通 shell 直接运行该二进制。
      */
     fun externalBinExists(name: String): Boolean = runCatching {
         val ctx = appContext ?: return false

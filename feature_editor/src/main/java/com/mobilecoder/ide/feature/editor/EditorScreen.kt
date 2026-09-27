@@ -14,12 +14,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FindInPage
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
@@ -60,6 +64,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mobilecoder.ide.core.common.theme.LocalAppPalette
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.feature.git.GitController
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -79,6 +84,8 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
     }
     LaunchedEffect(projectPath) {
         EditorController.setProject(projectPath)
+        // 绑定仓库：拿到当前分支（非 Git 仓库时 head 为 null，徽标隐藏）
+        runCatching { GitController.bind(projectPath) }
     }
 
     val tabs by EditorController.tabs.collectAsStateWithLifecycle()
@@ -88,6 +95,7 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
     val search by EditorController.search.collectAsStateWithLifecycle()
     val message by EditorController.message.collectAsStateWithLifecycle()
     val history by EditorController.history.collectAsStateWithLifecycle()
+    val gitHead by GitController.head.collectAsStateWithLifecycle()
     val palette = LocalAppPalette.current
     val colors = remember(palette) { highlightColorsOf(palette) }
 
@@ -132,6 +140,15 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
                 onClose = { EditorController.closeTab(it) },
                 modifier = Modifier.weight(1f),
             )
+            gitHead?.branch?.takeIf { it.isNotBlank() }?.let { branch ->
+                BranchBadge(
+                    branch = branch,
+                    ahead = gitHead?.ahead ?: 0,
+                    behind = gitHead?.behind ?: 0,
+                    detached = gitHead?.detached == true,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+            }
             if (searchOpen) {
                 IconButton(onClick = {
                     searchOpen = false
@@ -359,6 +376,57 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
 // ---------------------------------------------------------------------------
 // 编辑器本体
 // ---------------------------------------------------------------------------
+
+/** 当前分支徽标（分支图标 + 名称 + 领先/落后计数；非仓库时由调用方隐藏）。 */
+@Composable
+private fun BranchBadge(
+    branch: String,
+    ahead: Int,
+    behind: Int,
+    detached: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val tint = MaterialTheme.colorScheme.onSurfaceVariant
+    Box(
+        modifier = modifier.background(
+            MaterialTheme.colorScheme.surfaceVariant,
+            RoundedCornerShape(6.dp),
+        ),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Default.AccountTree,
+                contentDescription = "当前分支",
+                tint = tint,
+                modifier = Modifier
+                    .padding(start = 6.dp)
+                    .size(12.dp),
+            )
+            Text(
+                text = if (detached) "HEAD ($branch)" else branch,
+                style = MaterialTheme.typography.labelSmall,
+                color = tint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .padding(start = 4.dp, end = 6.dp)
+                    .widthIn(max = 110.dp),
+            )
+            if (ahead > 0 || behind > 0) {
+                Text(
+                    text = buildString {
+                        if (ahead > 0) append("↑$ahead")
+                        if (behind > 0) append(" ↓$behind")
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    modifier = Modifier.padding(end = 6.dp),
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun EditorBody(
