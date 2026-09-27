@@ -11,6 +11,7 @@ import com.mobilecoder.ide.feature.cli.CliController
 import com.mobilecoder.ide.feature.git.GitController
 import com.mobilecoder.ide.feature.ssh.SshController
 import com.mobilecoder.ide.feature.terminal.TerminalManager
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,6 +41,24 @@ class MobileCoderApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // 0) 崩溃留痕：Java 异常写入文件，便于事后定位（原生 SIGSEGV 仍看 tombstone）
+        runCatching {
+            val previous = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                runCatching {
+                    val dir = File(filesDir, "crash")
+                    if (!dir.exists()) dir.mkdirs()
+                    File(dir, "last_crash.txt").writeText(
+                        "${java.util.Date()}\n" +
+                            "thread=${thread.name}\n" +
+                            "$throwable\n" +
+                            throwable.stackTraceToString(),
+                    )
+                }
+                previous?.uncaughtException(thread, throwable)
+            }
+        }
 
         // 1) 数据层
         AppStorage.init(this)

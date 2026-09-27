@@ -65,18 +65,24 @@ class OpencodeInterceptor(
             val c = text[i]
             when (mode) {
                 Mode.IDLE -> {
-                    // 规则 a：首字符必须是某个目标命令的首字符，否则整行直通
-                    val seed = targets().filter { it.startsWith(c) }
-                    if (seed.isEmpty()) {
-                        mode = Mode.PASSTHROUGH
-                        onWritePty(text.substring(i).toByteArray())
-                        return
+                    // 行首空白直接忽略：不影响 shell 语义，也不破坏拦截判定（“ git …” 仍可拦截）
+                    if (c.isWhitespace()) {
+                        i++
+                    } else {
+                        // 规则 a：首字符必须是某个目标命令的首字符，否则整行直通
+                        val seed = targets().filter { it.startsWith(c) }
+                        if (seed.isEmpty()) {
+                            mode = Mode.PASSTHROUGH
+                            onWritePty(text.substring(i).toByteArray())
+                            return
+                        }
+                        candidates = seed
+                        mode = Mode.PREFIX
+                        line.append(c)
+                        onLocalEcho(c.toString())
+                        markMatchedIfComplete()
+                        i++
                     }
-                    candidates = seed
-                    line.append(c)
-                    onLocalEcho(c.toString())
-                    markMatchedIfComplete()
-                    i++
                 }
 
                 Mode.PREFIX -> {

@@ -380,15 +380,54 @@ private fun HomeScreen(
             onClone = { url, branch, target ->
                 cloneNotice = null
                 scope.launch {
-                    val ok = runCatching { GitController.clone(url, target, branch) }
+                    val dir = File(target)
+                    val hasFiles = dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
+
+                    // ① 目标已存在（上次克隆已完成但当时没登记成功）→ 直接登记并打开
+                    if (hasFiles) {
+                        if (File(dir, ".git").exists()) {
+                            val existing = AppStorage.projects.adopt(dir)
+                            if (existing != null) {
+                                showClone = false
+                                AppStorage.projects.markOpened(existing.relativePath)
+                                AppState.open(existing)
+                                projects = AppStorage.projects.list()
+                                onOpenProject()
+                                return@launch
+                            }
+                            cloneNotice = "目录里已是 Git 仓库，但不在项目目录内，无法加入列表：$target"
+                        } else {
+                            cloneNotice = "目标目录已存在且不是 Git 仓库：$target\n（请换一个目标目录）"
+                        }
+                        return@launch
+                    }
+
+                    // ② 先登记再克隆：克隆过程中即使异常退出，项目也已经在列表里
+                    runCatching {
+                        dir.parentFile?.mkdirs()
+                        dir.mkdirs()
+                    }
+                    val registered = runCatching { AppStorage.projects.adopt(dir) }.getOrNull()
+                    val ok = runCatching { GitController.cloneOnly(url, target, branch) }
                         .getOrDefault(false)
                     if (!ok) {
                         val text = GitController.message.value?.text
                         GitController.clearMessage()
-                        cloneNotice = text ?: "克隆失败：请检查仓库地址与网络"
+                        val hint = if (registered != null) {
+                            "\n（目录已登记到项目列表，可删除后重试）"
+                        } else {
+                            ""
+                        }
+                        cloneNotice = (text ?: "克隆失败：请检查仓库地址与网络") + hint
+                        // 空壳目录不留垃圾：登记过且没拉下任何文件 → 撤销登记
+                        if (registered != null && dir.listFiles()?.isEmpty() != false) {
+                            runCatching { AppStorage.projects.delete(registered.relativePath) }
+                        }
                         return@launch
                     }
-                    val meta = runCatching { AppStorage.projects.adopt(File(target)) }.getOrNull()
+
+                    val meta = runCatching { AppStorage.projects.adopt(dir) }.getOrNull()
+                        ?: registered
                     if (meta == null) {
                         // 克隆成功但目录不在项目目录内：无法登记为项目
                         cloneNotice = "克隆完成：$target\n（不在项目目录内，未加入项目列表）"

@@ -167,6 +167,21 @@ fun GitScreen(
             onClone = { url, branch, target ->
                 showClone = false
                 scope.launch {
+                    val dir = File(target)
+                    // 目标已存在且是 Git 仓库（上次克隆成功但没登记）→ 直接登记，不再重新拉取
+                    if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true &&
+                        File(dir, ".git").exists()
+                    ) {
+                        val existing = runCatching { AppStorage.projects.adopt(dir) }.getOrNull()
+                        GitController.notify(
+                            if (existing != null) {
+                                "目标目录已是 Git 仓库：已加入项目列表（在「项目」页可打开）"
+                            } else {
+                                "目标目录已是 Git 仓库，但不在项目目录内：$target"
+                            },
+                        )
+                        return@launch
+                    }
                     val ok = runCatching { GitController.clone(url, target, branch) }
                         .getOrDefault(false)
                     // 克隆结果登记为项目（克隆下来的目录本身就是项目，可在「项目」页打开）

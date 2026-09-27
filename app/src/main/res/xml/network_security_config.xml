@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 默认禁用明文流量；仅放行本地回环地址，便于接入本机 Ollama 等免 HTTPS 的 AI 服务 -->
+<!--
+  允许明文 HTTP：AI 服务常部署在局域网 / 本机（192.168.x.x、10.x、127.0.0.1、Ollama 等），
+  而 network-security-config 只支持按域名精确放行、不支持网段(CIDR)，因此整体放开。
+  注意：HTTP 为明文传输，走公网的服务请务必填写 https:// 地址，避免 API Key 泄露。
+-->
 <network-security-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">127.0.0.1</domain>
-        <domain includeSubdomains="false">localhost</domain>
-        <domain includeSubdomains="false">10.0.2.2</domain>
-    </domain-config>
-    <base-config cleartextTrafficPermitted="false" />
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

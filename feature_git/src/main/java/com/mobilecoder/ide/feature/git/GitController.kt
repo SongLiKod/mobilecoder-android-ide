@@ -489,6 +489,49 @@ object GitController {
             }
         }
 
+    /**
+     * 纯克隆（首页「克隆为新项目」入口用）：只下载工作区，**不打开仓库、不刷新 Git 页数据**，
+     * 并在结束时把 native 句柄还原回执行前的仓库。
+     *
+     * 相比 [clone]，去掉了克隆完成后的 openRepo / 全量 refresh（大仓库上开销与风险最高），
+     * 克隆成功后由调用方自行登记项目；失败原因写入 [message]。
+     */
+    suspend fun cloneOnly(url: String, targetPath: String, branch: String): Boolean =
+        withRepo(false) {
+            withBusy(false) {
+                if (!ensureEngine()) return@withBusy false
+                if (url.isBlank() || targetPath.isBlank()) {
+                    postError("克隆地址与目标目录不能为空")
+                    return@withBusy false
+                }
+                val prev = runCatching { GitNative.workdirPath() }.getOrDefault("")
+                _progressLog.value = emptyList()
+                _progress.value = GitProgress("clone", url, -1, -1)
+                try {
+                    if (!prepareCredentials(url)) return@withBusy false
+                    val rc = try {
+                        GitNative.clone(url.trim(), targetPath.trim(), branch.trim())
+                    } finally {
+                        runCatching { GitNative.clearCredentials() }
+                    }
+                    if (rc != 0) {
+                        postError("克隆失败：" + nativeError("请检查地址与网络"))
+                        false
+                    } else {
+                        true
+                    }
+                } finally {
+                    // git_clone 会替换全局句柄，必须还原给 Git 页
+                    restoreHandle(prev)
+                }
+            }
+        }
+
+    /** 供 feature 页面发一条横幅提示（成功/失败）。 */
+    fun notify(text: String, error: Boolean = false) {
+        if (error) postError(text) else postInfo(text)
+    }
+
     // ---------------- 变更：状态 / 暂存 / 提交 ----------------
 
     suspend fun stage(path: String): Boolean = withRepo(false) {

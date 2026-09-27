@@ -32,6 +32,9 @@
 #define MC_FIELD_SEP  '\x01'
 #define MC_REC_SEP    '\n'
 
+/* 引用名缓冲上限（与 libgit2 GIT_REFNAME_MAX 对齐；公开头文件未导出该宏） */
+#define MC_REFNAME_MAX 1024
+
 /* 状态位掩码（git_status_t） */
 #define MC_STATUS_INDEX_MASK 0x001Fu   /* bit0..bit4 */
 #define MC_STATUS_WT_MASK    0x1F80u   /* bit7..bit12 */
@@ -1308,15 +1311,18 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_log(
 static void mc_append_branch(mc_sb *sb, git_reference *ref) {
     const char *name = git_reference_shorthand(ref);
     const git_oid *local_id;
-    const char *upstream_name = "";
+    char upstream_name[MC_REFNAME_MAX];
     size_t ahead = 0, behind = 0;
     int is_head;
     git_reference *upstream = NULL;
 
+    upstream_name[0] = '\0';
     is_head = git_branch_is_head(ref);
 
     if (git_branch_upstream(&upstream, ref) == 0 && upstream != NULL) {
-        upstream_name = git_reference_shorthand(upstream);
+        /* shorthand 指向 upstream 内部内存，必须先拷贝再 free */
+        snprintf(upstream_name, sizeof(upstream_name), "%s",
+                 git_reference_shorthand(upstream));
         local_id = git_reference_target(ref);
         if (local_id != NULL && git_reference_target(upstream) != NULL) {
             git_graph_ahead_behind(&ahead, &behind, g_repo,
@@ -1383,9 +1389,13 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_currentBranch(JNIEnv *env, 
     mc_clear_error();
 
     if (git_repository_head(&head, g_repo) == 0 && head != NULL) {
-        name = git_reference_shorthand(head);
+        /* shorthand 指向 head 内部内存，必须先拷贝再 free */
+        char buf[MC_REFNAME_MAX];
+        snprintf(buf, sizeof(buf), "%s", git_reference_shorthand(head));
         git_reference_free(head);
-    } else if (git_repository_head_detached(g_repo) == 1) {
+        return mc_cstr_to_jstring(env, buf);
+    }
+    if (git_repository_head_detached(g_repo) == 1) {
         name = "HEAD";
     } else {
         name = "";
@@ -1397,10 +1407,13 @@ JNIEXPORT jstring JNICALL
 Java_com_mobilecoder_ide_core_nativebridge_GitNative_headInfo(JNIEnv *env, jclass clazz) {
     (void) clazz;
     git_reference *head = NULL;
-    const char *name = "";
+    char name[MC_REFNAME_MAX];
     int detached = 0, unborn = 0;
     size_t ahead = 0, behind = 0;
     mc_sb sb;
+
+    name[0] = '\0';
+    sb_init(&sb);
 
     if (!mc_require_repo()) {
         return mc_cstr_to_jstring(env, "");
@@ -1408,7 +1421,8 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_headInfo(JNIEnv *env, jclas
     mc_clear_error();
 
     if (git_repository_head(&head, g_repo) == 0 && head != NULL) {
-        name = git_reference_shorthand(head);
+        /* shorthand 指向 head 内部内存，必须在 free 之前拷贝 */
+        snprintf(name, sizeof(name), "%s", git_reference_shorthand(head));
         detached = git_repository_head_detached(g_repo) == 1;
         if (!detached && git_reference_target(head) != NULL) {
             git_reference *upstream = NULL;

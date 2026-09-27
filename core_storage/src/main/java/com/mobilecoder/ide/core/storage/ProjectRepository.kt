@@ -114,7 +114,16 @@ class ProjectRepository(
             it.relativePath == relative ||
                 runCatching { File(paths.projects, it.relativePath).canonicalPath }
                     .getOrDefault("") == canonical.path
-        }?.let { return it }
+        }?.let { existing ->
+            // 预登记时目录还空（模板=空目录）：克隆完成后再登记时补上真实模板
+            val detected = detectTemplate(canonical)
+            if (existing.template == ProjectTemplate.EMPTY && detected != ProjectTemplate.EMPTY) {
+                val upgraded = existing.copy(template = detected)
+                persist(list().map { if (it.relativePath == existing.relativePath) upgraded else it })
+                return upgraded
+            }
+            return existing
+        }
         val meta = ProjectMeta(
             name = name.trim().ifBlank { canonical.name },
             relativePath = relative,
