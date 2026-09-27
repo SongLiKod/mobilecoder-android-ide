@@ -553,14 +553,17 @@ object GitCli {
 
     private suspend fun cmdBranch(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
         repoOp(cwd, emit, syncAfter = true) { root ->
-            /* 旗标解析：支持组合短旗标（-rd / -ra / -vv…），与真 git 一致 */
+            /* 旗标解析：支持组合短旗标（-rd / -ra / -vv…），与真 git 一致；
+             * -u / --set-upstream-to 消耗一个值参数（记录索引，位置参数里剔除该值） */
             var deleting = false
             var forceDelete = false
             var all = false
             var remoteOnly = false
             var verbose = 0
             var listMode = false
-            for (a in args) {
+            var upstreamValue: String? = null
+            var upstreamIdx = -1
+            for ((i, a) in args.withIndex()) {
                 when {
                     a == "--delete" -> deleting = true
                     a == "--all" -> all = true
@@ -578,6 +581,25 @@ object GitCli {
                     a == "-r" -> remoteOnly = true
                     a == "-v" -> verbose = maxOf(verbose, 1)
                     a == "-vv" -> verbose = 2
+                    a == "-u" || a == "--set-upstream-to" -> {
+                        val v = args.getOrNull(i + 1)
+                        if (v == null || v.startsWith("-")) {
+                            emit("error: switch `u' requires a value")
+                            return@repoOp 129
+                        }
+                        upstreamValue = v
+                        upstreamIdx = i + 1
+                    }
+
+                    a.startsWith("--set-upstream-to=") -> {
+                        val v = a.substring("--set-upstream-to=".length)
+                        if (v.isEmpty()) {
+                            emit("error: switch `u' requires a value")
+                            return@repoOp 129
+                        }
+                        upstreamValue = v
+                    }
+
                     a.startsWith("--") -> {
                         emit("error: unknown option `${a.substring(2)}'")
                         return@repoOp 129
@@ -594,6 +616,11 @@ object GitCli {
                             'r' -> remoteOnly = true
                             'a' -> all = true
                             'v' -> verbose += 1
+                            'u' -> {
+                                emit("error: switch `u' requires a value")
+                                return@repoOp 129
+                            }
+
                             else -> {
                                 emit("error: unknown option `-$c'")
                                 return@repoOp 129
@@ -602,11 +629,54 @@ object GitCli {
                     }
                 }
             }
-            val names = positionals(args)
+            /* -u 消耗的值不是分支名：从位置参数中剔除（`git branch -u origin/x dev` → names=[dev]） */
+            val names = args.filterIndexed { idx, a -> idx != upstreamIdx && !a.startsWith("-") }
             val branches = parseBranches(GitNative.branches())
             val head = parseHead(GitNative.headInfo())
 
+            val upstream = upstreamValue
             when {
+                /* git branch -u / --set-upstream-to：校验上游后写 branch.<n>.remote/merge */
+                upstream != null -> {
+                    if (names.size > 1) {
+                        emit("error: too many arguments")
+                        return@repoOp 129
+                    }
+                    val name = names.firstOrNull() ?: head?.branch?.takeIf {
+                        head.detached != true && it.isNotBlank()
+                    }
+                    if (name == null) {
+                        if (head?.detached == true) {
+                            emit("fatal: HEAD is detached")
+                            return@repoOp 128
+                        }
+                        emit("error: branch name required")
+                        return@repoOp 1
+                    }
+                    val exists = if (upstream.contains('/')) {
+                        branches.any { it.isRemote && it.name == "remotes/$upstream" }
+                    } else {
+                        branches.any { !it.isRemote && it.name == upstream }
+                    }
+                    if (!exists) {
+                        upstreamNotFoundLines(upstream).forEach { emit(it) }
+                        return@repoOp 128
+                    }
+                    val remotePart = if (upstream.contains('/')) upstream.substringBefore('/') else "."
+                    val branchPart = if (upstream.contains('/')) upstream.substringAfter('/') else upstream
+                    val ok = runCatching {
+                        GitNative.configSet("branch.$name.remote", remotePart) == 0 &&
+                            GitNative.configSet("branch.$name.merge", "refs/heads/$branchPart") == 0
+                    }.getOrDefault(false)
+                    if (ok) {
+                        emit("branch '$name' set up to track '$upstream'.")
+                        0
+                    } else {
+                        emit("error: 写入上游配置失败：" + lastError())
+                        1
+                    }
+                }
+
                 deleting -> {
                     val target = names.firstOrNull()
                     if (target == null) {
@@ -1024,23 +1094,54 @@ object GitCli {
 
     private suspend fun cmdPush(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
         repoOp(cwd, emit, syncAfter = true) { root ->
+            val setUps = args.any { it == "-u" || it == "--set-upstream" }
             val positional = positionals(args)
-            val remote = pickRemote(positional.getOrNull(0)) ?: run {
+            val head = parseHead(GitNative.headInfo())
+            val branchName = if (head?.detached == true) {
+                null
+            } else {
+                head?.branch?.takeIf { it.isNotBlank() }
+            }
+
+            /* 上游配置（真 git push.default=simple：无显式分支时必须有上游） */
+            val upRemote = if (branchName != null) {
+                runCatching { GitNative.configGet("branch.$branchName.remote") }.getOrDefault("")
+                    .takeIf { it.isNotBlank() && it != "." }
+            } else {
+                null
+            }
+            val upMerge = if (branchName != null) {
+                runCatching { GitNative.configGet("branch.$branchName.merge") }.getOrDefault("")
+            } else {
+                ""
+            }
+            val branchArg = positional.getOrNull(1)
+
+            if (branchArg == null && branchName == null && head?.detached == true) {
+                emit("error: 当前处于分离头指针状态，无法确定推送分支")
+                return@repoOp 1
+            }
+            /* 未显式给分支且无上游 → 真 git 的 fatal 块（exit 128，-u 也不例外） */
+            if (branchArg == null && branchName != null && (upRemote == null || upMerge.isBlank())) {
+                val hintRemote = pickRemote(positional.getOrNull(0) ?: upRemote) ?: "origin"
+                pushNoUpstreamLines(branchName, hintRemote).forEach { emit(it) }
+                return@repoOp 128
+            }
+            val remote = pickRemote(positional.getOrNull(0) ?: upRemote) ?: run {
                 emit("fatal: No configured push destination.")
                 return@repoOp 1
             }
-            val branch = positional.getOrNull(1)
-                ?: parseHead(GitNative.headInfo())?.branch.orEmpty()
+            val branch = branchArg ?: branchName.orEmpty()
             if (branch.isBlank()) {
-                emit("error: 当前处于分离头指针状态，无法确定推送分支")
+                emit("error: 无法确定推送分支")
                 return@repoOp 1
             }
             val url = remoteUrlOf(remote) ?: run {
                 emit("fatal: '$remote' does not appear to be a git remote")
                 return@repoOp 1
             }
-            val current = parseBranches(GitNative.branches()).firstOrNull { it.isHead }
-            if (current != null && current.name == branch && current.ahead == 0 && current.upstream.isNotBlank()) {
+            val headBranch = parseBranches(GitNative.branches()).firstOrNull { it.isHead }
+            if (headBranch != null && headBranch.name == branch && headBranch.ahead == 0 && headBranch.upstream.isNotBlank()) {
                 emit("Everything up-to-date")
                 return@repoOp 0
             }
@@ -1051,6 +1152,18 @@ object GitCli {
                 }
             }
             if (rc == 0) {
+                /* -u / --set-upstream：成功后写上游配置，track 行先于 push 结果（对齐真 git） */
+                if (setUps) {
+                    val ok = runCatching {
+                        GitNative.configSet("branch.$branch.remote", remote) == 0 &&
+                            GitNative.configSet("branch.$branch.merge", "refs/heads/$branch") == 0
+                    }.getOrDefault(false)
+                    if (ok) {
+                        emit("branch '$branch' set up to track '$remote/$branch'.")
+                    } else {
+                        emit("warning: 已推送但写入上游配置失败：" + lastError())
+                    }
+                }
                 emit("To $url")
                 emit("   $branch -> $remote/$branch")
                 0

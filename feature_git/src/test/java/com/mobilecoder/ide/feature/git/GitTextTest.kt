@@ -222,11 +222,31 @@ class GitTextTest {
     }
 
     @Test
-    fun `pull 无上游配置提示块给出配置命令`() {
+    fun `pull 无上游配置提示块与真 git 实测一致`() {
         val lines = pullNoTrackingLines("dev", "origin")
         assertEquals("There is no tracking information for the current branch.", lines.first())
-        assertTrue(lines.contains("    git config branch.dev.remote origin"))
-        assertTrue(lines.contains("    git config branch.dev.merge refs/heads/dev"))
+        assertTrue(lines.contains("See git-pull(1) for details."))
+        assertTrue(lines.contains("    git pull <remote> <branch>"))
+        assertTrue(lines.contains("    git branch --set-upstream-to=origin/<branch> dev"))
+        assertEquals(9, lines.size)
+    }
+
+    @Test
+    fun `push 无上游的 fatal 块给出 set-upstream 命令`() {
+        val lines = pushNoUpstreamLines("dev", "origin")
+        assertEquals("fatal: The current branch dev has no upstream branch.", lines.first())
+        assertTrue(lines.contains("    git push --set-upstream origin dev"))
+        assertTrue(lines.any { it.contains("push.autoSetupRemote") })
+        assertEquals(7, lines.size)
+    }
+
+    @Test
+    fun `上游不存在时的 fatal 与 hint 块与真 git 一致`() {
+        val lines = upstreamNotFoundLines("origin/nope")
+        assertEquals("fatal: the requested upstream branch 'origin/nope' does not exist", lines.first())
+        assertTrue(lines.any { it == "hint:" })
+        assertTrue(lines.any { it.contains("\"git push -u\"") })
+        assertTrue(lines.last().contains("advice.setUpstreamFailure"))
     }
 
     @Test

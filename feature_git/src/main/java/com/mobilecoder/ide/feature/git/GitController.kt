@@ -955,8 +955,13 @@ object GitController {
                 _progress.value = null
             }
             if (rc == 0) {
+                /* IDE 语义等价 `git push -u`：成功即写上游，之后终端 `git pull` 无需配置 */
+                runCatching {
+                    GitNative.configSet("branch.$branch.remote", remote) == 0 &&
+                        GitNative.configSet("branch.$branch.merge", "refs/heads/$branch") == 0
+                }
                 refreshLocked(all = true)
-                postInfo("推送成功：$branch → $remote")
+                postInfo("推送成功：$branch → $remote（已设置上游）")
             } else {
                 postError("推送失败：" + nativeError("请检查凭据与权限"))
             }

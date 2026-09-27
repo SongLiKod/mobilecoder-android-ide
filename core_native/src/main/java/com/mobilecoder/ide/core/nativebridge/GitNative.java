@@ -202,6 +202,9 @@ public final class GitNative {
     /** 读取仓库配置项（如 {@code branch.main.remote}）；未配置返回空串。 */
     public static native String configGet(String key);
 
+    /** 写仓库本地配置项（如上游 {@code branch.<n>.remote}）；0 成功 / -1 失败。 */
+    public static native int configSet(String key, String value);
+
     public static native boolean addRemote(String name, String url);
 
     public static native boolean removeRemote(String name);

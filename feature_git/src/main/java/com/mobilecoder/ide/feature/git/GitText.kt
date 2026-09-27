@@ -178,18 +178,48 @@ internal fun detachedHeadLines(refName: String, shortOid: String, summary: Strin
     return lines
 }
 
-/** `git pull` 当前分支无上游配置时的提示块（对齐 git 文案）。 */
+/**
+ * `git pull` 当前分支无上游配置时的提示块（对齐 git 2.x 实测文案）。
+ * [remote] 渲染 `--set-upstream-to=` 行的远程名；`<remote>`/`<branch>` 是 git 的字面占位。
+ */
 internal fun pullNoTrackingLines(branch: String, remote: String?): List<String> = listOf(
     "There is no tracking information for the current branch.",
     "Please specify which branch you want to merge with.",
-    "e.g. 'git pull <remote> <branch>'.",
+    "See git-pull(1) for details.",
     "",
-    "You can set the configuration for this branch with:",
+    "    git pull <remote> <branch>",
     "",
-    "    git config branch.$branch.remote ${remote ?: "<remote>"}",
-    "    git config branch.$branch.merge refs/heads/$branch",
+    "If you wish to set tracking information for this branch you can do so with:",
     "",
-    "You can also use 'git config' to set these.",
+    "    git branch --set-upstream-to=${remote ?: "origin"}/<branch> $branch",
+)
+
+/**
+ * `git push` 时当前分支无上游（且未显式给出分支）的 fatal 块
+ * （对齐 git 2.x 实测文案，exit 128）。
+ */
+internal fun pushNoUpstreamLines(branch: String, remote: String): List<String> = listOf(
+    "fatal: The current branch $branch has no upstream branch.",
+    "To push the current branch and set the remote as upstream, use",
+    "",
+    "    git push --set-upstream $remote $branch",
+    "",
+    "To have this happen automatically for branches without a tracking",
+    "upstream, see 'push.autoSetupRemote' in 'git help config'.",
+)
+
+/** `git branch -u <不存在的上游>` 的 fatal + hint 块（对齐 git 实测文案，exit 128）。 */
+internal fun upstreamNotFoundLines(upstream: String): List<String> = listOf(
+    "fatal: the requested upstream branch '$upstream' does not exist",
+    "hint:",
+    "hint: If you are planning on basing your work on an upstream",
+    "hint: branch that already exists at the remote, you may need to",
+    "hint: run \"git fetch\" to retrieve it.",
+    "hint:",
+    "hint: If you are planning to push out a new local branch that",
+    "hint: will track its remote counterpart, you may want to use",
+    "hint: \"git push -u\" to set the upstream config as you push.",
+    "hint: Disable this message with \"git config set advice.setUpstreamFailure false\"",
 )
 
 /**

@@ -2950,6 +2950,39 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_configGet(
     return result;
 }
 
+/* 写仓库本地配置（branch.<n>.remote/merge 上游等）；成功返回 0，失败 -1。 */
+JNIEXPORT jint JNICALL
+Java_com_mobilecoder_ide_core_nativebridge_GitNative_configSet(
+        JNIEnv *env, jclass clazz, jstring key, jstring value) {
+    (void) clazz;
+    char *c_key = mc_jstring_to_cstr(env, key);
+    char *c_value = mc_jstring_to_cstr(env, value);
+    git_config *cfg = NULL;
+    int rc;
+
+    if (c_key == NULL || c_key[0] == '\0' || c_value == NULL || !mc_require_repo()) {
+        free(c_key);
+        free(c_value);
+        mc_set_error("配置项无效或仓库未打开");
+        return -1;
+    }
+    mc_clear_error();
+    if (git_repository_config(&cfg, g_repo) < 0) {
+        free(c_key);
+        free(c_value);
+        mc_set_error("无法打开仓库配置");
+        return -1;
+    }
+    rc = git_config_set_string(cfg, c_key, c_value);
+    git_config_free(cfg);
+    if (rc < 0) {
+        mc_set_error("写入配置失败");
+    }
+    free(c_key);
+    free(c_value);
+    return rc < 0 ? -1 : 0;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_mobilecoder_ide_core_nativebridge_GitNative_addRemote(
         JNIEnv *env, jclass clazz, jstring name, jstring url) {
