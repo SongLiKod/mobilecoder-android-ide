@@ -581,6 +581,38 @@ object GitController {
     }
 
     /**
+     * 还原工作区改动（等价 `git restore <path>`）：把文件恢复为暂存区内容，
+     * 只丢弃未暂存的工作区改动，已暂存的部分保留。
+     */
+    suspend fun restoreWorktree(path: String): Boolean = withRepo(false) {
+        if (!ensureOpen()) return@withRepo false
+        val ok = runCatching { GitNative.restoreWorktree(path) }.getOrDefault(false)
+        if (ok) {
+            refreshLocked(all = false)
+            postInfo("已还原工作区改动：" + path)
+        } else {
+            postError("还原失败：" + nativeError("未知错误"))
+        }
+        ok
+    }
+
+    /**
+     * 还原到最近一次提交（等价 `git reset --hard -- <path>`）：
+     * 丢弃该路径的**全部**改动，包括已暂存的部分。
+     */
+    suspend fun restoreToHead(path: String): Boolean = withRepo(false) {
+        if (!ensureOpen()) return@withRepo false
+        val ok = runCatching { GitNative.restoreToHead(path) }.getOrDefault(false)
+        if (ok) {
+            refreshLocked(all = false)
+            postInfo("已还原到最近一次提交：" + path)
+        } else {
+            postError("还原失败：" + nativeError("尚无首次提交，无法还原"))
+        }
+        ok
+    }
+
+    /**
      * 提交暂存区。
      *
      * @return 0 成功 / 2 没有已暂存的变更 / -1 失败

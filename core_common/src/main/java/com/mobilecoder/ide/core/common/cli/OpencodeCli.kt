@@ -1,16 +1,20 @@
 package com.mobilecoder.ide.core.common.cli
 
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.coroutineContext
 
 /** 一条 CLI 命令的定义。 */
 data class CliCommand(
@@ -72,6 +76,17 @@ object OpencodeCli {
     private var bootstrapped = false
     private var sequence = 0L
 
+    /** 正在执行的任务协程（仅在持锁执行期间非空，供 [cancelCurrent] 取消）。 */
+    @Volatile
+    private var currentJob: Job? = null
+
+    /**
+     * 取消时的额外钩子（由注册方设置：feature_git 在此中止进行中的 fetch/push，
+     * 因为阻塞的 native 网络调用不受协程取消影响）。任意线程调用，绝不抛异常。
+     */
+    @Volatile
+    var onCancel: (() -> Unit)? = null
+
     /** 注册命令（同名覆盖）。 */
     @Synchronized
     fun register(command: CliCommand) {
@@ -107,6 +122,24 @@ object OpencodeCli {
 
     /** 当前是否空闲。 */
     val isIdle: Boolean get() = _running.value == null
+
+    /**
+     * 取消当前正在执行的命令（CLI 面板「停止」按钮 / 终端 Ctrl+C）。
+     *
+     * 取消是协作式的：命令协程在下一个挂起点抛出 CancellationException，
+     * 网络类命令（fetch/push/pull/push/clone）会额外调用 `GitNative.cancelNetwork()`
+     * 中止传输，因此不会一直卡在「执行中」。
+     *
+     * @return true 表示确有任务被取消
+     */
+    fun cancelCurrent(): Boolean {
+        val job = currentJob ?: return false
+        if (!job.isActive) return false
+        // 先中止可能阻塞在 native 里的网络传输，再取消协程
+        runCatching { onCancel?.invoke() }
+        job.cancel(CancellationException("用户请求停止"))
+        return true
+    }
 
     /**
      * 执行一行命令。
@@ -158,21 +191,33 @@ object OpencodeCli {
             return 0
         }
 
-        return mutex.withLock() {
-            _running.value = CliTask(line, System.currentTimeMillis())
-            pushHistory(line)
-            try {
-                if (!cwd.isDirectory) {
-                    emit("工作目录不存在：${cwd.absolutePath}")
-                    return@withLock 2
+        val job = coroutineContext.job
+        return try {
+            mutex.withLock() {
+                _running.value = CliTask(line, System.currentTimeMillis())
+                currentJob = job
+                pushHistory(line)
+                try {
+                    if (!cwd.isDirectory) {
+                        emit("工作目录不存在：${cwd.absolutePath}")
+                        return@withLock 2
+                    }
+                    val rc = command.handler(args, cwd, emit)
+                    // 执行期间收到取消请求 → 不再当作正常退出，按取消收尾
+                    coroutineContext.ensureActive()
+                    rc
+                } catch (e: CancellationException) {
+                    emit("命令已取消")
+                    throw e
+                } catch (t: Throwable) {
+                    emit("命令执行失败：${t.message ?: t::class.java.simpleName}")
+                    1
+                } finally {
+                    _running.value = null
                 }
-                return@withLock command.handler(args, cwd, emit)
-            } catch (t: Throwable) {
-                emit("命令执行失败：${t.message ?: t::class.java.simpleName}")
-                return@withLock 1
-            } finally {
-                _running.value = null
             }
+        } finally {
+            if (currentJob === job) currentJob = null
         }
     }
 

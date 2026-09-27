@@ -85,6 +85,18 @@ public final class GitNative {
     public static native boolean unstageAll();
 
     /**
+     * 还原工作区文件为索引内容（等价 {@code git restore <path>}）：
+     * 丢弃未暂存的工作区改动，不影响索引。
+     */
+    public static native boolean restoreWorktree(String path);
+
+    /**
+     * 还原索引与工作区文件为 HEAD 内容（等价 {@code git reset --hard -- <path>}）：
+     * 丢弃该路径的全部改动（含已暂存部分）。尚无首次提交时返回 false。
+     */
+    public static native boolean restoreToHead(String path);
+
+    /**
      * 提交暂存区。
      *
      * @return 0 成功 / 2 没有已暂存变更 / -1 失败
@@ -171,6 +183,12 @@ public final class GitNative {
 
     /** @return 0 成功 / -1 失败 */
     public static native int push(String name, String branch);
+
+    /**
+     * 取消进行中的 fetch / push：可从任意线程调用，立即中止正在传输的网络操作
+     * （CLI 面板停止按钮 / 终端 Ctrl+C）。无进行中操作时为空操作。
+     */
+    public static native void cancelNetwork();
 
     /* ---------------- 忽略规则 ---------------- */
 

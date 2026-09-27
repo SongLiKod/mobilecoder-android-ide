@@ -7,9 +7,12 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
 
 /**
  * 终端 `git` 命令（PRD 2.3「内置完整终端」/ 2.5「全功能 Git」）。
@@ -21,7 +24,8 @@ import kotlinx.coroutines.delay
  * 约定：
  *  - 全部 native 调用经 [GitController.runExclusiveAt] / [GitController.runExclusive]
  *    与 Git 页共用同一把互斥锁（native 只有一个仓库句柄），结束时还原句柄；
- *  - 写操作完成后调用 [GitController.syncUiIfSame] 让 Git 页数据保持同步；
+ *  - 写操作完成后由 [repoOp] 在**锁外**调用 [GitController.syncUiIfSame] 让 Git 页
+ *    数据保持同步（该方法内部会重新加锁，绝不能在 `runExclusiveAt` 持锁期间调用）；
  *  - 退出码对齐 git：0 成功 / 1 常规失败 / 128 fatal（不是仓库）。
  */
 object GitCli {
@@ -36,7 +40,7 @@ object GitCli {
     private val COMMANDS: LinkedHashMap<String, String> = linkedMapOf(
         "status" to "工作区与索引状态（-s 短格式）",
         "add" to "暂存变更（路径 / . / -A）",
-        "restore" to "--staged 取消暂存",
+        "restore" to "还原工作区为暂存区内容（--staged 取消暂存）",
         "reset" to "取消暂存（不支持 --hard）",
         "commit" to "提交暂存区（-m 信息，-a 先暂存全部）",
         "diff" to "差异（--staged 暂存区，--stat 统计）",
@@ -77,6 +81,8 @@ object GitCli {
                 terminalIntercept = true,
             ) { args, cwd, emit -> execute(args, cwd, emit) },
         )
+        // 用户点「停止」/ Ctrl+C 时，同时中止可能阻塞在 native 里的 fetch / push
+        OpencodeCli.onCancel = { GitNative.cancelNetwork() }
     }
 
     // ------------------------------------------------------------------
@@ -153,27 +159,40 @@ object GitCli {
     // 仓库内执行 / 通用工具
     // ------------------------------------------------------------------
 
-    /** 在 [cwd] 所属仓库（含父目录）内执行 [block]；非仓库时输出 fatal 并返回 128。 */
+    /**
+     * 在 [cwd] 所属仓库（含父目录）内执行 [block]；非仓库时输出 fatal 并返回 128。
+     *
+     * @param syncAfter 写操作完成后是否刷新 Git 页数据。**刷新必须在锁外执行**：
+     *   [GitController.syncUiIfSame] 内部会再次加锁，若在 [GitController.runExclusiveAt]
+     *   持锁期间调用就是自己等自己（kotlinx `Mutex` 不可重入），会永久死锁——
+     *   终端表现就是命令一直转圈且无法停止。
+     */
     private suspend fun repoOp(
         cwd: File,
         emit: (String) -> Unit,
+        syncAfter: Boolean = false,
         block: suspend (root: String) -> Int,
-    ): Int = GitController.runExclusiveAt(cwd.path, NOT_REPO) { opened ->
-        val root = repoRootOf(cwd)
-        when {
-            root == null -> {
-                emit("fatal: not a git repository (or any of the parent directories): .git")
-                NOT_REPO
-            }
+    ): Int {
+        val root = repoRootOf(cwd)?.path
+        val rc = GitController.runExclusiveAt(cwd.path, NOT_REPO) { opened ->
+            when {
+                root == null -> {
+                    emit("fatal: not a git repository (or any of the parent directories): .git")
+                    NOT_REPO
+                }
 
-            !opened -> {
-                val err = runCatching { GitNative.lastError() }.getOrDefault("").trim()
-                emit("fatal: 无法打开仓库：" + err.ifBlank { "Git 引擎未就绪" })
-                NOT_REPO
-            }
+                !opened -> {
+                    val err = runCatching { GitNative.lastError() }.getOrDefault("").trim()
+                    emit("fatal: 无法打开仓库：" + err.ifBlank { "Git 引擎未就绪" })
+                    NOT_REPO
+                }
 
-            else -> block(root.path)
+                else -> block(root)
+            }
         }
+        // 仓库句柄已释放、互斥锁已归还，此时刷新 Git 页才是安全的
+        if (syncAfter && rc != NOT_REPO && root != null) sync(root)
+        return rc
     }
 
     /** 从 [start] 逐级向上找 `.git`，返回仓库根；找不到返回 null。 */
@@ -346,7 +365,7 @@ object GitCli {
         }
 
     private suspend fun cmdAdd(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             val paths = positionals(args)
             val all = args.any { it == "-A" || it == "--all" } ||
                 paths.isEmpty() || paths.contains(".")
@@ -356,7 +375,6 @@ object GitCli {
                     emit("error: 暂存失败：" + lastError())
                     return@repoOp 1
                 }
-                sync(root)
                 return@repoOp 0
             }
             var failed = 0
@@ -383,26 +401,47 @@ object GitCli {
                     }
                 }
             }
-            if (failed == 0) sync(root)
             if (failed == 0) 0 else 1
         }
 
     private suspend fun cmdRestore(args: List<String>, cwd: File, emit: (String) -> Unit): Int {
-        if (!args.any { it == "--staged" }) {
-            emit("error: 本终端仅支持 `git restore --staged <路径>`（取消暂存）")
-            emit("丢弃工作区改动请到「Git」页「变更」中操作")
+        // `--staged` = 取消暂存（等价 `git reset HEAD -- <路径>`）
+        if (args.any { it == "--staged" }) return cmdReset(args, cwd, emit)
+        if (args.any { it == "--source" || it == "-S" || it.startsWith("--source=") }) {
+            emit("error: 仅支持 `git restore <路径>…` 与 `git restore --staged <路径>…`")
             return 1
         }
-        return cmdReset(args, cwd, emit)
+        val paths = positionals(args)
+        if (paths.isEmpty()) {
+            emit("usage: git restore [--staged] <路径>…")
+            return 1
+        }
+        return repoOp(cwd, emit, syncAfter = true) { root ->
+            var failed = 0
+            paths.forEach { p ->
+                val rel = relPathOf(root, resolve(root, p))
+                if (rel == null) {
+                    emit("error: 路径不在仓库内：$p")
+                    failed++
+                    return@forEach
+                }
+                val ok = runCatching { GitNative.restoreWorktree(rel) }.getOrDefault(false)
+                if (!ok) {
+                    emit("error: 还原失败 $p：" + lastError())
+                    failed++
+                }
+            }
+            if (failed == 0) 0 else 1
+        }
     }
 
     private suspend fun cmdReset(args: List<String>, cwd: File, emit: (String) -> Unit): Int {
         if (args.any { it == "--hard" || it == "--keep" }) {
-            emit("error: 不支持 `git reset --hard`（会丢弃工作区改动）")
-            emit("请到「Git」页「变更」中逐文件处理")
+            emit("error: 不支持 `git reset --hard`（会丢弃全部工作区改动）")
+            emit("丢弃单个文件的改动请用 `git restore <路径>`，或到「Git」页逐文件还原")
             return 1
         }
-        return repoOp(cwd, emit) { root ->
+        return repoOp(cwd, emit, syncAfter = true) { root ->
             val paths = positionals(args)
             val ok = if (paths.isEmpty()) {
                 runCatching { GitNative.unstageAll() }.getOrDefault(false)
@@ -413,13 +452,12 @@ object GitCli {
                 emit("error: 取消暂存失败：" + lastError())
                 return@repoOp 1
             }
-            sync(root)
             0
         }
     }
 
     private suspend fun cmdCommit(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             val (message, all) = parseCommitFlags(args)
             if (all) runCatching { GitNative.stageAll() }
             if (message.isBlank()) {
@@ -439,7 +477,6 @@ object GitCli {
                     val head = parseLog(GitNative.log(1)).firstOrNull()
                     val short = head?.shortOid?.take(7) ?: ""
                     emit("[$branch${if (short.isEmpty()) "" else " $short"}] $message")
-                    sync(root)
                     0
                 }
 
@@ -515,7 +552,7 @@ object GitCli {
     // ------------------------------------------------------------------
 
     private suspend fun cmdBranch(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             val names = positionals(args)
             val deleting = args.any { it == "-d" || it == "-D" || it == "--delete" }
             when {
@@ -534,7 +571,6 @@ object GitCli {
                     val ok = runCatching { GitNative.deleteBranch(names[0]) }.getOrDefault(false)
                     if (ok) {
                         emit("Deleted branch ${names[0]}")
-                        sync(root)
                         0
                     } else {
                         emit("error: " + lastError())
@@ -546,7 +582,6 @@ object GitCli {
                     val ok = runCatching { GitNative.createBranch(names[0]) }.getOrDefault(false)
                     if (ok) {
                         emit("已创建分支 ${names[0]}（用 `git checkout ${names[0]}` 切换）")
-                        sync(root)
                         0
                     } else {
                         emit("error: 创建分支失败：" + lastError())
@@ -557,9 +592,9 @@ object GitCli {
         }
 
     private suspend fun cmdCheckout(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             if (args.any { it == "--" } || (args.any { it == "-p" || it == "--patch" })) {
-                emit("error: 不支持检出单个文件（请到「Git」页处理）")
+                emit("error: 不支持检出单个文件，请用 `git restore <路径>`")
                 return@repoOp 1
             }
             val names = positionals(args)
@@ -584,7 +619,6 @@ object GitCli {
             when (rc) {
                 0 -> {
                     emit(if (create) "Switched to a new branch '${names[0]}'" else "Switched to branch '${names[0]}'")
-                    sync(root)
                     0
                 }
 
@@ -601,7 +635,7 @@ object GitCli {
         }
 
     private suspend fun cmdRemote(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             val remotes = parseRemotes(GitNative.remotes())
             val verb = args.firstOrNull { !it.startsWith("-") }
             when {
@@ -616,7 +650,6 @@ object GitCli {
                         emit("error: 添加远程失败：" + lastError())
                         return@repoOp 1
                     }
-                    sync(root)
                     0
                 }
 
@@ -631,7 +664,6 @@ object GitCli {
                         emit("error: 删除远程失败：" + lastError())
                         return@repoOp 1
                     }
-                    sync(root)
                     0
                 }
 
@@ -646,7 +678,6 @@ object GitCli {
                         emit("error: 修改远程地址失败：" + lastError())
                         return@repoOp 1
                     }
-                    sync(root)
                     0
                 }
 
@@ -680,37 +711,45 @@ object GitCli {
         parseRemotes(runCatching { GitNative.remotes() }.getOrDefault(""))
             .firstOrNull { it.name == name }?.url
 
-    /** 抓取核心（须在锁内调用）。 */
+    /**
+     * 抓取核心（须在锁内调用）。
+     *
+     * 网络传输放到 IO 协程执行、本协程回显进度：终端不会长时间空白，
+     * 且用户 Ctrl+C / 点停止时可经 [GitNative.cancelNetwork] 立即中止传输。
+     */
     private suspend fun doFetch(remote: String, emit: (String) -> Unit): Int {
         val url = remoteUrlOf(remote) ?: run {
             emit("fatal: '$remote' does not appear to be a git remote")
             return 1
         }
+        emit("remote: 正在抓取 '$remote'（$url）…")
         val rc = GitController.withCredentials(url, -1) {
-            runCatching { GitNative.fetch(remote) }.getOrDefault(-1)
+            runWithProgress(emit, FETCH_STAGES) {
+                runCatching { GitNative.fetch(remote) }.getOrDefault(-1)
+            }
         }
         return if (rc == 0) {
             emit("From $url")
             0
         } else {
+            // 已被用户取消：直接抛出 CancellationException，不打印误导性的失败信息
+            coroutineContext.ensureActive()
             emit("error: fetch 失败：" + lastError() + "（检查地址、网络与凭据）")
             1
         }
     }
 
     private suspend fun cmdFetch(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             val remote = pickRemote(positionals(args).firstOrNull()) ?: run {
                 emit("fatal: No configured push destination.")
                 return@repoOp 1
             }
-            val rc = doFetch(remote, emit)
-            if (rc == 0) sync(root)
-            rc
+            doFetch(remote, emit)
         }
 
     private suspend fun cmdPull(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             val remote = pickRemote(positionals(args).firstOrNull()) ?: run {
                 emit("fatal: No configured push destination.")
                 return@repoOp 1
@@ -720,16 +759,15 @@ object GitCli {
             val branch = parseHead(GitNative.headInfo())?.branch.orEmpty()
             if (branch.isBlank()) {
                 emit("Already up to date.")
-                sync(root)
                 return@repoOp 0
             }
+            emit("正在合并 '$remote/$branch' 到 '$branch'…")
             val mrc = try {
                 GitNative.merge(branch)
             } catch (t: Throwable) {
                 emit("error: 合并失败：" + (t.message ?: "未知错误"))
                 return@repoOp 1
             }
-            sync(root)
             when (mrc) {
                 0 -> {
                     emit("Merge made by the 'ort' strategy.")
@@ -755,7 +793,7 @@ object GitCli {
         }
 
     private suspend fun cmdPush(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             val positional = positionals(args)
             val remote = pickRemote(positional.getOrNull(0)) ?: run {
                 emit("fatal: No configured push destination.")
@@ -776,27 +814,29 @@ object GitCli {
                 emit("Everything up-to-date")
                 return@repoOp 0
             }
+            emit("remote: 正在推送 '$branch' 到 $url…")
             val rc = GitController.withCredentials(url, -1) {
-                runCatching { GitNative.push(remote, branch) }.getOrDefault(-1)
+                runWithProgress(emit, PUSH_STAGES) {
+                    runCatching { GitNative.push(remote, branch) }.getOrDefault(-1)
+                }
             }
             if (rc == 0) {
                 emit("To $url")
                 emit("   $branch -> $remote/$branch")
-                sync(root)
                 0
             } else {
+                coroutineContext.ensureActive()
                 emit("error: push 失败：" + lastError() + "（检查凭据与权限）")
                 1
             }
         }
 
     private suspend fun cmdMerge(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             if (args.any { it == "--abort" }) {
                 val rc = runCatching { GitNative.mergeAbort() }.getOrDefault(-1)
                 if (rc == 0) {
                     emit("Merge aborted")
-                    sync(root)
                     return@repoOp 0
                 }
                 emit("error: 放弃合并失败：" + lastError())
@@ -813,7 +853,6 @@ object GitCli {
                 emit("error: 合并失败：" + (t.message ?: "未知错误"))
                 return@repoOp 1
             }
-            sync(root)
             when (rc) {
                 0 -> {
                     emit("Merge made by the 'ort' strategy: $target")
@@ -842,7 +881,7 @@ object GitCli {
     // ------------------------------------------------------------------
 
     private suspend fun cmdTag(args: List<String>, cwd: File, emit: (String) -> Unit): Int =
-        repoOp(cwd, emit) { root ->
+        repoOp(cwd, emit, syncAfter = true) { root ->
             val names = positionals(args)
             val deleting = args.any { it == "-d" || it == "--delete" }
             when {
@@ -855,7 +894,6 @@ object GitCli {
                     val ok = runCatching { GitNative.deleteTag(names[0]) }.getOrDefault(false)
                     if (ok) {
                         emit("Deleted tag '${names[0]}'")
-                        sync(root)
                         0
                     } else {
                         emit("error: " + lastError())
@@ -871,7 +909,6 @@ object GitCli {
                     val ok = runCatching { GitNative.createTag(names[0], message) }.getOrDefault(false)
                     if (ok) {
                         emit("Created tag '${names[0]}'")
-                        sync(root)
                         0
                     } else {
                         emit("error: 创建标签失败：" + lastError())
@@ -930,18 +967,8 @@ object GitCli {
         var rc = -1
         GitController.runExclusive(1) {
             rc = GitController.withCredentials(url, -1) {
-                coroutineScope {
-                    val job = async { runCatching { GitNative.clone(url, target.path, branch) }.getOrDefault(-1) }
-                    var last = ""
-                    while (job.isActive) {
-                        delay(300)
-                        val line = progressLine()
-                        if (line.isNotBlank() && line != last) {
-                            emit(line)
-                            last = line
-                        }
-                    }
-                    job.await()
+                runWithProgress(emit, CLONE_STAGES) {
+                    runCatching { GitNative.clone(url, target.path, branch) }.getOrDefault(-1)
                 }
             }
         }
@@ -958,10 +985,47 @@ object GitCli {
         }
     }
 
-    /** 当前克隆/抓取进度的一行文本（无进度返回空串）。 */
-    private fun progressLine(): String {
+    /** fetch / pull 允许回显的进度阶段（native 会同时上报 fetch / transfer / remote）。 */
+    private val FETCH_STAGES = setOf("fetch", "transfer", "remote")
+
+    /** push 允许回显的进度阶段。 */
+    private val PUSH_STAGES = setOf("push", "remote")
+
+    /** clone 允许回显的进度阶段。 */
+    private val CLONE_STAGES = setOf("clone", "transfer", "remote")
+
+    /**
+     * 在 IO 线程执行可能阻塞的 native 网络调用，本协程每 300ms 把 [GitController.progress]
+     * 回显到终端（进度无变化时不输出）——避免 `git pull` 之类长时间"没有任何输出"。
+     *
+     * 取消（面板停止按钮 / 终端 Ctrl+C）时本协程在 [delay] 处抛出 CancellationException，
+     * 阻塞线程由 [GitNative.cancelNetwork] 中止传输，随后 [block] 返回、子协程结束。
+     */
+    private suspend fun <T> runWithProgress(
+        emit: (String) -> Unit,
+        stages: Set<String>,
+        block: () -> T,
+    ): T = coroutineScope {
+        val job = async(Dispatchers.IO) { block() }
+        var last = ""
+        while (job.isActive) {
+            delay(300)
+            val line = progressLine(stages)
+            if (line.isNotBlank() && line != last) {
+                emit(line)
+                last = line
+            }
+        }
+        job.await()
+    }
+
+    /**
+     * 当前网络进度的一行文本（[stages] 非空时只取这些阶段的进度；无进度返回空串）。
+     */
+    private fun progressLine(stages: Set<String>? = null): String {
         val p = GitController.progress.value ?: return ""
         if (p.stage.isBlank()) return ""
+        if (stages != null && p.stage !in stages) return ""
         return buildString {
             append(stageLabel(p.stage))
             if (p.message.isNotBlank()) append("：").append(p.message)
@@ -970,6 +1034,10 @@ object GitCli {
             }
         }
     }
+
+    /** 把路径转成相对仓库根的形式（native 层统一按仓库相对路径处理）。 */
+    private fun relPathOf(root: String, file: File): String? =
+        runCatching { file.relativeTo(File(root)).path }.getOrNull()
 
     /** 从仓库地址推导默认目录名（与 Git 页克隆弹窗一致）。 */
     private fun repoNameOf(url: String): String {

@@ -80,13 +80,17 @@ data class TreeRow(
 fun buildTreeRows(tree: List<FileNode>, collapsed: Set<String>): List<TreeRow> {
     if (tree.isEmpty()) return emptyList()
     val rows = ArrayList<TreeRow>(tree.size)
-    val ancestors = ArrayList<String>()
+    // 当前分支上的祖先目录链（收起的目录也入栈，否则其子树无从判隐藏），
+    // 按 (depth, path) 记录，离开子树时弹出 depth >= 当前节点 的项。
+    val ancestors = ArrayList<Pair<Int, String>>()
     for (node in tree) {
-        while (ancestors.size >= node.depth) ancestors.removeAt(ancestors.size - 1)
-        if (ancestors.any { it in collapsed }) continue
+        while (ancestors.isNotEmpty() && ancestors.last().first >= node.depth) {
+            ancestors.removeAt(ancestors.size - 1)
+        }
+        if (ancestors.any { it.second in collapsed }) continue
         val expanded = node.isDirectory && node.file.path !in collapsed
         rows.add(TreeRow(node, node.depth, expanded))
-        if (expanded) ancestors.add(node.file.path)
+        if (node.isDirectory) ancestors.add(node.depth to node.file.path)
     }
     return rows
 }

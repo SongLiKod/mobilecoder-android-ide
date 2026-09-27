@@ -16,6 +16,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -166,6 +167,16 @@ fun CliScreen(
                     }
                 },
             )
+            if (busy) {
+                // 执行中可随时停止（取消协程 + 中止 native 网络传输）
+                IconButton(onClick = { CliController.cancel() }) {
+                    Icon(
+                        imageVector = Icons.Default.Stop,
+                        contentDescription = "停止",
+                        tint = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
             IconButton(
                 onClick = {
                     val line = input.trim()

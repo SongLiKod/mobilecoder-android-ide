@@ -12,6 +12,7 @@ import java.nio.ByteBuffer
 import java.nio.CharBuffer
 import java.nio.charset.CharsetDecoder
 import java.nio.charset.CodingErrorAction
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -146,7 +147,14 @@ class TerminalSession(
     /** Ctrl+字母：写入 0x01..0x1A；Ctrl+C 额外清理拦截状态。 */
     fun sendControlChar(code: Int) {
         val value = code.coerceIn(0, 31)
-        if (value == 3) interceptor.interrupt()
+        if (value == 3) {
+            interceptor.interrupt()
+            // 进程内 CLI 正在执行（命令没交给 PTY，shell 那边无事可中断）→ 取消它
+            if (_cliRunning.value && runCatching { OpencodeCli.cancelCurrent() }.getOrDefault(false)) {
+                postEmit("^C")
+                return
+            }
+        }
         writeRaw(byteArrayOf(value.toByte()))
     }
 
@@ -178,6 +186,9 @@ class TerminalSession(
         scope.launch(Dispatchers.IO) {
             try {
                 OpencodeCli.run(commandLine, cwdFile) { line -> postEmit(line) }
+            } catch (e: CancellationException) {
+                // Ctrl+C 取消：引擎已回显「命令已取消」，这里不重复报错
+                throw e
             } catch (t: Throwable) {
                 postEmit("命令执行失败：${t.message ?: t::class.java.simpleName}")
             } finally {

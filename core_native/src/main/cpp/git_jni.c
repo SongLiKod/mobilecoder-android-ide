@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #include <git2.h>
@@ -57,6 +58,23 @@ static char g_cred_privkey[64 * 1024];
 static char g_cred_pubkey[16 * 1024];
 static char g_cred_passphrase[512];
 static char g_cert_file[1024];
+
+/* 进行中的网络操作句柄：供跨线程 cancelNetwork() 中止 fetch / push */
+static git_remote *g_active_remote = NULL;
+static pthread_mutex_t g_active_remote_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* 登记 / 注销进行中的网络传输（先注销再 free，保证取消方看不到悬空指针） */
+static void mc_remote_begin(git_remote *remote) {
+    pthread_mutex_lock(&g_active_remote_lock);
+    g_active_remote = remote;
+    pthread_mutex_unlock(&g_active_remote_lock);
+}
+
+static void mc_remote_end(void) {
+    pthread_mutex_lock(&g_active_remote_lock);
+    g_active_remote = NULL;
+    pthread_mutex_unlock(&g_active_remote_lock);
+}
 
 static void mc_clear_error(void) {
     g_err[0] = '\0';
@@ -1079,6 +1097,93 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_unstageAll(JNIEnv *env, jcl
     git_index_free(index);
     if (rc < 0) {
         mc_set_error("取消暂存失败");
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+/* ------------------------------------------------------------------ */
+/*  JNI —— 还原（丢弃改动）                                            */
+/* ------------------------------------------------------------------ */
+
+/* 组装单路径 pathspec（精确匹配，不做通配解释） */
+static void mc_single_pathspec(git_strarray *paths, char **storage, char *path) {
+    storage[0] = path;
+    paths->strings = storage;
+    paths->count = 1;
+}
+
+/* 还原工作区文件为索引内容（等价 `git restore <path>`）：只动工作区，不动索引 */
+JNIEXPORT jboolean JNICALL
+Java_com_mobilecoder_ide_core_nativebridge_GitNative_restoreWorktree(
+        JNIEnv *env, jclass clazz, jstring path) {
+    (void) clazz;
+    char *p = mc_jstring_to_cstr(env, path);
+    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
+    git_strarray paths;
+    char *storage[1];
+    int rc;
+
+    if (p == NULL || p[0] == '\0' || !mc_require_repo()) {
+        free(p);
+        return JNI_FALSE;
+    }
+    mc_clear_error();
+
+    mc_single_pathspec(&paths, storage, p);
+    opts.checkout_strategy = GIT_CHECKOUT_FORCE | GIT_CHECKOUT_DISABLE_PATHSPEC_MATCH;
+    opts.paths = paths;
+
+    /* 目标 = 索引，基线 = 工作区 → 把索引内容写回工作区 */
+    rc = git_checkout_index(g_repo, NULL, &opts);
+    free(p);
+    if (rc < 0) {
+        mc_set_error("还原工作区失败");
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+/* 还原索引与工作区为 HEAD 内容（等价 `git reset --hard -- <path>`） */
+JNIEXPORT jboolean JNICALL
+Java_com_mobilecoder_ide_core_nativebridge_GitNative_restoreToHead(
+        JNIEnv *env, jclass clazz, jstring path) {
+    (void) clazz;
+    char *p = mc_jstring_to_cstr(env, path);
+    git_oid head;
+    git_object *target = NULL;
+    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
+    git_strarray paths;
+    char *storage[1];
+    int rc;
+
+    if (p == NULL || p[0] == '\0' || !mc_require_repo()) {
+        free(p);
+        return JNI_FALSE;
+    }
+    mc_clear_error();
+
+    if (mc_head_oid(&head) < 0) {
+        mc_set_errorf("尚无首次提交，无法还原到 HEAD");
+        free(p);
+        return JNI_FALSE;
+    }
+    if (git_object_lookup(&target, g_repo, &head, GIT_OBJECT_COMMIT) < 0) {
+        mc_set_error("读取 HEAD 失败");
+        free(p);
+        return JNI_FALSE;
+    }
+
+    mc_single_pathspec(&paths, storage, p);
+    opts.checkout_strategy = GIT_CHECKOUT_FORCE | GIT_CHECKOUT_DISABLE_PATHSPEC_MATCH;
+    opts.paths = paths;
+
+    /* 目标 = HEAD 树，基线 = 索引 → 索引与工作区一并写回 HEAD 内容 */
+    rc = git_checkout_tree(g_repo, target, &opts);
+    git_object_free(target);
+    free(p);
+    if (rc < 0) {
+        mc_set_error("还原到 HEAD 失败");
         return JNI_FALSE;
     }
     return JNI_TRUE;
@@ -2500,7 +2605,9 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_fetch(
     opts.prune = GIT_FETCH_PRUNE_UNSPECIFIED;
 
     mc_emit_progress("fetch", c_name, -1, -1);
+    mc_remote_begin(remote);
     rc = git_remote_fetch(remote, NULL, &opts, "mobilecoder fetch");
+    mc_remote_end();
     git_remote_free(remote);
     free(c_name);
 
@@ -2558,7 +2665,9 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_push(
     opts.callbacks = mc_remote_callbacks();
 
     mc_emit_progress("push", c_name, -1, -1);
+    mc_remote_begin(remote);
     rc = git_remote_push(remote, refspecs.count > 0 ? &refspecs : NULL, &opts);
+    mc_remote_end();
 
     free(owned[0]);
     git_remote_free(remote);
@@ -2573,6 +2682,18 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_push(
     }
     mc_emit_progress("push", "done", -1, -1);
     return 0;
+}
+
+/* 取消进行中的 fetch / push（可在任意线程调用；无进行中操作时为空操作） */
+JNIEXPORT void JNICALL
+Java_com_mobilecoder_ide_core_nativebridge_GitNative_cancelNetwork(JNIEnv *env, jclass clazz) {
+    (void) env;
+    (void) clazz;
+    pthread_mutex_lock(&g_active_remote_lock);
+    if (g_active_remote != NULL) {
+        git_remote_stop(g_active_remote);
+    }
+    pthread_mutex_unlock(&g_active_remote_lock);
 }
 
 /* ------------------------------------------------------------------ */

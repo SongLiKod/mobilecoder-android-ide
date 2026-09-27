@@ -12,7 +12,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /** 面板日志行。 */
 data class CliLogLine(
@@ -91,8 +90,18 @@ object CliController {
             try {
                 OpencodeCli.run(line, target) { output -> append(CliLogLine.of(output)) }
             } finally {
-                withContext(Dispatchers.Main) { _busy.value = false }
+                // 取消时也会走到这里：StateFlow 线程安全，不能用 withContext
+                //（协程已取消，withContext 会直接抛异常而跳过 busy 复位）
+                _busy.value = false
             }
+        }
+    }
+
+    /** 停止当前正在执行的命令（顶部进度条旁的停止按钮）。 */
+    fun cancel() {
+        val stopped = runCatching { OpencodeCli.cancelCurrent() }.getOrDefault(false)
+        if (stopped) {
+            append(CliLogLine("已请求停止，正在结束当前命令…", CliLogLine.Level.WARN))
         }
     }
 

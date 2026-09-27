@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,16 +41,24 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mobilecoder.ide.core.common.theme.LocalAppPalette
+import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.SectionHeader
 import com.mobilecoder.ide.core.common.ui.StatChip
 import kotlinx.coroutines.launch
+
+/** 待二次确认的「还原」请求（还原是破坏性操作，确认后才执行）。 */
+private data class RestoreRequest(
+    val group: GitChangeGroup,
+    val entry: GitStatusEntry,
+)
 
 /**
  * 变更页（PRD 2.5：分组状态 + 暂存/取消暂存 + 提交 + Diff 查看器）。
  *
  * 分组：已暂存 / 未暂存 / 未跟踪 / 冲突 / 已忽略；
  * 行点击展开 Diff 查看器；顶部为提交区与工作区统计。
+ * 「还原」需二次确认：未暂存组只丢弃工作区改动，已暂存组连同暂存一并回到 HEAD。
  */
 @Composable
 fun ChangesTab(
@@ -63,6 +72,7 @@ fun ChangesTab(
 
     var commitMessage by rememberSaveable { mutableStateOf("") }
     var expandedKey by rememberSaveable { mutableStateOf("") }
+    var pendingRestore by remember { mutableStateOf<RestoreRequest?>(null) }
 
     val staged = remember(status) { status.filter { it.inGroup(GitChangeGroup.STAGED) } }
     val unstaged = remember(status) { status.filter { it.inGroup(GitChangeGroup.UNSTAGED) } }
@@ -159,6 +169,7 @@ fun ChangesTab(
                 onPrimaryAction = { entry ->
                     scope.launch { runCatching { GitController.unstage(entry.path) } }
                 },
+                onRestore = { entry -> pendingRestore = RestoreRequest(GitChangeGroup.STAGED, entry) },
             )
 
             changeGroup(
@@ -173,6 +184,7 @@ fun ChangesTab(
                 onPrimaryAction = { entry ->
                     scope.launch { runCatching { GitController.stage(entry.path) } }
                 },
+                onRestore = { entry -> pendingRestore = RestoreRequest(GitChangeGroup.UNSTAGED, entry) },
             )
 
             changeGroup(
@@ -214,6 +226,32 @@ fun ChangesTab(
             )
         }
     }
+
+    // ---------------- 还原确认 ----------------
+    pendingRestore?.let { req ->
+        AppAlertDialog(
+            title = "还原「${req.entry.path}」",
+            message = if (req.group == GitChangeGroup.STAGED) {
+                "将丢弃该文件的全部改动（含已暂存部分），恢复到最近一次提交的内容。此操作不可撤销。"
+            } else {
+                "将丢弃该文件在工作区的改动，恢复为暂存区中的内容；已暂存的部分不受影响。"
+            },
+            confirmLabel = "还原",
+            destructive = true,
+            onConfirm = {
+                pendingRestore = null
+                val path = req.entry.path
+                val toHead = req.group == GitChangeGroup.STAGED
+                scope.launch {
+                    runCatching {
+                        if (toHead) GitController.restoreToHead(path)
+                        else GitController.restoreWorktree(path)
+                    }
+                }
+            },
+            onDismiss = { pendingRestore = null },
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +266,7 @@ private fun LazyListScope.changeGroup(
     expandedKey: String,
     onToggle: (String) -> Unit,
     onPrimaryAction: ((GitStatusEntry) -> Unit)?,
+    onRestore: ((GitStatusEntry) -> Unit)? = null,
 ) {
     if (entries.isEmpty()) return
 
@@ -256,6 +295,7 @@ private fun LazyListScope.changeGroup(
             expanded = expandedKey == "${group.name}#${entry.path}",
             onToggle = { onToggle("${group.name}#${entry.path}") },
             onPrimaryAction = onPrimaryAction,
+            onRestore = onRestore,
         )
     }
 }
@@ -271,6 +311,7 @@ private fun StatusRow(
     expanded: Boolean,
     onToggle: () -> Unit,
     onPrimaryAction: ((GitStatusEntry) -> Unit)?,
+    onRestore: ((GitStatusEntry) -> Unit)? = null,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -304,6 +345,15 @@ private fun StatusRow(
                         } else {
                             MaterialTheme.colorScheme.primary
                         },
+                    )
+                }
+            }
+            if (onRestore != null) {
+                IconButton(onClick = { onRestore(entry) }) {
+                    Icon(
+                        imageVector = Icons.Default.Restore,
+                        contentDescription = "还原",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
