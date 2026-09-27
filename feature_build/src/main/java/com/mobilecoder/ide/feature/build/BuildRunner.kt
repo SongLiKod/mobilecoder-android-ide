@@ -198,23 +198,97 @@ object BuildRunner {
         OpencodeCli.register(
             CliCommand(
                 name = "tools",
-                summary = "终端工具安装（Node.js + opencode / claude AI CLI）",
-                usage = "opencode tools [install]",
+                summary = "软件安装（Node.js / AI CLI / npm 源里的任意软件）",
+                usage = "opencode tools [install|uninstall|update|list|search] [<软件名>…]",
                 group = "系统",
             ) { args, _, emit ->
-                val install = args.any { it.equals("install", true) }
-                if (!install) {
-                    ToolInstaller.statusLines(appContext).forEach(emit)
-                    0
-                } else {
-                    val source = runCatching {
-                        if (AppStorage.preferences.envDownloadSource() == "mirror") {
-                            EnvSource.MIRROR
+                val source = runCatching {
+                    if (AppStorage.preferences.envDownloadSource() == "mirror") {
+                        EnvSource.MIRROR
+                    } else {
+                        EnvSource.OFFICIAL
+                    }
+                }.getOrDefault(EnvSource.OFFICIAL)
+                val sub = args.firstOrNull()?.lowercase()
+                val rest = args.drop(1)
+                val invalid = rest.filter { ToolInstaller.resolvePackage(it) == null }
+                when (sub) {
+                    null -> {
+                        ToolInstaller.statusLines(appContext).forEach(emit)
+                        0
+                    }
+
+                    "list", "ls" -> {
+                        ToolInstaller.listLines(appContext).forEach(emit)
+                        0
+                    }
+
+                    "search", "find" -> {
+                        if (rest.isEmpty() || rest.any { !ToolInstaller.validToken(it) }) {
+                            emit("用法：opencode tools search <关键字>…")
+                            1
                         } else {
-                            EnvSource.OFFICIAL
+                            ToolInstaller.search(appContext, source, emit, rest)
                         }
-                    }.getOrDefault(EnvSource.OFFICIAL)
-                    ToolInstaller.install(appContext, source, emit)
+                    }
+
+                    "install" -> when {
+                        invalid.isNotEmpty() -> {
+                            emit("error: 非法软件名：" + invalid.joinToString(" "))
+                            1
+                        }
+
+                        else -> ToolInstaller.install(
+                            appContext,
+                            source,
+                            emit,
+                            packages = rest.map { ToolInstaller.resolvePackage(it)!! },
+                        )
+                    }
+
+                    "uninstall", "rm", "remove" -> when {
+                        invalid.isNotEmpty() -> {
+                            emit("error: 非法软件名：" + invalid.joinToString(" "))
+                            1
+                        }
+
+                        rest.isEmpty() -> {
+                            emit("用法：opencode tools uninstall <软件名>…")
+                            1
+                        }
+
+                        else -> ToolInstaller.uninstall(
+                            appContext,
+                            source,
+                            emit,
+                            rest.map { ToolInstaller.resolvePackage(it)!! },
+                        )
+                    }
+
+                    "update", "up" -> when {
+                        invalid.isNotEmpty() -> {
+                            emit("error: 非法软件名：" + invalid.joinToString(" "))
+                            1
+                        }
+
+                        else -> ToolInstaller.update(
+                            appContext,
+                            source,
+                            emit,
+                            rest.map { ToolInstaller.resolvePackage(it)!! },
+                        )
+                    }
+
+                    "help", "-h", "--help" -> {
+                        ToolInstaller.usageLines().forEach(emit)
+                        0
+                    }
+
+                    else -> {
+                        emit("error: unknown command `$sub'")
+                        ToolInstaller.usageLines().forEach(emit)
+                        1
+                    }
                 }
             },
         )

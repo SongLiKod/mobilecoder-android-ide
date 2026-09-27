@@ -204,7 +204,7 @@ private fun LogPane(
     if (log.isEmpty()) {
         EmptyState(
             title = "暂无输出",
-            subtitle = "在下方「命令」页一键执行，或直接输入 opencode 命令（opencode tools 可在线安装 Node.js 与 AI CLI）",
+            subtitle = "在下方「命令」页一键执行，或直接输入 opencode 命令（opencode tools install 可在线安装 Node.js 及 npm 源里的任意软件）",
             modifier = modifier.fillMaxWidth(),
         )
         return
