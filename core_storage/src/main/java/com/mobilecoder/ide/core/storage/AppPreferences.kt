@@ -97,6 +97,19 @@ class AppPreferences(
     suspend fun gradlePath(): String = get(KEY_GRADLE_PATH) ?: ""
     suspend fun setGradlePath(value: String) = set(KEY_GRADLE_PATH, value)
 
+    // ---------------- AI 助手（OpenAI 兼容接口：/chat/completions） ----------------
+
+    suspend fun aiBaseUrl(): String = get(KEY_AI_BASE_URL) ?: "https://api.openai.com/v1"
+    suspend fun setAiBaseUrl(value: String) = set(KEY_AI_BASE_URL, value.trim())
+
+    suspend fun aiModel(): String = get(KEY_AI_MODEL) ?: "gpt-4o-mini"
+    suspend fun setAiModel(value: String) = set(KEY_AI_MODEL, value.trim())
+
+    /** API Key（加密存储，与 HTTPS 凭据同一把应用级密钥）。 */
+    suspend fun aiApiKey(): String = decryptOrEmpty(get(KEY_AI_KEY))
+    suspend fun setAiApiKey(value: String) =
+        set(KEY_AI_KEY, if (value.isEmpty()) "" else crypto.encryptToString(value))
+
     // ---------------- 内部 ----------------
 
     private suspend fun get(key: Preferences.Key<String>): String? = dataStore.data.first()[key]
@@ -142,5 +155,8 @@ class AppPreferences(
         private val KEY_BUILD_MEM = intPreferencesKey("build_memory_limit_mb")
         private val KEY_JDK_PATH = stringPreferencesKey("jdk_path")
         private val KEY_GRADLE_PATH = stringPreferencesKey("gradle_path")
+        private val KEY_AI_BASE_URL = stringPreferencesKey("ai_base_url")
+        private val KEY_AI_MODEL = stringPreferencesKey("ai_model")
+        private val KEY_AI_KEY = stringPreferencesKey("ai_api_key_enc")
     }
 }

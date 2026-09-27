@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mobilecoder.ide.core.common.ui.EmptyState
+import com.mobilecoder.ide.core.storage.AppStorage
 import java.io.File
 import kotlinx.coroutines.launch
 
@@ -165,7 +167,10 @@ fun GitScreen(
             onClone = { url, branch, target ->
                 showClone = false
                 scope.launch {
-                    runCatching { GitController.clone(url, target, branch) }
+                    val ok = runCatching { GitController.clone(url, target, branch) }
+                        .getOrDefault(false)
+                    // 克隆结果登记为项目（克隆下来的目录本身就是项目，可在「项目」页打开）
+                    if (ok) runCatching { AppStorage.projects.adopt(File(target)) }
                 }
             },
         )
@@ -358,7 +363,7 @@ private fun NoRepoContent(
             }
             Text(
                 text = "初始化：在当前目录创建 .git，开始本地版本管理\n" +
-                    "克隆：输入远程地址（HTTPS / SSH）拉取已有仓库",
+                    "克隆：拉取远程仓库到项目目录（完成后自动加入项目列表）",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -385,12 +390,14 @@ private fun CloneDialog(
     var branch by rememberSaveable { mutableStateOf("") }
     var target by rememberSaveable { mutableStateOf("") }
 
-    val defaultTarget = remember(url, projectPath) {
-        File(projectPath, repoNameOf(url, projectPath)).path
+    // 克隆结果默认落在项目根目录（`files/projects/<仓库名>`），作为新项目登记
+    val defaultTarget = remember(url) {
+        File(AppStorage.projects.projectsRoot, repoNameOf(url, projectPath)).path
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.imePadding(),
         title = { Text("克隆仓库") },
         text = {
             Column(

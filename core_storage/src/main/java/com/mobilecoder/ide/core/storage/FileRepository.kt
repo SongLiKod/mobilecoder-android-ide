@@ -68,11 +68,14 @@ object FileRepository {
         return sniffText(file)
     }
 
-    /** 读取文本；过大/二进制返回 null（编辑器据此提示「文件过大」，防 OOM）。 */
+    /**
+     * 读取文本（PRD：任意格式、任意大小都可编辑）。
+     *
+     * 不做大小与扩展名白名单拦截：文本按 UTF-8 读入（非法字节用替换符）；
+     * 仅在真正读不下（OOM / IO 失败）时返回 null，由编辑器提示。
+     */
     fun readText(file: File): String? {
         if (!file.isFile) return null
-        if (file.length() > MAX_TEXT_BYTES) return null
-        if (!isTextFile(file)) return null
         return runCatching { file.readText(Charsets.UTF_8) }.getOrNull()
     }
 

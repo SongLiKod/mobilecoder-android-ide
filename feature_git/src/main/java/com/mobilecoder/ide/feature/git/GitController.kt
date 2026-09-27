@@ -167,6 +167,8 @@ object GitController {
                     GitNative.registerProgressCallback(progressCallback)
                 }
             }
+            // 终端 `git` 命令拦截（Android 无 git 可执行文件，进程内用 libgit2 实现）
+            runCatching { GitCli.register() }
         } catch (_: Throwable) {
             // 契约：init 不允许抛出任何异常
         }
@@ -195,6 +197,126 @@ object GitController {
             } else if (path.isNotBlank()) {
                 bindLocked(path)
             }
+        }
+    }
+
+    /**
+     * 终端 `git` 命令入口（由 GitCli 调用）：与 UI 共用同一把互斥锁（native 全局只有一个仓库
+     * 句柄），把句柄切换到 [repoRoot]（向上自动查找 .git）后再执行 [block]，
+     * 结束后把句柄还原回执行前的仓库，避免终端操作顶掉 Git 页的绑定。
+     *
+     * @param opened false 表示 [repoRoot] 所在目录不是 Git 仓库，或引擎不可用
+     */
+    suspend fun <T> runExclusiveAt(repoRoot: String, fallback: T, block: suspend (opened: Boolean) -> T): T =
+        withRepo(fallback) {
+            val ctx = appContext
+            val ready = ctx != null &&
+                runCatching { NativeRuntime.ensureGitReady(ctx) }.getOrDefault(false)
+            if (!ready) return@withRepo block(false)
+            val prev = runCatching { GitNative.workdirPath() }.getOrDefault("")
+            val opened = runCatching {
+                val root = discoverRepoRoot(repoRoot) ?: return@runCatching false
+                val current = GitNative.workdirPath()
+                val currentRoot = if (current.isBlank()) null else discoverRepoRoot(current)
+                if (currentRoot != null && samePath(currentRoot, root)) return@runCatching true
+                GitNative.closeRepo()
+                GitNative.openRepository(root)
+            }.getOrDefault(false)
+            try {
+                block(opened)
+            } finally {
+                restoreHandle(prev)
+            }
+        }
+
+    /**
+     * 不要求已存在仓库的排他执行（`git init` / `git clone` 用）：引擎就绪 + 串行 + 还原句柄。
+     * init / clone 会把 native 全局句柄指向新仓库，因此必须在 finally 里还原给 Git 页。
+     */
+    suspend fun <T> runExclusive(fallback: T, block: suspend () -> T): T = withRepo(fallback) {
+        if (!ensureEngine()) return@withRepo fallback
+        val prev = runCatching { GitNative.workdirPath() }.getOrDefault("")
+        try {
+            block()
+        } finally {
+            restoreHandle(prev)
+        }
+    }
+
+    /**
+     * 网络操作前注入凭据（HTTPS 账号口令 / SSH 内存私钥），由 GitCli 在持有锁时调用；
+     * 无论成败都会清理。返回 [fallback] 表示凭据缺失（已写入中文提示）。
+     */
+    suspend fun <T> withCredentials(url: String, fallback: T, block: suspend () -> T): T {
+        if (!prepareCredentials(url)) return fallback
+        return try {
+            block()
+        } finally {
+            runCatching { GitNative.clearCredentials() }
+        }
+    }
+
+    /** 提交身份（姓名 / 邮箱，来自应用设置）。 */
+    suspend fun currentIdentity(): GitIdentity = loadIdentity()
+
+    /**
+     * 终端写操作完成后同步 Git 页数据：仅当 Git 页绑定的仓库与 [path] 属于同一仓库时刷新。
+     * （须在 `runExclusive*` 之外调用——内部会重新加锁。）
+     */
+    suspend fun syncUiIfSame(path: String) {
+        withRepo(Unit) {
+            val bound = _repo.value
+            if (!bound.opened) return@withRepo
+            val boundRoot = discoverRepoRoot(bound.workdir.ifBlank { bound.path }) ?: return@withRepo
+            val targetRoot = discoverRepoRoot(path) ?: return@withRepo
+            if (!samePath(boundRoot, targetRoot)) return@withRepo
+            refreshLocked(all = true)
+        }
+    }
+
+    /** 把 native 句柄还原到 [prevWorkdir]（空串 = 关闭）；失败只忽略，绝不影响宿主。 */
+    private fun restoreHandle(prevWorkdir: String) {
+        runCatching {
+            val now = runCatching { GitNative.workdirPath() }.getOrDefault("")
+            if (prevWorkdir.isBlank()) {
+                if (now.isNotBlank()) GitNative.closeRepo()
+                return
+            }
+            if (samePath(now, prevWorkdir)) return
+            GitNative.closeRepo()
+            GitNative.openRepository(prevWorkdir)
+        }
+    }
+
+    /** 两个路径是否指向同一目录（canonical 化后比较）。 */
+    private fun samePath(a: String, b: String): Boolean {
+        if (a.isBlank() || b.isBlank()) return false
+        val ca = runCatching { File(a).canonicalPath }.getOrDefault(a)
+        val cb = runCatching { File(b).canonicalPath }.getOrDefault(b)
+        return ca == cb
+    }
+
+    /** 从 [start] 逐级向上查找 `.git`，返回仓库根目录；找不到返回 null。 */
+    private fun discoverRepoRoot(start: String): String? {
+        if (start.isBlank()) return null
+        var dir = runCatching { File(start).canonicalFile }.getOrNull() ?: File(start)
+        while (true) {
+            if (File(dir, ".git").exists()) return dir.path
+            val parent = dir.parentFile ?: return null
+            if (parent.path == dir.path) return null
+            dir = parent
+        }
+    }
+
+    /** [path] 是否位于已打开仓库 [workdir] 之内（含其自身）。 */
+    private fun isWithin(workdir: String, path: String): Boolean {
+        val w = runCatching { File(workdir).canonicalFile }.getOrNull() ?: return false
+        var p = runCatching { File(path).canonicalFile }.getOrNull() ?: return false
+        while (true) {
+            if (p == w) return true
+            val parent = p.parentFile ?: return false
+            if (parent.path == p.path) return false
+            p = parent
         }
     }
 

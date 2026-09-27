@@ -76,8 +76,9 @@ class TerminalSession(
     private val _cliRunning = MutableStateFlow(false)
     val cliRunning: StateFlow<Boolean> = _cliRunning.asStateFlow()
 
-    /** opencode 拦截器（前缀缓冲 + 本地回显 + 回滚）。 */
+    /** 命令拦截器（前缀缓冲 + 本地回显 + 回滚；目标来自 CLI 注册表：opencode / git）。 */
     private val interceptor = OpencodeInterceptor(
+        targets = { OpencodeCli.interceptTargets() },
         onWritePty = { bytes -> writeRaw(bytes) },
         onLocalEcho = { text -> onMain { emulator.feed(text) } },
         onRollback = { count -> onMain { emulator.erasePrinted(count) } },
@@ -156,6 +157,12 @@ class TerminalSession(
     // opencode CLI（PRD 2.4：终端手动输入）
     // ------------------------------------------------------------------
 
+    /**
+     * CLI 执行（PRD 2.4：终端手动输入）。
+     *
+     * 拦截器保证命令首词是 `opencode` 或已注册的进程内命令（如 `git`），
+     * 统一交给 OpencodeCli 按首词分发。
+     */
     private fun runCli(commandLine: String) {
         // 命令本身已本地回显：换行开始输出
         onMain { emulator.feed("\r\n") }

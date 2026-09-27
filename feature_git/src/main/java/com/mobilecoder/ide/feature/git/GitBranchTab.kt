@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -122,6 +123,7 @@ fun BranchTab(
     if (showCreate) {
         AlertDialog(
             onDismissRequest = { showCreate = false },
+            modifier = Modifier.imePadding(),
             title = { Text("新建分支") },
             text = {
                 OutlinedTextField(

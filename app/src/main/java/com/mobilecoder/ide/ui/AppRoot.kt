@@ -7,19 +7,25 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -29,6 +35,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -70,12 +77,16 @@ import com.mobilecoder.ide.core.common.ui.SectionHeader
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.core.storage.ProjectMeta
 import com.mobilecoder.ide.core.storage.ProjectTemplate
+import com.mobilecoder.ide.feature.ai.AiScreen
 import com.mobilecoder.ide.feature.build.BuildScreen
 import com.mobilecoder.ide.feature.cli.CliScreen
 import com.mobilecoder.ide.feature.editor.EditorScreen
+import com.mobilecoder.ide.feature.git.GitController
+import com.mobilecoder.ide.feature.git.GitProgress
 import com.mobilecoder.ide.feature.git.GitScreen
 import com.mobilecoder.ide.feature.ssh.SshScreen
 import com.mobilecoder.ide.feature.terminal.TerminalScreen
+import java.io.File
 import kotlinx.coroutines.launch
 
 /** 全局导航目的地（app 负责全局导航：TECH.md 7）。 */
@@ -90,6 +101,7 @@ enum class AppDestination(
     CLI("cli", "CLI", Icons.AutoMirrored.Filled.List),
     GIT("git", "Git", Icons.Default.AccountTree),
     SSH("ssh", "SSH", Icons.Default.Lock),
+    AI("ai", "AI", Icons.Default.SmartToy),
     BUILD("build", "构建", Icons.Default.Build),
     ;
 
@@ -118,7 +130,8 @@ fun AppRoot(
     val currentRoute = backStackEntry?.destination?.route
 
     Scaffold(
-        modifier = modifier.fillMaxSize(),
+        // imePadding：键盘弹出时整体上移（内容 + 底部导航），避免输入框被遮挡
+        modifier = modifier.fillMaxSize().imePadding(),
         topBar = {
             TopAppBar(
                 title = {
@@ -179,6 +192,9 @@ fun AppRoot(
             composable(AppDestination.SSH.route) {
                 SshScreen()
             }
+            composable(AppDestination.AI.route) {
+                ProjectGuard { path -> AiScreen(projectPath = path) }
+            }
             composable(AppDestination.BUILD.route) {
                 ProjectGuard { path -> BuildScreen(projectPath = path) }
             }
@@ -228,7 +244,11 @@ private fun HomeScreen(
     val scope = rememberCoroutineScope()
     var projects by remember { mutableStateOf<List<ProjectMeta>>(emptyList()) }
     var showCreate by rememberSaveable { mutableStateOf(false) }
+    var showClone by rememberSaveable { mutableStateOf(false) }
+    var cloneNotice by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<ProjectMeta?>(null) }
+    val gitBusy by GitController.busy.collectAsStateWithLifecycle()
+    val gitProgress by GitController.progress.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         projects = runCatching { AppStorage.projects.list() }.getOrDefault(emptyList())
@@ -243,6 +263,14 @@ private fun HomeScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             SectionHeader(title = "我的项目", modifier = Modifier.weight(1f))
+            IconButton(
+                onClick = {
+                    cloneNotice = null
+                    showClone = true
+                },
+            ) {
+                Icon(Icons.Default.Download, contentDescription = "克隆仓库")
+            }
             IconButton(onClick = { showCreate = true }) {
                 Icon(Icons.Default.Add, contentDescription = "新建项目")
             }
@@ -337,6 +365,45 @@ private fun HomeScreen(
         )
     }
 
+    if (showClone) {
+        CloneRepoDialog(
+            busy = gitBusy,
+            progress = gitProgress,
+            notice = cloneNotice,
+            projectsRoot = AppStorage.projects.projectsRoot,
+            onDismiss = {
+                if (!gitBusy) {
+                    showClone = false
+                    cloneNotice = null
+                }
+            },
+            onClone = { url, branch, target ->
+                cloneNotice = null
+                scope.launch {
+                    val ok = runCatching { GitController.clone(url, target, branch) }
+                        .getOrDefault(false)
+                    if (!ok) {
+                        val text = GitController.message.value?.text
+                        GitController.clearMessage()
+                        cloneNotice = text ?: "克隆失败：请检查仓库地址与网络"
+                        return@launch
+                    }
+                    val meta = runCatching { AppStorage.projects.adopt(File(target)) }.getOrNull()
+                    if (meta == null) {
+                        // 克隆成功但目录不在项目目录内：无法登记为项目
+                        cloneNotice = "克隆完成：$target\n（不在项目目录内，未加入项目列表）"
+                        return@launch
+                    }
+                    showClone = false
+                    AppStorage.projects.markOpened(meta.relativePath)
+                    AppState.open(meta)
+                    projects = AppStorage.projects.list()
+                    onOpenProject()
+                }
+            },
+        )
+    }
+
     pendingDelete?.let { meta ->
         AppAlertDialog(
             title = "删除项目",
@@ -411,6 +478,117 @@ private fun ProjectCard(
     }
 }
 
+/** 从仓库地址推导默认目录名（与 Git 页克隆弹窗一致）。 */
+private fun repoNameOf(url: String): String {
+    val cleaned = url.trim().removeSuffix("/").removeSuffix(".git")
+    val name = cleaned.substringAfterLast('/').substringAfterLast(':')
+    return name.filter { it.isLetterOrDigit() || it == '_' || it == '-' || it == '.' }
+        .ifBlank { "repository" }
+}
+
+/**
+ * 克隆仓库为新项目（PRD 2.2「项目目录」：克隆下来的目录本身就是项目，无需先新建）。
+ *
+ * 成功后由调用方登记进项目索引并打开；失败/提示文案显示在弹窗内（克隆进度走
+ * [GitController.progress]，与 Git 页共用同一引擎）。
+ */
+@Composable
+private fun CloneRepoDialog(
+    busy: Boolean,
+    progress: GitProgress?,
+    notice: String?,
+    projectsRoot: File,
+    onDismiss: () -> Unit,
+    onClone: (url: String, branch: String, target: String) -> Unit,
+) {
+    var url by rememberSaveable { mutableStateOf("") }
+    var branch by rememberSaveable { mutableStateOf("") }
+    var target by rememberSaveable { mutableStateOf("") }
+
+    val defaultTarget = remember(url, projectsRoot) {
+        File(projectsRoot, repoNameOf(url)).path
+    }
+    val fraction = progress?.fraction
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.imePadding(),
+        title = { Text("克隆仓库为新项目") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = { Text("仓库地址") },
+                    placeholder = { Text("https://github.com/user/repo.git") },
+                    singleLine = true,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = branch,
+                    onValueChange = { branch = it },
+                    label = { Text("分支（可选，默认远程默认分支）") },
+                    singleLine = true,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = target,
+                    onValueChange = { target = it },
+                    label = { Text("目标目录（可选）") },
+                    supportingText = { Text("留空则克隆到 $defaultTarget") },
+                    singleLine = true,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (busy) {
+                    if (fraction != null) {
+                        LinearProgressIndicator(
+                            progress = { fraction },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    Text(
+                        text = "正在克隆…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                notice?.let {
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onClone(
+                        url.trim(),
+                        branch.trim(),
+                        target.trim().ifBlank { defaultTarget },
+                    )
+                },
+                enabled = url.isNotBlank() && !busy,
+            ) { Text("克隆") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") }
+        },
+    )
+}
+
 @Composable
 private fun CreateProjectDialog(
     onDismiss: () -> Unit,
@@ -422,6 +600,7 @@ private fun CreateProjectDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        modifier = Modifier.imePadding(),
         title = { Text("新建项目") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

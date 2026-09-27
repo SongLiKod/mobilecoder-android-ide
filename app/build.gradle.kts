@@ -63,6 +63,7 @@ dependencies {
     implementation(project(":feature_git"))
     implementation(project(":feature_ssh"))
     implementation(project(":feature_build"))
+    implementation(project(":feature_ai"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

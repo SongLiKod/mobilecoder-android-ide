@@ -509,6 +509,7 @@ fun TerminalScreen(
     if (renameOpen) {
         AlertDialog(
             onDismissRequest = { renameOpen = false },
+            modifier = Modifier.imePadding(),
             title = { Text("重命名会话") },
             text = {
                 OutlinedTextField(

@@ -5,6 +5,7 @@ import com.mobilecoder.ide.core.common.theme.AppThemeMode
 import com.mobilecoder.ide.core.common.theme.ThemeManager
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.feature.ai.AiController
 import com.mobilecoder.ide.feature.build.BuildRunner
 import com.mobilecoder.ide.feature.cli.CliController
 import com.mobilecoder.ide.feature.git.GitController
@@ -56,6 +57,7 @@ class MobileCoderApplication : Application() {
         runCatching { GitController.init(this) }
         runCatching { SshController.init(this) }
         runCatching { BuildRunner.init(this) }
+        runCatching { AiController.init(this) }
 
         // 5) 恢复上次项目
         scope.launch { runCatching { AppState.restore() } }

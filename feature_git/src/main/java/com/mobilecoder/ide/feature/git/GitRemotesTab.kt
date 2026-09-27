@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -251,6 +252,7 @@ fun RemotesTab(
     if (showAdd) {
         AlertDialog(
             onDismissRequest = { showAdd = false },
+            modifier = Modifier.imePadding(),
             title = { Text("添加远程仓库") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -295,6 +297,7 @@ fun RemotesTab(
     if (editTarget.isNotBlank()) {
         AlertDialog(
             onDismissRequest = { editTarget = "" },
+            modifier = Modifier.imePadding(),
             title = { Text("修改远程地址") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {

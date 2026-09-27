@@ -93,6 +93,46 @@ class ProjectRepository(
         persist(updated)
     }
 
+    /**
+     * 把已存在的目录（如 `git clone` 的结果）登记为项目，不生成骨架。
+     *
+     * 克隆下来的目录本身就是一个完整项目，无需先新建项目再克隆；
+     * 项目索引以 `files/projects/` 的相对路径为键，因此仅支持项目根下的目录。
+     *
+     * @param name 展示名（默认取目录名）
+     * @return 成功返回元信息；目录不存在、已登记过、或不在项目根下时返回 null
+     */
+    suspend fun adopt(dir: File, name: String = dir.name): ProjectMeta? {
+        if (!dir.isDirectory) return null
+        val canonical = runCatching { dir.canonicalFile }.getOrDefault(dir)
+        val relative = runCatching {
+            canonical.relativeTo(runCatching { paths.projects.canonicalFile }
+                .getOrDefault(paths.projects)).path
+        }.getOrNull() ?: return null
+        if (relative.isBlank()) return null
+        list().firstOrNull {
+            it.relativePath == relative ||
+                runCatching { File(paths.projects, it.relativePath).canonicalPath }
+                    .getOrDefault("") == canonical.path
+        }?.let { return it }
+        val meta = ProjectMeta(
+            name = name.trim().ifBlank { canonical.name },
+            relativePath = relative,
+            template = detectTemplate(canonical),
+            createdAt = System.currentTimeMillis(),
+            lastOpenedAt = System.currentTimeMillis(),
+        )
+        persist(list() + meta)
+        return meta
+    }
+
+    /** 克隆仓库的模板展示推断：有 Gradle 构建脚本视为安卓/Gradle 工程，否则空目录。 */
+    private fun detectTemplate(dir: File): ProjectTemplate {
+        val gradle = listOf("settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle")
+            .any { File(dir, it).exists() }
+        return if (gradle) ProjectTemplate.ANDROID_APP else ProjectTemplate.EMPTY
+    }
+
     suspend fun rename(relativePath: String, newName: String): Boolean {
         val metas = list()
         val target = metas.firstOrNull { it.relativePath == relativePath } ?: return false

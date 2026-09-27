@@ -214,7 +214,7 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
                 )
 
                 !activeTab.editable -> EmptyState(
-                    title = "文件过大或为二进制，无法编辑",
+                    title = "文件读取失败",
                     subtitle = activeTab.relativePath,
                     modifier = Modifier.align(Alignment.Center),
                 )

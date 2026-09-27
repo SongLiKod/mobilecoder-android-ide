@@ -23,6 +23,11 @@ data class CliCommand(
     /** 分组（项目 / 代码 / 构建 / 系统），用于面板分栏。 */
     val group: String = "通用",
     /**
+     * 是否在终端里拦截同名命令行（如 `git`：Android 设备上没有同名可执行文件，
+     * 由进程内实现接管，见 feature_git/GitCli）。`opencode` 前缀始终拦截。
+     */
+    val terminalIntercept: Boolean = false,
+    /**
      * 执行体。
      * @param args 命令名之后的参数
      * @param cwd  项目工作目录
@@ -83,9 +88,22 @@ object OpencodeCli {
     @Synchronized
     fun find(name: String): CliCommand? = registry[name]
 
-    /** 是否为 CLI 命令行（终端据此拦截，避免把 `opencode` 交给 sh）。 */
-    fun isCliLine(line: String): Boolean =
-        line.trim().split(Regex("\\s+"), limit = 2).firstOrNull() == PREFIX
+    /** 是否为 CLI 命令行（终端据此拦截，避免把 `opencode` / `git` 交给 sh）。 */
+    fun isCliLine(line: String): Boolean {
+        val first = line.trim().split(Regex("\\s+"), limit = 2).firstOrNull() ?: return false
+        return first == PREFIX || find(first)?.terminalIntercept == true
+    }
+
+    /**
+     * 终端拦截器需要识别的全部命令前缀：`opencode` + 标记了 [CliCommand.terminalIntercept]
+     * 的命令（如 `git`）。会话创建时调用，动态反映注册表。
+     */
+    @Synchronized
+    fun interceptTargets(): List<String> {
+        bootstrap()
+        return (listOf(PREFIX) + registry.values.filter { it.terminalIntercept }.map { it.name })
+            .distinct()
+    }
 
     /** 当前是否空闲。 */
     val isIdle: Boolean get() = _running.value == null
