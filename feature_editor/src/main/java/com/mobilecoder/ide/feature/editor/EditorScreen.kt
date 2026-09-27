@@ -41,6 +41,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -85,6 +87,7 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
     val find by EditorController.find.collectAsStateWithLifecycle()
     val search by EditorController.search.collectAsStateWithLifecycle()
     val message by EditorController.message.collectAsStateWithLifecycle()
+    val history by EditorController.history.collectAsStateWithLifecycle()
     val palette = LocalAppPalette.current
     val colors = remember(palette) { highlightColorsOf(palette) }
 
@@ -92,6 +95,8 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
 
     var treeOpen by rememberSaveable { mutableStateOf(false) }
     var problemsOpen by rememberSaveable { mutableStateOf(false) }
+    var panelTab by rememberSaveable { mutableStateOf(EditorPanelTab.PROBLEMS) }
+    var gotoOpen by rememberSaveable { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var searchOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -184,6 +189,27 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
                     expanded = menuOpen,
                     settings = settings,
                     onDismiss = { menuOpen = false },
+                    canUndo = history.canUndo,
+                    canRedo = history.canRedo,
+                    onUndo = {
+                        menuOpen = false
+                        activeTab?.let { EditorController.undo(it.path) }
+                    },
+                    onRedo = {
+                        menuOpen = false
+                        activeTab?.let { EditorController.redo(it.path) }
+                    },
+                    onGotoLine = {
+                        menuOpen = false
+                        if (activeTab != null) gotoOpen = true
+                    },
+                    onOpenOutline = {
+                        menuOpen = false
+                        if (activeTab != null && activeTab.editable) {
+                            problemsOpen = true
+                            panelTab = EditorPanelTab.OUTLINE
+                        }
+                    },
                     onToggleLineNumbers = { EditorController.toggleLineNumbers() },
                     onToggleWordWrap = { EditorController.toggleWordWrap() },
                     onToggleAutoSave = { EditorController.toggleAutoSave() },
@@ -265,12 +291,18 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
             }
         }
 
-        // ---------------- 问题面板 + 状态栏 ----------------
+        // ---------------- 底部面板（问题 / 大纲）+ 状态栏 ----------------
         if (problemsOpen && activeTab != null && activeTab.editable) {
-            ProblemsPanel(
+            EditorBottomPanel(
                 tab = activeTab,
-                onJump = { issue ->
+                active = panelTab,
+                onSwitch = { panelTab = it },
+                onJumpToIssue = { issue ->
                     EditorController.jumpTo(activeTab.path, issue.line, issue.column)
+                },
+                onJumpToSymbol = { symbol ->
+                    EditorController.jumpTo(activeTab.path, symbol.line, 1)
+                    EditorController.requestEditorFocus()
                 },
                 onClose = { problemsOpen = false },
             )
@@ -281,10 +313,45 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
             line = cursorLine,
             column = cursorColumn,
             issueCount = activeTab?.analysis?.issues?.size ?: 0,
-            problemsOpen = problemsOpen,
+            symbolCount = activeTab?.analysis?.symbols?.size ?: 0,
+            problemsOpen = problemsOpen && panelTab == EditorPanelTab.PROBLEMS,
+            outlineOpen = problemsOpen && panelTab == EditorPanelTab.OUTLINE,
             onToggleProblems = {
-                if (activeTab != null && activeTab.editable) problemsOpen = !problemsOpen
+                if (activeTab != null && activeTab.editable) {
+                    if (problemsOpen && panelTab == EditorPanelTab.PROBLEMS) {
+                        problemsOpen = false
+                    } else {
+                        problemsOpen = true
+                        panelTab = EditorPanelTab.PROBLEMS
+                    }
+                }
             },
+            onToggleOutline = {
+                if (activeTab != null && activeTab.editable) {
+                    if (problemsOpen && panelTab == EditorPanelTab.OUTLINE) {
+                        problemsOpen = false
+                    } else {
+                        problemsOpen = true
+                        panelTab = EditorPanelTab.OUTLINE
+                    }
+                }
+            },
+            onGotoLine = {
+                if (activeTab != null && activeTab.editable) gotoOpen = true
+            },
+        )
+    }
+
+    if (gotoOpen && activeTab != null) {
+        GotoLineDialog(
+            currentLine = cursorLine,
+            totalLines = activeTab.totalLines,
+            onConfirm = { target ->
+                gotoOpen = false
+                EditorController.jumpTo(activeTab.path, target, 1)
+                EditorController.requestEditorFocus()
+            },
+            onDismiss = { gotoOpen = false },
         )
     }
 }
@@ -410,6 +477,17 @@ private fun EditorBody(
         EditorController.lineOfOffset(text, tab.value.selection.start)
     }
 
+    // 跳行 / 大纲跳转后把焦点还给正文（光标可见、可继续输入）
+    val focusRequester = remember { FocusRequester() }
+    val focusTick by EditorController.focusTick.collectAsStateWithLifecycle()
+    var focusTickSeen by remember(tab.path) { mutableIntStateOf(focusTick) }
+    LaunchedEffect(focusTick) {
+        if (focusTick != focusTickSeen) {
+            focusTickSeen = focusTick
+            runCatching { focusRequester.requestFocus() }
+        }
+    }
+
     // 查找跳转：切换命中时把光标移到该命中处
     LaunchedEffect(matchIndex, find.query) {
         if (find.query.isNotEmpty() && matches.isNotEmpty()) {
@@ -495,9 +573,9 @@ private fun EditorBody(
                     textStyle = style,
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     visualTransformation = transformation,
-                    modifier = Modifier.then(
-                        if (settings.wordWrap) Modifier.fillMaxWidth() else Modifier,
-                    ),
+                    modifier = Modifier
+                        .focusRequester(focusRequester)
+                        .then(if (settings.wordWrap) Modifier.fillMaxWidth() else Modifier),
                 )
             }
         }

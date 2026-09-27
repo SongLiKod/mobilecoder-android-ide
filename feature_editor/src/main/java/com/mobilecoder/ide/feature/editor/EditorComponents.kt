@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,6 +24,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
@@ -30,9 +34,11 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -41,9 +47,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
@@ -51,6 +63,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -146,8 +159,12 @@ fun EditorStatusBar(
     line: Int,
     column: Int,
     issueCount: Int,
+    symbolCount: Int,
     problemsOpen: Boolean,
+    outlineOpen: Boolean,
     onToggleProblems: () -> Unit,
+    onToggleOutline: () -> Unit,
+    onGotoLine: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -178,6 +195,10 @@ fun EditorStatusBar(
                 text = "$line:$column",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable(onClick = onGotoLine)
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
             )
             Text(
                 text = "共 ${tab.totalLines} 行",
@@ -194,6 +215,32 @@ fun EditorStatusBar(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                modifier = Modifier
+                    .background(
+                        color = if (outlineOpen) {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        } else {
+                            Color.Transparent
+                        },
+                        shape = MaterialTheme.shapes.small,
+                    )
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable(onClick = onToggleOutline)
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
+            ) {
+                Text(
+                    text = if (symbolCount > 0) "大纲 $symbolCount" else "大纲",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (outlineOpen) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -233,13 +280,19 @@ fun EditorStatusBar(
 }
 
 // ---------------------------------------------------------------------------
-// 问题面板（实时代码报错结果）
+// 底部面板：问题 / 大纲（方法导航）两个分页
 // ---------------------------------------------------------------------------
 
+/** 底部面板分页。 */
+enum class EditorPanelTab { PROBLEMS, OUTLINE }
+
 @Composable
-fun ProblemsPanel(
+fun EditorBottomPanel(
     tab: EditorController.EditorTab,
-    onJump: (EditorIssue) -> Unit,
+    active: EditorPanelTab,
+    onSwitch: (EditorPanelTab) -> Unit,
+    onJumpToIssue: (EditorIssue) -> Unit,
+    onJumpToSymbol: (CodeSymbol) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -252,13 +305,20 @@ fun ProblemsPanel(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 16.dp, end = 4.dp, top = 6.dp),
+                .padding(start = 8.dp, end = 4.dp, top = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            SectionHeader(
-                title = "问题（${tab.analysis.issues.size}）",
-                modifier = Modifier.weight(1f),
+            PanelTabChip(
+                label = "问题（${tab.analysis.issues.size}）",
+                selected = active == EditorPanelTab.PROBLEMS,
+                onClick = { onSwitch(EditorPanelTab.PROBLEMS) },
             )
+            PanelTabChip(
+                label = "大纲（${tab.analysis.symbols.size}）",
+                selected = active == EditorPanelTab.OUTLINE,
+                onClick = { onSwitch(EditorPanelTab.OUTLINE) },
+            )
+            Spacer(modifier = Modifier.weight(1f))
             IconButton(onClick = onClose) {
                 Icon(
                     imageVector = Icons.Default.Close,
@@ -267,48 +327,207 @@ fun ProblemsPanel(
                 )
             }
         }
-        if (tab.analysis.issues.isEmpty()) {
-            EmptyState(
-                title = "没有发现问题",
-                subtitle = "括号配对、字符串、合并冲突标记会在此列出",
+        when (active) {
+            EditorPanelTab.PROBLEMS -> ProblemsList(
+                tab = tab,
+                onJump = onJumpToIssue,
             )
+
+            EditorPanelTab.OUTLINE -> OutlineList(
+                tab = tab,
+                onJump = onJumpToSymbol,
+            )
+        }
+    }
+}
+
+/** 面板分页芯片。 */
+@Composable
+private fun PanelTabChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = if (selected) {
+            MaterialTheme.colorScheme.primary
         } else {
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(tab.analysis.issues) { issue ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onJump(issue) }
-                            .padding(horizontal = 16.dp, vertical = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(
-                            imageVector = if (issue.isError) {
-                                Icons.Default.ErrorOutline
-                            } else {
-                                Icons.Default.WarningAmber
-                            },
-                            contentDescription = null,
-                            tint = if (issue.isError) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                LocalAppPalette.current.warning.toComposeColor()
-                            },
-                            modifier = Modifier.size(15.dp),
-                        )
-                        Text(
-                            text = "${tab.relativePath.ifEmpty { tab.name }}:${issue.line}:${issue.column}  ${issue.message}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(start = 8.dp),
-                        )
-                    }
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        modifier = Modifier
+            .clip(MaterialTheme.shapes.small)
+            .background(
+                if (selected) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                } else {
+                    Color.Transparent
+                },
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    )
+}
+
+/** 问题列表（实时代码报错结果）。 */
+@Composable
+private fun ProblemsList(
+    tab: EditorController.EditorTab,
+    onJump: (EditorIssue) -> Unit,
+) {
+    if (tab.analysis.issues.isEmpty()) {
+        EmptyState(
+            title = "没有发现问题",
+            subtitle = "括号配对、字符串、合并冲突标记会在此列出",
+        )
+    } else {
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(tab.analysis.issues) { issue ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onJump(issue) }
+                        .padding(horizontal = 16.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = if (issue.isError) {
+                            Icons.Default.ErrorOutline
+                        } else {
+                            Icons.Default.WarningAmber
+                        },
+                        contentDescription = null,
+                        tint = if (issue.isError) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            LocalAppPalette.current.warning.toComposeColor()
+                        },
+                        modifier = Modifier.size(15.dp),
+                    )
+                    Text(
+                        text = "${tab.relativePath.ifEmpty { tab.name }}:${issue.line}:${issue.column}  ${issue.message}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
                 }
             }
         }
     }
+}
+
+/** 大纲列表（类 / 方法 / 标题导航）。 */
+@Composable
+private fun OutlineList(
+    tab: EditorController.EditorTab,
+    onJump: (CodeSymbol) -> Unit,
+) {
+    val symbols = tab.analysis.symbols
+    if (symbols.isEmpty()) {
+        EmptyState(
+            title = "没有可导航的符号",
+            subtitle = "类、方法、函数、标题等声明会在此列出，点按跳转",
+        )
+        return
+    }
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        items(symbols) { symbol ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onJump(symbol) }
+                    .padding(
+                        start = (16 + symbol.depth * 14).dp,
+                        end = 16.dp,
+                        top = 6.dp,
+                        bottom = 6.dp,
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = symbol.kind.badge,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .background(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                            shape = MaterialTheme.shapes.small,
+                        )
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                )
+                Text(
+                    text = symbol.name,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 8.dp),
+                )
+                Text(
+                    text = "${symbol.kind.label} ${symbol.line}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 跳转到行
+// ---------------------------------------------------------------------------
+
+@Composable
+fun GotoLineDialog(
+    currentLine: Int,
+    totalLines: Int,
+    onConfirm: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var input by remember { mutableStateOf(currentLine.coerceIn(1, totalLines).toString()) }
+    val parsed = input.trim().toIntOrNull()
+    val valid = parsed != null && parsed in 1..totalLines
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.imePadding(),
+        title = { Text("跳转到行") },
+        text = {
+            OutlinedTextField(
+                value = input,
+                onValueChange = { value -> input = value.filter { it.isDigit() }.take(9) },
+                label = { Text("行号（1 ~ $totalLines）") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Go,
+                ),
+                keyboardActions = KeyboardActions(
+                    onGo = {
+                        val line = parsed
+                        if (line != null && line in 1..totalLines) onConfirm(line)
+                    },
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                enabled = valid,
+                onClick = { if (parsed != null) onConfirm(parsed.coerceIn(1, totalLines)) },
+            ) { Text("跳转") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +611,12 @@ fun EditorOptionsMenu(
     expanded: Boolean,
     settings: EditorController.EditorSettings,
     onDismiss: () -> Unit,
+    canUndo: Boolean,
+    canRedo: Boolean,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+    onGotoLine: () -> Unit,
+    onOpenOutline: () -> Unit,
     onToggleLineNumbers: () -> Unit,
     onToggleWordWrap: () -> Unit,
     onToggleAutoSave: () -> Unit,
@@ -401,6 +626,36 @@ fun EditorOptionsMenu(
     modifier: Modifier = Modifier,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss, modifier = modifier) {
+        DropdownMenuItem(
+            text = { Text("撤销上一步") },
+            leadingIcon = {
+                Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = null)
+            },
+            enabled = canUndo,
+            onClick = onUndo,
+        )
+        DropdownMenuItem(
+            text = { Text("重做") },
+            leadingIcon = {
+                Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = null)
+            },
+            enabled = canRedo,
+            onClick = onRedo,
+        )
+        DropdownMenuItem(
+            text = { Text("跳转到行…") },
+            leadingIcon = {
+                Icon(Icons.Default.Tag, contentDescription = null)
+            },
+            onClick = onGotoLine,
+        )
+        DropdownMenuItem(
+            text = { Text("大纲 / 方法导航") },
+            leadingIcon = {
+                Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = null)
+            },
+            onClick = onOpenOutline,
+        )
         DropdownMenuItem(
             text = { Text("字体大小 ${settings.fontSize}") },
             leadingIcon = {

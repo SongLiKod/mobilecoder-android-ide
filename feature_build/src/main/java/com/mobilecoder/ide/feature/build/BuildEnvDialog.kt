@@ -40,37 +40,77 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mobilecoder.ide.core.storage.AppStorage
+import java.io.File
 import kotlinx.coroutines.launch
 
 /**
  * 「构建环境」页（PRD 2.7 移动端轻量化 Gradle 编译环境 / 构建环境就绪检测）。
  *
  * 设备端没有系统 JDK / Gradle，因此这里提供：
- *  - JDK / Gradle / Android SDK 三项就绪状态与目录展示；
- *  - SAF 选择本地 zip 导入到 `files/sdk/`（进度 + 校验 + 幂等，全程不联网）；
- *  - buildVariant 与构建内存上限设置（AppPreferences 读写）；
+ *  - 按当前项目**动态显示**所需组件（[BuildEnvironment.requirementsFor]）与就绪状态；
+ *  - **在线下载**（官方源 / 国内镜像，静默落位 `files/sdk/`，完成即可用）与 SAF 本地压缩包导入；
+ *  - buildVariant 与构建内存上限设置（同时作为 Gradle -Xmx 与看门狗阈值）；
  *  - 「环境体检」把路径与可用性打印到构建日志。
  */
 @Composable
 fun BuildEnvDialog(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    projectDir: File? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val status by BuildEnvironment.status.collectAsStateWithLifecycle()
 
     var variant by remember { mutableStateOf("debug") }
-    var memoryLimitMb by remember { mutableIntStateOf(1024) }
+    var memoryLimitMb by remember { mutableIntStateOf(2048) }
+    var source by remember { mutableStateOf(EnvSource.OFFICIAL) }
     var pendingKind by remember { mutableStateOf(EnvKind.JDK) }
     var importing by remember { mutableStateOf<EnvKind?>(null) }
     var importProgress by remember { mutableFloatStateOf(0f) }
+    var downloading by remember { mutableStateOf<EnvKind?>(null) }
+    var busyProgress by remember { mutableFloatStateOf(-1f) }
+    var stageText by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
-        runCatching { BuildEnvironment.refresh(context) }
+    LaunchedEffect(projectDir) {
+        runCatching { BuildEnvironment.refresh(context, projectDir) }
         runCatching { variant = AppStorage.preferences.buildVariant() }
         runCatching { memoryLimitMb = AppStorage.preferences.buildMemoryLimitMb() }
+        runCatching {
+            source = if (AppStorage.preferences.envDownloadSource() == "mirror") {
+                EnvSource.MIRROR
+            } else {
+                EnvSource.OFFICIAL
+            }
+        }
+    }
+
+    /** 在线下载：JDK/Gradle/Node 走 [EnvDownloader.install]，SDK 走 sdkmanager 链路。 */
+    val startDownload: (EnvKind) -> Unit = { kind ->
+        downloading = kind
+        stageText = ""
+        busyProgress = -1f
+        message = ""
+        scope.launch {
+            try {
+                val path = if (kind == EnvKind.SDK) {
+                    EnvDownloader.installSdk(context, source, { stageText = it }, { busyProgress = it })
+                } else {
+                    EnvDownloader.install(context, kind, source, { stageText = it }, { busyProgress = it })
+                }
+                message = "${kind.title} 已安装：$path"
+            } catch (c: DownloadCancelled) {
+                message = "已取消下载"
+            } catch (t: Throwable) {
+                message = "下载失败：${t.message ?: t::class.java.simpleName}"
+            } finally {
+                downloading = null
+                stageText = ""
+                busyProgress = -1f
+                runCatching { BuildEnvironment.refresh(context, projectDir) }
+            }
+        }
     }
 
     val launcher = rememberLauncherForActivityResult(
@@ -83,11 +123,11 @@ fun BuildEnvDialog(
             importProgress = 0f
             message = "正在解压 ${kind.title} …"
             try {
-                val path = BuildEnvironment.importZip(context, uri, kind) { p ->
+                val path = BuildEnvironment.importArchive(context, uri, kind) { p ->
                     importProgress = p
                 }
                 message = "${kind.title} 已导入：$path"
-                runCatching { BuildEnvironment.refresh(context) }
+                runCatching { BuildEnvironment.refresh(context, projectDir) }
             } catch (t: Throwable) {
                 message = "导入失败：${t.message ?: t::class.java.simpleName}"
             } finally {
@@ -110,39 +150,97 @@ fun BuildEnvDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
-                    text = "本页所有组件均通过本地 zip 离线导入，不会联网下载。",
+                    text = "按当前项目动态显示所需组件：可在线静默下载（完成即可用），也可导入本地压缩包（zip / tar.gz）。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
+                // ---- 下载源：官方 / 国内镜像（持久化，失败自动回退另一源） ----
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("下载源", style = MaterialTheme.typography.titleSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        EnvSource.entries.forEach { s ->
+                            FilterChip(
+                                selected = source == s,
+                                onClick = {
+                                    source = s
+                                    scope.launch {
+                                        runCatching {
+                                            AppStorage.preferences.setEnvDownloadSource(s.name.lowercase())
+                                        }
+                                    }
+                                },
+                                label = { Text(s.title, style = MaterialTheme.typography.labelMedium) },
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = "国内镜像：${EnvSource.MIRROR.subtitle}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                status?.required?.let { required ->
+                    Text(
+                        text = "当前项目所需：${required.joinToString(" · ") { it.title }}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+
                 status?.items?.forEach { item ->
                     EnvRow(
                         item = item,
-                        busy = importing != null,
+                        busy = importing != null || downloading != null,
                         onImport = {
                             pendingKind = item.kind
                             launcher.launch(
                                 arrayOf(
                                     "application/zip",
                                     "application/x-zip-compressed",
+                                    "application/gzip",
+                                    "application/x-gzip",
                                     "application/octet-stream",
                                 ),
                             )
                         },
+                        onDownload = { startDownload(item.kind) },
                     )
                 }
 
-                if (importing != null) {
+                if (importing != null || downloading != null) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        LinearProgressIndicator(
-                            progress = { importProgress },
+                        val p = if (importing != null) importProgress else busyProgress
+                        if (p >= 0f) {
+                            LinearProgressIndicator(
+                                progress = { p.coerceIn(0f, 1f) },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                        )
-                        Text(
-                            text = "解压中 ${(importProgress * 100).toInt()}%（完成后会自动修复可执行权限）",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = stageText.ifBlank {
+                                    "解压中 ${(importProgress * 100).toInt()}%（完成后自动修复可执行权限）"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (downloading != null) {
+                                TextButton(onClick = { EnvDownloader.cancel() }) {
+                                    Text("取消", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -194,11 +292,12 @@ fun BuildEnvDialog(
                             runCatching { AppStorage.preferences.setBuildMemoryLimitMb(memoryLimitMb) }
                         }
                     },
-                    valueRange = 256f..4096f,
+                    valueRange = 512f..8192f,
                     steps = 14,
                 )
                 Text(
-                    text = "构建期间内存增长超过该值、或系统已用内存超过 90% 时会自动中止构建，避免 OOM 崩溃。",
+                    text = "构建时写入项目 gradle.properties（org.gradle.jvmargs=-Xmx${memoryLimitMb}m），" +
+                        "同时作为看门狗阈值：内存增长超过该值、或系统已用内存超过 90% 时自动中止构建，避免 OOM。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -217,19 +316,20 @@ fun BuildEnvDialog(
         dismissButton = {
             TextButton(
                 onClick = {
-                    scope.launch { runCatching { BuildEnvironment.refresh(context) } }
+                    scope.launch { runCatching { BuildEnvironment.refresh(context, projectDir) } }
                 },
             ) { Text("重新检测") }
         },
     )
 }
 
-/** 单项环境状态：标题 + 状态徽标 + 路径 + 导入按钮 + 未就绪引导。 */
+/** 单项环境状态：标题 + 状态徽标 + 路径 + 「在线下载 / 导入压缩包」按钮 + 未就绪引导。 */
 @Composable
 private fun EnvRow(
     item: EnvItem,
     busy: Boolean,
     onImport: () -> Unit,
+    onDownload: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
@@ -244,7 +344,7 @@ private fun EnvRow(
                     color = MaterialTheme.colorScheme.onSurface,
                 )
                 Text(
-                    text = item.path ?: "未导入",
+                    text = item.path ?: "未安装",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
                     color = if (item.ready) {
@@ -258,7 +358,7 @@ private fun EnvRow(
             }
             Spacer(Modifier.width(8.dp))
             Text(
-                text = if (item.ready) "就绪" else "缺失",
+                text = if (item.ready) "就绪" else "未就绪",
                 style = MaterialTheme.typography.labelMedium,
                 color = if (item.ready) {
                     MaterialTheme.colorScheme.primary
@@ -267,8 +367,15 @@ private fun EnvRow(
                 },
             )
             Spacer(Modifier.width(8.dp))
-            OutlinedButton(onClick = onImport, enabled = !busy) {
-                Text("导入 zip", style = MaterialTheme.typography.labelMedium)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (!item.ready) {
+                    OutlinedButton(onClick = onDownload, enabled = !busy) {
+                        Text("在线下载", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                OutlinedButton(onClick = onImport, enabled = !busy) {
+                    Text("导入压缩包", style = MaterialTheme.typography.labelMedium)
+                }
             }
         }
         if (!item.ready) {

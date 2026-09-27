@@ -80,6 +80,7 @@ class TerminalSession(
     /** 命令拦截器（前缀缓冲 + 本地回显 + 回滚；目标来自 CLI 注册表：opencode / git）。 */
     private val interceptor = OpencodeInterceptor(
         targets = { OpencodeCli.interceptTargets() },
+        accept = { line -> acceptsBuiltIn(line) },
         onWritePty = { bytes -> writeRaw(bytes) },
         onLocalEcho = { text -> onMain { emulator.feed(text) } },
         onRollback = { count -> onMain { emulator.erasePrinted(count) } },
@@ -164,6 +165,20 @@ class TerminalSession(
     // ------------------------------------------------------------------
     // opencode CLI（PRD 2.4：终端手动输入）
     // ------------------------------------------------------------------
+
+    /**
+     * Enter 二次校验：`opencode <子命令>` 未注册但已安装外部 opencode CLI
+     *（`opencode tools install` 装的 `files/bin/opencode`）时交回 shell，
+     * 让 npm 安装的真实 CLI 在 PTY 里可交互运行；其余仍走进程内引擎。
+     */
+    private fun acceptsBuiltIn(line: String): Boolean {
+        val tokens = line.trim().split(Regex("\\s+"))
+        if (tokens.firstOrNull() != "opencode") return true
+        val sub = tokens.getOrNull(1) ?: return true
+        if (sub.startsWith("-")) return true
+        if (OpencodeCli.find(sub) != null) return true
+        return !TerminalManager.externalBinExists("opencode")
+    }
 
     /**
      * CLI 执行（PRD 2.4：终端手动输入）。

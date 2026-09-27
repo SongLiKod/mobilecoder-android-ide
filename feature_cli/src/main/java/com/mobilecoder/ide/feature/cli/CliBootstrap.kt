@@ -30,13 +30,17 @@ object CliBootstrap {
         // ---------------- init ----------------
         CliCommand(
             name = "init",
-            summary = "初始化项目骨架（安卓应用 / Kotlin CLI / 空目录）",
-            usage = "opencode init [--android|--cli|--empty]",
+            summary = "初始化项目骨架（安卓 / Kotlin CLI / Vue / HTML / Node / Flutter / 空目录）",
+            usage = "opencode init [--android|--cli|--vue|--html|--node|--flutter|--empty]",
             group = "项目",
         ) { args, cwd, emit ->
             val template = when {
                 args.any { it == "--empty" } -> com.mobilecoder.ide.core.storage.ProjectTemplate.EMPTY
                 args.any { it == "--cli" } -> com.mobilecoder.ide.core.storage.ProjectTemplate.KOTLIN_CLI
+                args.any { it == "--vue" } -> com.mobilecoder.ide.core.storage.ProjectTemplate.VUE_VITE
+                args.any { it == "--html" } -> com.mobilecoder.ide.core.storage.ProjectTemplate.STATIC_HTML
+                args.any { it == "--node" } -> com.mobilecoder.ide.core.storage.ProjectTemplate.NODE_APP
+                args.any { it == "--flutter" } -> com.mobilecoder.ide.core.storage.ProjectTemplate.FLUTTER
                 else -> com.mobilecoder.ide.core.storage.ProjectTemplate.ANDROID_APP
             }
             emit("在 ${cwd.absolutePath} 初始化 [${template.label}] 项目 …")
@@ -45,7 +49,19 @@ object CliBootstrap {
                 emit("目录已存在同名文件，未做修改（0 个新文件）")
             } else {
                 emit("已生成 $count 个文件")
-                emit("下一步：`opencode lint` 检查，`opencode build` 编译")
+                when (template) {
+                    com.mobilecoder.ide.core.storage.ProjectTemplate.VUE_VITE,
+                    com.mobilecoder.ide.core.storage.ProjectTemplate.NODE_APP,
+                    -> emit("下一步：`npm install` 安装依赖后运行")
+
+                    com.mobilecoder.ide.core.storage.ProjectTemplate.FLUTTER ->
+                        emit("下一步：`flutter create .` 生成平台目录，再 `flutter run`")
+
+                    com.mobilecoder.ide.core.storage.ProjectTemplate.STATIC_HTML ->
+                        emit("下一步：打开 index.html，或 `npx serve .` 启动静态服务器")
+
+                    else -> emit("下一步：`opencode lint` 检查，`opencode build` 编译")
+                }
             }
             0
         },

@@ -67,6 +67,9 @@ object EditorController {
         val hits: List<FileRepository.SearchHit> = emptyList(),
     )
 
+    /** 撤销 / 重做可用状态（对应活动文件，供工具栏按钮点亮）。 */
+    data class HistoryAvailability(val canUndo: Boolean, val canRedo: Boolean)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _tabs = MutableStateFlow<List<EditorTab>>(emptyList())
@@ -95,6 +98,15 @@ object EditorController {
 
     private val _search = MutableStateFlow(ProjectSearchState())
     val search: StateFlow<ProjectSearchState> = _search.asStateFlow()
+
+    private val _history = MutableStateFlow(HistoryAvailability(false, false))
+    val history: StateFlow<HistoryAvailability> = _history.asStateFlow()
+
+    private val _focusTick = MutableStateFlow(0)
+    val focusTick: StateFlow<Int> = _focusTick.asStateFlow()
+
+    /** 每个文件独立的撤销 / 重做历史。 */
+    private val histories = HashMap<String, EditHistory<TextFieldValue>>()
 
     private var initialized = false
     private var settingsLoaded = false
@@ -152,9 +164,11 @@ object EditorController {
         _projectRoot.value = path
         _collapsedDirs.value = emptySet()
         _tabs.value = _tabs.value.filter { it.path.startsWith(path) }
+        histories.keys.retainAll(_tabs.value.mapTo(HashSet()) { it.path })
         if (_tabs.value.none { it.path == _activePath.value }) {
             _activePath.value = _tabs.value.lastOrNull()?.path
         }
+        refreshHistory()
         refreshTree()
     }
 
@@ -188,6 +202,7 @@ object EditorController {
         val existing = _tabs.value.firstOrNull { it.path == path }
         if (existing != null) {
             _activePath.value = path
+            refreshHistory()
             if (targetLine > 1) jumpTo(path, targetLine, 1)
             return
         }
@@ -213,18 +228,23 @@ object EditorController {
             )
             _tabs.value = _tabs.value + tab
             _activePath.value = path
+            refreshHistory()
             scheduleAnalysis(path, content, tab.language)
         }
     }
 
     fun activate(path: String) {
-        if (_tabs.value.any { it.path == path }) _activePath.value = path
+        if (_tabs.value.any { it.path == path }) {
+            _activePath.value = path
+            refreshHistory()
+        }
     }
 
     fun closeTab(path: String) {
         val index = _tabs.value.indexOfFirst { it.path == path }
         if (index < 0) return
         analysisJobs.remove(path)?.cancel()
+        histories.remove(path)
         val rest = _tabs.value.filterNot { it.path == path }
         _tabs.value = rest
         if (_activePath.value == path) {
@@ -234,6 +254,7 @@ object EditorController {
                 rest[(index - 1).coerceIn(0, rest.size - 1)].path
             }
         }
+        refreshHistory()
     }
 
     fun save(path: String) {
@@ -277,11 +298,58 @@ object EditorController {
             }
             return
         }
+        recordHistory(path, current.value, value.text.length - current.value.text.length)
         _tabs.value = _tabs.value.map {
             if (it.path == path) it.copy(value = value) else it
         }
         scheduleAnalysis(path, value.text, current.language)
         scheduleAutoSave(path)
+    }
+
+    // ------------------------------------------------------------------
+    // 撤销 / 重做
+    // ------------------------------------------------------------------
+
+    private fun recordHistory(path: String, before: TextFieldValue, delta: Int) {
+        histories.getOrPut(path) { EditHistory() }.record(before, delta)
+        refreshHistory()
+    }
+
+    /** 撤销上一步（连续键入合并为一步，粘贴 / 多行删除各自成步）。 */
+    fun undo(path: String) = stepHistory(path, redo = false)
+
+    /** 重做一步。 */
+    fun redo(path: String) = stepHistory(path, redo = true)
+
+    private fun stepHistory(path: String, redo: Boolean) {
+        val history = histories[path] ?: return
+        val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        val next = if (redo) history.redo(tab.value) else history.undo(tab.value)
+        if (next == null) {
+            refreshHistory()
+            return
+        }
+        val language = tab.language
+        _tabs.value = _tabs.value.map {
+            if (it.path == path) it.copy(value = next) else it
+        }
+        scheduleAnalysis(path, next.text, language)
+        scheduleAutoSave(path)
+        refreshHistory()
+        requestEditorFocus()
+    }
+
+    private fun refreshHistory() {
+        val history = histories[_activePath.value]
+        _history.value = HistoryAvailability(
+            canUndo = history?.canUndo == true,
+            canRedo = history?.canRedo == true,
+        )
+    }
+
+    /** 请求把焦点还给编辑器正文（跳行 / 大纲跳转后恢复光标可见与可输入）。 */
+    fun requestEditorFocus() {
+        _focusTick.value += 1
     }
 
     private fun scheduleAnalysis(path: String, text: String, language: Language) {

@@ -13,7 +13,11 @@ import org.json.JSONObject
 enum class ProjectTemplate(val label: String) {
     EMPTY("空目录"),
     ANDROID_APP("安卓应用"),
-    KOTLIN_CLI("Kotlin 命令行");
+    KOTLIN_CLI("Kotlin 命令行"),
+    VUE_VITE("Vue 3 + Vite"),
+    STATIC_HTML("静态 HTML"),
+    NODE_APP("Node.js"),
+    FLUTTER("Flutter 应用");
 
     companion object {
         fun fromName(name: String?): ProjectTemplate =
@@ -135,11 +139,26 @@ class ProjectRepository(
         return meta
     }
 
-    /** 克隆仓库的模板展示推断：有 Gradle 构建脚本视为安卓/Gradle 工程，否则空目录。 */
+    /** 克隆 / 导入目录的模板推断（供项目卡片与构建环境动态需求使用）。 */
     private fun detectTemplate(dir: File): ProjectTemplate {
         val gradle = listOf("settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle")
             .any { File(dir, it).exists() }
-        return if (gradle) ProjectTemplate.ANDROID_APP else ProjectTemplate.EMPTY
+        if (gradle) return ProjectTemplate.ANDROID_APP
+
+        val pubspec = File(dir, "pubspec.yaml")
+        if (pubspec.exists()) {
+            val text = runCatching { pubspec.readText(Charsets.UTF_8) }.getOrDefault("")
+            if (text.contains("flutter:")) return ProjectTemplate.FLUTTER
+        }
+
+        val packageJson = File(dir, "package.json")
+        if (packageJson.exists()) {
+            val text = runCatching { packageJson.readText(Charsets.UTF_8) }.getOrDefault("")
+            return if (text.contains("\"vite\"")) ProjectTemplate.VUE_VITE else ProjectTemplate.NODE_APP
+        }
+
+        if (File(dir, "index.html").exists()) return ProjectTemplate.STATIC_HTML
+        return ProjectTemplate.EMPTY
     }
 
     suspend fun rename(relativePath: String, newName: String): Boolean {
@@ -186,8 +205,8 @@ class ProjectRepository(
             if (file.writeText2(content)) written++
         }
 
-        put(".gitignore", DEFAULT_GITIGNORE)
-        put("README.md", "# ${root.name}\n\n由 MobileCoder 移动码匠创建。\n")
+        put(".gitignore", DEFAULT_GITIGNORE + gitignoreExtraOf(template))
+        put("README.md", readmeOf(root, template))
 
         when (template) {
             ProjectTemplate.EMPTY -> Unit
@@ -235,9 +254,112 @@ class ProjectRepository(
                     """.trimIndent() + "\n",
                 )
             }
+
+            ProjectTemplate.VUE_VITE -> {
+                val title = titleOf(root)
+                put("package.json", VUE_PACKAGE_JSON.replace("%SLUG%", slugOf(root)))
+                put("vite.config.js", VITE_CONFIG_JS)
+                put("index.html", VUE_INDEX_HTML.replace("%NAME%", title))
+                put("src/main.js", VUE_MAIN_JS)
+                put("src/App.vue", VUE_APP_VUE.replace("%NAME%", title))
+                put("src/style.css", VUE_STYLE_CSS)
+            }
+
+            ProjectTemplate.STATIC_HTML -> {
+                val title = titleOf(root)
+                put("index.html", HTML_INDEX.replace("%NAME%", title))
+                put("css/style.css", HTML_STYLE)
+                put("js/main.js", HTML_SCRIPT)
+            }
+
+            ProjectTemplate.NODE_APP -> {
+                put("package.json", NODE_PACKAGE_JSON.replace("%SLUG%", slugOf(root)))
+                put("index.js", NODE_INDEX_JS.replace("%NAME%", titleOf(root)))
+            }
+
+            ProjectTemplate.FLUTTER -> {
+                val title = titleOf(root)
+                put("pubspec.yaml", FLUTTER_PUBSPEC.replace("%SLUG%", snakeOf(root)))
+                put("lib/main.dart", FLUTTER_MAIN_DART.replace("%NAME%", title))
+                put("analysis_options.yaml", FLUTTER_ANALYSIS)
+            }
         }
         return written
     }
+
+    /** 模板专属的 .gitignore 追加行（默认忽略 Gradle 产物）。 */
+    private fun gitignoreExtraOf(template: ProjectTemplate): String = when (template) {
+        ProjectTemplate.VUE_VITE,
+        ProjectTemplate.STATIC_HTML,
+        ProjectTemplate.NODE_APP,
+        -> "node_modules/\ndist/\n.vite/\n.env.local\n"
+
+        ProjectTemplate.FLUTTER ->
+            ".dart_tool/\n.pub-cache/\n.pub/\n.flutter-plugins\n.flutter-plugins-dependencies\n"
+
+        else -> ""
+    }
+
+    /** 每个模板的 README（含运行说明）。 */
+    private fun readmeOf(root: File, template: ProjectTemplate): String {
+        val header = "# ${root.name}\n\n由 MobileCoder 移动码匠创建。\n"
+        return header + when (template) {
+            ProjectTemplate.VUE_VITE -> """
+                |## 运行
+                |
+                |```bash
+                |npm install     # 首次安装依赖（需先安装 Node.js）
+                |npm run dev     # 启动开发服务器（默认 http://localhost:5173）
+                |npm run build   # 产物输出到 dist/
+                |```
+                |
+            """.trimMargin()
+
+            ProjectTemplate.NODE_APP -> """
+                |## 运行
+                |
+                |```bash
+                |npm start       # 等价于 node index.js（默认端口 3000）
+                |```
+                |
+            """.trimMargin()
+
+            ProjectTemplate.STATIC_HTML -> """
+                |## 运行
+                |
+                |直接用浏览器打开 `index.html`；或启动静态服务器：
+                |
+                |```bash
+                |npx serve .     # 需先安装 Node.js
+                |```
+                |
+            """.trimMargin()
+
+            ProjectTemplate.FLUTTER -> """
+                |## 运行
+                |
+                |```bash
+                |flutter create .   # 首次生成 android/ 等平台目录
+                |flutter run        # 编译并运行
+                |```
+                |
+            """.trimMargin()
+
+            else -> ""
+        }
+    }
+
+    /** 包名用的小写 slug。 */
+    private fun slugOf(root: File): String =
+        root.name.lowercase().replace(Regex("[^a-z0-9]+"), "").ifBlank { "app" }
+
+    /** Dart 包名用的 snake_case。 */
+    private fun snakeOf(root: File): String =
+        root.name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifBlank { "my_app" }
+
+    /** 嵌进源码字符串的展示名（剔除会破坏字面量的字符）。 */
+    private fun titleOf(root: File): String =
+        root.name.replace(Regex("[\"'$<>]"), " ").trim().ifBlank { "未命名项目" }
 
     // ---------------- 内部 ----------------
 
@@ -436,6 +558,337 @@ class ProjectRepository(
 
             repositories {
                 mavenCentral()
+            }
+        """.trimIndent() + "\n"
+
+        // ---------------- Vue 3 + Vite ----------------
+
+        private val NODE_PACKAGE_JSON = """
+            {
+              "name": "%SLUG%",
+              "private": true,
+              "version": "0.1.0",
+              "type": "module",
+              "main": "index.js",
+              "scripts": {
+                "start": "node index.js"
+              }
+            }
+        """.trimIndent() + "\n"
+
+        private val VUE_PACKAGE_JSON = """
+            {
+              "name": "%SLUG%",
+              "private": true,
+              "version": "0.1.0",
+              "type": "module",
+              "scripts": {
+                "dev": "vite",
+                "build": "vite build",
+                "preview": "vite preview"
+              },
+              "dependencies": {
+                "vue": "^3.4.21"
+              },
+              "devDependencies": {
+                "@vitejs/plugin-vue": "^5.0.4",
+                "vite": "^5.2.8"
+              }
+            }
+        """.trimIndent() + "\n"
+
+        private val VITE_CONFIG_JS = """
+            import { defineConfig } from 'vite'
+            import vue from '@vitejs/plugin-vue'
+
+            export default defineConfig({
+              plugins: [vue()],
+              server: {
+                host: true,
+                port: 5173,
+              },
+              build: {
+                outDir: 'dist',
+              },
+            })
+        """.trimIndent() + "\n"
+
+        private val VUE_INDEX_HTML = """
+            <!doctype html>
+            <html lang="zh-CN">
+              <head>
+                <meta charset="UTF-8" />
+                <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+                <title>%NAME%</title>
+              </head>
+              <body>
+                <div id="app"></div>
+                <script type="module" src="/src/main.js"></script>
+              </body>
+            </html>
+        """.trimIndent() + "\n"
+
+        private val VUE_MAIN_JS = """
+            import { createApp } from 'vue'
+            import App from './App.vue'
+            import './style.css'
+
+            createApp(App).mount('#app')
+        """.trimIndent() + "\n"
+
+        private val VUE_APP_VUE = """
+            <script setup>
+            import { ref } from 'vue'
+
+            const title = '%NAME%'
+            const count = ref(0)
+            </script>
+
+            <template>
+              <main class="page">
+                <h1>{{ title }}</h1>
+                <button type="button" @click="count++">点击次数：{{ count }}</button>
+                <p>修改 src/App.vue 并保存，开发服务器会即时热更新。</p>
+              </main>
+            </template>
+
+            <style scoped>
+            .page {
+              max-width: 42rem;
+              margin: 0 auto;
+              padding: 2rem 1rem;
+              font-family: system-ui, -apple-system, sans-serif;
+            }
+
+            button {
+              padding: 0.6rem 1.2rem;
+              font-size: 1rem;
+              border: 0;
+              border-radius: 8px;
+              background: #42b883;
+              color: #fff;
+              cursor: pointer;
+            }
+            </style>
+        """.trimIndent() + "\n"
+
+        private val VUE_STYLE_CSS = """
+            :root {
+              color-scheme: light dark;
+              font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            }
+
+            * {
+              box-sizing: border-box;
+            }
+
+            body {
+              margin: 0;
+              min-height: 100vh;
+              background: #f7fafc;
+              color: #1f2d3d;
+            }
+
+            @media (prefers-color-scheme: dark) {
+              body {
+                background: #101418;
+                color: #e6edf3;
+              }
+            }
+        """.trimIndent() + "\n"
+
+        // ---------------- 静态 HTML ----------------
+
+        private val HTML_INDEX = """
+            <!doctype html>
+            <html lang="zh-CN">
+              <head>
+                <meta charset="utf-8" />
+                <meta name="viewport" content="width=device-width, initial-scale=1" />
+                <title>%NAME%</title>
+                <link rel="stylesheet" href="css/style.css" />
+              </head>
+              <body>
+                <header class="site-header">
+                  <h1>%NAME%</h1>
+                  <nav><a href="#about">关于</a></nav>
+                </header>
+                <main>
+                  <section id="about">
+                    <p>这是一个静态 HTML 项目，由 MobileCoder 创建。</p>
+                    <button id="action" type="button">点我</button>
+                    <p id="output"></p>
+                  </section>
+                </main>
+                <script src="js/main.js"></script>
+              </body>
+            </html>
+        """.trimIndent() + "\n"
+
+        private val HTML_STYLE = """
+            * {
+              box-sizing: border-box;
+            }
+
+            body {
+              margin: 0;
+              font-family: system-ui, -apple-system, sans-serif;
+              background: #fdfdfd;
+              color: #222;
+            }
+
+            .site-header {
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              padding: 1rem 1.5rem;
+              background: #2563eb;
+              color: #fff;
+            }
+
+            .site-header h1 {
+              margin: 0;
+              font-size: 1.25rem;
+            }
+
+            .site-header a {
+              color: #fff;
+              text-decoration: none;
+            }
+
+            main {
+              max-width: 44rem;
+              margin: 0 auto;
+              padding: 2rem 1.5rem;
+            }
+
+            button {
+              padding: 0.6rem 1.2rem;
+              font-size: 1rem;
+              border: 0;
+              border-radius: 8px;
+              background: #2563eb;
+              color: #fff;
+              cursor: pointer;
+            }
+        """.trimIndent() + "\n"
+
+        private val HTML_SCRIPT = """
+            document.addEventListener('DOMContentLoaded', function () {
+              var button = document.getElementById('action')
+              var output = document.getElementById('output')
+              var clicks = 0
+              if (button && output) {
+                button.addEventListener('click', function () {
+                  clicks += 1
+                  output.textContent = '已点击 ' + clicks + ' 次'
+                })
+              }
+            })
+        """.trimIndent() + "\n"
+
+        // ---------------- Node.js ----------------
+
+        private val NODE_INDEX_JS = """
+            import http from 'node:http'
+
+            const port = process.env.PORT || 3000
+
+            const server = http.createServer((req, res) => {
+              res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+              res.end('Hello from %NAME%!\nrequest: ' + req.url + '\n')
+            })
+
+            server.listen(port, '0.0.0.0', () => {
+              console.log('listening on http://localhost:' + port)
+            })
+        """.trimIndent() + "\n"
+
+        // ---------------- Flutter ----------------
+
+        private val FLUTTER_PUBSPEC = """
+            name: %SLUG%
+            description: A Flutter project created by MobileCoder.
+            publish_to: 'none'
+            version: 0.1.0
+
+            environment:
+              sdk: '>=3.0.0 <4.0.0'
+
+            dependencies:
+              flutter:
+                sdk: flutter
+
+            dev_dependencies:
+              flutter_test:
+                sdk: flutter
+              flutter_lints: ^4.0.0
+
+            flutter:
+              uses-material-design: true
+        """.trimIndent() + "\n"
+
+        private val FLUTTER_ANALYSIS = """
+            include: package:flutter_lints/flutter.yaml
+        """.trimIndent() + "\n"
+
+        private val FLUTTER_MAIN_DART = """
+            import 'package:flutter/material.dart';
+
+            void main() {
+              runApp(const MyApp());
+            }
+
+            class MyApp extends StatelessWidget {
+              const MyApp({super.key});
+
+              @override
+              Widget build(BuildContext context) {
+                return MaterialApp(
+                  title: '%NAME%',
+                  debugShowCheckedModeBanner: false,
+                  theme: ThemeData(
+                    colorSchemeSeed: Colors.indigo,
+                    useMaterial3: true,
+                  ),
+                  home: const HomePage(),
+                );
+              }
+            }
+
+            class HomePage extends StatefulWidget {
+              const HomePage({super.key});
+
+              @override
+              State<HomePage> createState() => _HomePageState();
+            }
+
+            class _HomePageState extends State<HomePage> {
+              int count = 0;
+
+              @override
+              Widget build(BuildContext context) {
+                return Scaffold(
+                  appBar: AppBar(title: const Text('%NAME%')),
+                  body: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: <Widget>[
+                        const Text('Flutter 项目已就绪'),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: () {
+                            setState(() {
+                              count += 1;
+                            });
+                          },
+                          child: Text('点击次数：' + count.toString()),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }
             }
         """.trimIndent() + "\n"
     }

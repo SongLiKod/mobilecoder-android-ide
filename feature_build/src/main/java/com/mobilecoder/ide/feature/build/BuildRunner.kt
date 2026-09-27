@@ -195,6 +195,29 @@ object BuildRunner {
                 awaitBuild(BuildRequest(cwd, variant, false, extra), emit)
             },
         )
+        OpencodeCli.register(
+            CliCommand(
+                name = "tools",
+                summary = "终端工具安装（Node.js + opencode / claude AI CLI）",
+                usage = "opencode tools [install]",
+                group = "系统",
+            ) { args, _, emit ->
+                val install = args.any { it.equals("install", true) }
+                if (!install) {
+                    ToolInstaller.statusLines(appContext).forEach(emit)
+                    0
+                } else {
+                    val source = runCatching {
+                        if (AppStorage.preferences.envDownloadSource() == "mirror") {
+                            EnvSource.MIRROR
+                        } else {
+                            EnvSource.OFFICIAL
+                        }
+                    }.getOrDefault(EnvSource.OFFICIAL)
+                    ToolInstaller.install(appContext, source, emit)
+                }
+            },
+        )
     }
 
     /** CLI 侧：同步等待真实构建结束，逐行转发日志，返回 0/1。 */
@@ -380,22 +403,22 @@ object BuildRunner {
             )
         }
 
-        // ---- 2) 构建环境校验（离线，全部来自本地导入） ---------------------
+        // ---- 2) 构建环境校验（在线下载 / 本地导入，按项目类型动态过滤） ----
         _phase.value = "检查构建环境"
-        val status = BuildEnvironment.refresh(appContext)
+        val status = BuildEnvironment.refresh(appContext, request.projectDir)
         val jdk = status.item(EnvKind.JDK)?.takeIf { it.ready }?.path
         val gradleHome = status.item(EnvKind.GRADLE)?.takeIf { it.ready }?.path
         val sdk = BuildEnvironment.sdkDir(appContext)
         if (jdk == null) {
             return fail(
                 task, startedAt,
-                "构建环境未就绪：缺少 JDK。请点右上角「构建环境」，从本地 zip 导入 JDK",
+                "构建环境未就绪：缺少 JDK。请点右上角「构建环境」在线下载，或从本地导入",
             )
         }
-        if (!BuildEnvironment.sdkLooksReady(sdk)) {
+        if (status.required.contains(EnvKind.SDK) && !BuildEnvironment.sdkLooksReady(sdk)) {
             return fail(
                 task, startedAt,
-                "构建环境未就绪：缺少 Android SDK（需要 platforms / build-tools）。请在「构建环境」中导入 SDK zip",
+                "构建环境未就绪：缺少 Android SDK（需要 platforms / build-tools）。请在「构建环境」中在线安装 SDK，或导入 SDK 压缩包",
             )
         }
         val gradlew = File(request.projectDir, "gradlew")
@@ -403,9 +426,11 @@ object BuildRunner {
         if (gradleHome == null && !(gradlew.exists() && wrapperJar.exists())) {
             return fail(
                 task, startedAt,
-                "构建环境未就绪：缺少 Gradle 发行版。请在「构建环境」中导入 gradle-x.x-bin.zip",
+                "构建环境未就绪：缺少 Gradle 发行版。请在「构建环境」中在线下载，或导入 gradle-x.x-bin.zip",
             )
         }
+        // 内存上限落地：写入项目 gradle.properties（org.gradle.jvmargs），返回 MB 值
+        val heapMb = syncGradleHeap(request.projectDir)
 
         // ---- 3) 命令组装 -------------------------------------------------
         val tasks = buildList {
@@ -420,7 +445,7 @@ object BuildRunner {
             "chmod +x '${bin.absolutePath}' 2>/dev/null; '${bin.absolutePath}'"
         }
         val cmd = "$base ${tasks.joinToString(" ")} --no-daemon --stacktrace"
-        val envArray = buildEnvArray(jdk, gradleHome)
+        val envArray = buildEnvArray(jdk, gradleHome, heapMb)
         BuildEnvironment.tmpDir(appContext).mkdirs()
         BuildEnvironment.gradleUserHome(appContext).mkdirs()
 
@@ -525,9 +550,8 @@ object BuildRunner {
     // 子进程环境（CliNative envArray 会整体替换子进程环境，必须给全）
     // ------------------------------------------------------------------
 
-    private fun buildEnvArray(jdk: String, gradleHome: String?): Array<String> {
+    private fun buildEnvArray(jdk: String, gradleHome: String?, heapMb: Int): Array<String> {
         val files = appContext.filesDir
-        val cache = appContext.cacheDir
         val sdk = BuildEnvironment.sdkDir(appContext)
         return arrayOf(
             "HOME=${files.absolutePath}",
@@ -542,9 +566,31 @@ object BuildRunner {
             "GRADLE_USER_HOME=${BuildEnvironment.gradleUserHome(appContext).absolutePath}",
             "MOBILECODER_HOME=${files.absolutePath}",
             "MOBILECODER_GRADLE_HOME=${gradleHome.orEmpty()}",
-            "GRADLE_OPTS=-Dorg.gradle.daemon=false",
+            "GRADLE_OPTS=-Xmx${heapMb}m -Dorg.gradle.daemon=false",
             "JAVA_OPTS=-Dfile.encoding=UTF-8",
         )
+    }
+
+    /**
+     * 让项目 `gradle.properties` 的 `org.gradle.jvmargs` 与用户设定的内存上限一致
+     * （[com.mobilecoder.ide.core.storage.AppPreferences.buildMemoryLimitMb]），每次构建前执行，
+     * Slider 调整后下一次构建即生效。
+     *
+     * @return 当前内存上限（MB）
+     */
+    private suspend fun syncGradleHeap(projectDir: File): Int {
+        val heapMb = runCatching { AppStorage.preferences.buildMemoryLimitMb() }.getOrDefault(2048)
+        runCatching {
+            val file = File(projectDir, "gradle.properties")
+            val line = "org.gradle.jvmargs=-Xmx${heapMb}m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8"
+            val old = if (file.exists()) file.readText() else ""
+            val kept = old.lines().dropLastWhile { it.isBlank() }
+                .filter { !it.startsWith("org.gradle.jvmargs") }
+            val newText = (kept + line).joinToString("\n") + "\n"
+            if (newText != old) file.writeText(newText)
+        }
+        Log.i(TAG, "构建内存上限 → -Xmx${heapMb}m")
+        return heapMb
     }
 
     // ------------------------------------------------------------------

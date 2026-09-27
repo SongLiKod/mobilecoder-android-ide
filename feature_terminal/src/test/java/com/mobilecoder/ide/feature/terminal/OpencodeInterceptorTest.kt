@@ -114,4 +114,38 @@ class OpencodeInterceptorTest {
         assertEquals(line, interceptor.enter())
         assertEquals("", pty.toString())
     }
+
+    @Test
+    fun `accept 拒绝时回滚回显并整行交回 shell`() {
+        // 模拟：`opencode <子命令>` 未注册且外部 opencode CLI 已安装 → 交回 shell 执行
+        val outer = OpencodeInterceptor(
+            targets = { listOf("opencode", "git") },
+            accept = { line -> !line.startsWith("opencode external") },
+            onWritePty = { bytes -> pty.append(String(bytes, Charsets.UTF_8)) },
+            onLocalEcho = { text -> echo.append(text) },
+            onRollback = { count -> rollbacks += count },
+        )
+        val line = "opencode external run"
+        outer.feed(line)
+
+        assertNull(outer.enter())
+        assertEquals(line.length, rollbacks)          // 本地回显全部撤销
+        assertEquals("$line\r", pty.toString())       // 整行 + 回车交给 PTY
+    }
+
+    @Test
+    fun `accept 放行时照常拦截`() {
+        val strict = OpencodeInterceptor(
+            targets = { listOf("opencode", "git") },
+            accept = { line -> line.startsWith("opencode help") },
+            onWritePty = { bytes -> pty.append(String(bytes, Charsets.UTF_8)) },
+            onLocalEcho = { text -> echo.append(text) },
+            onRollback = { count -> rollbacks += count },
+        )
+        val line = "opencode help"
+        strict.feed(line)
+
+        assertEquals(line, strict.enter())
+        assertEquals("", pty.toString())
+    }
 }

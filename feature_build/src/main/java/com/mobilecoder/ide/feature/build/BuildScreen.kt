@@ -126,7 +126,7 @@ fun BuildScreen(
 
     LaunchedEffect(projectPath) {
         BuildRunner.init(context)
-        runCatching { BuildEnvironment.refresh(context) }
+        runCatching { BuildEnvironment.refresh(context, projectDir) }
         runCatching { variant = AppStorage.preferences.buildVariant() }
     }
 
@@ -151,7 +151,7 @@ fun BuildScreen(
     }
 
     if (showEnv) {
-        BuildEnvDialog(onDismiss = { showEnv = false })
+        BuildEnvDialog(onDismiss = { showEnv = false }, projectDir = projectDir)
     }
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -198,6 +198,7 @@ fun BuildScreen(
         }
 
         if (!isProject) {
+            val isNodeProject = remember(projectPath) { File(projectPath, "package.json").exists() }
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -208,12 +209,16 @@ fun BuildScreen(
             ) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        text = "该项目不是安卓 Gradle 工程",
+                        text = if (isNodeProject) "该项目是 Node / Vue 工程" else "该项目不是安卓 Gradle 工程",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onErrorContainer,
                     )
                     Text(
-                        text = "缺少 settings.gradle / build.gradle。请在「CLI」面板执行 `opencode init` 生成安卓项目骨架后再构建。",
+                        text = if (isNodeProject) {
+                            "Node 工程无需 Gradle 构建：请点右上角「构建环境」在线下载 Node.js，再在「终端」执行 npm install / npm run build。"
+                        } else {
+                            "缺少 settings.gradle / build.gradle。请在「CLI」面板执行 `opencode init` 生成安卓项目骨架后再构建。"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer,
                     )

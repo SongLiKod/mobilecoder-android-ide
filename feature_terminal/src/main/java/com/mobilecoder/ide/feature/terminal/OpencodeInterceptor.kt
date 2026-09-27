@@ -22,6 +22,11 @@ package com.mobilecoder.ide.feature.terminal
 class OpencodeInterceptor(
     /** 当前可拦截的命令前缀（如 `opencode`、`git`），每次判断时动态求值。 */
     private val targets: () -> List<String> = { listOf("opencode") },
+    /**
+     * Enter 时二次校验：命中目标前缀的行是否仍交给进程内 CLI。
+     * 返回 false（如已安装外部 `opencode` CLI 且子命令未注册）→ 回滚回显、整行交回 shell。
+     */
+    private val accept: (String) -> Boolean = { true },
     /** 写给 PTY（shell / 交互程序）的字节。 */
     private val onWritePty: (ByteArray) -> Unit,
     /** 本地回显：把字符直接画进屏幕缓冲。 */
@@ -163,7 +168,7 @@ class OpencodeInterceptor(
                 }
                 val echoed = text.length
                 reset()
-                if (hit) return text
+                if (hit && accept(text)) return text
                 onRollback(echoed)
                 onWritePty(text.toByteArray() + BYTE_CR)
                 return null
