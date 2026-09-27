@@ -78,7 +78,12 @@ fun BranchTab(
                 ) { Text("中止合并") }
             }
             Text(
-                text = "共 ${branches.size} 个本地分支",
+                text = run {
+                    val localCount = branches.count { !it.isRemote }
+                    val remoteCount = branches.size - localCount
+                    if (remoteCount == 0) "共 $localCount 个本地分支"
+                    else "共 $localCount 个本地分支 · $remoteCount 个远程分支"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),

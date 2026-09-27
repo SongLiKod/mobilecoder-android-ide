@@ -669,7 +669,7 @@ object GitController {
             postError("分支名不能为空")
             return@withRepo false
         }
-        val ok = runCatching { GitNative.createBranch(name.trim()) }.getOrDefault(false)
+        val ok = runCatching { GitNative.createBranch(name.trim(), null) }.getOrDefault(false)
         if (ok) {
             refreshLocked(all = true)
             postInfo("已创建分支 " + name.trim())
@@ -679,7 +679,12 @@ object GitController {
         ok
     }
 
-    /** @return 0 成功 / 2 已在该分支 / -1 失败 */
+    /**
+     * 切换分支（远程项走 DWIM：本地不存在时自动建跟踪分支或分离检出）。
+     *
+     * @return 0 已切换 / 2 已在该分支 / 3 DWIM 新建跟踪分支 / 4 分离头指针 /
+     *   -1 失败 / -2 引用不存在 / -3 多个远程存在同名分支
+     */
     suspend fun checkoutBranch(name: String): Int = withRepo(-1) {
         if (!ensureOpen()) return@withRepo -1
         val rc = try {
@@ -694,14 +699,28 @@ object GitController {
                 refreshLocked(all = true)
             }
             2 -> postInfo("已经在分支 $name")
+            3 -> {
+                postInfo("已创建并切换到分支 $name（已设置上游）")
+                refreshLocked(all = true)
+            }
+            4 -> {
+                postInfo("已检出 $name（分离头指针）")
+                refreshLocked(all = true)
+            }
+            -2 -> postError("分支不存在：$name")
+            -3 -> postError(nativeError("多个远程存在同名分支"))
             else -> postError("切换分支失败：" + nativeError("工作区可能有冲突改动"))
         }
         rc
     }
 
+    /**
+     * 删除分支。远程项（remotes/ 前缀）删除远程跟踪引用；本地分支按 -d 语义
+     * 检查（未合并或正在检出的分支会给出 git 同款拒绝原因）。
+     */
     suspend fun deleteBranch(name: String): Boolean = withRepo(false) {
         if (!ensureOpen()) return@withRepo false
-        val ok = runCatching { GitNative.deleteBranch(name) }.getOrDefault(false)
+        val ok = runCatching { GitNative.deleteBranch(name, false) }.getOrDefault(false)
         if (ok) {
             refreshLocked(all = true)
             postInfo("已删除分支 $name")
