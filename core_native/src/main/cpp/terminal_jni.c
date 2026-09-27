@@ -220,6 +220,9 @@ Java_com_mobilecoder_ide_core_nativebridge_TerminalNative_create(
         setenv("COLORTERM", "truecolor", 1);
         setenv("LANG", "C.UTF-8", 1);
         setenv("TMPDIR", "/data/data/com.mobilecoder.ide/cache/tmp", 1);
+        /* 默认 HOME/PATH（overwrite=0：Kotlin 层 TerminalNative.setEnv 的值优先） */
+        setenv("HOME", "/data/data/com.mobilecoder.ide/files", 0);
+        setenv("PATH", "/data/data/com.mobilecoder.ide/files/bin:/system/bin:/system/xbin", 0);
         free(workdir);
         execl("/system/bin/sh", "sh", (char *) NULL);
         execlp("sh", "sh", (char *) NULL);
@@ -327,6 +330,28 @@ Java_com_mobilecoder_ide_core_nativebridge_TerminalNative_resize(
         return -1;
     }
     return 0;
+}
+
+/*
+ * Method:    setEnv    Signature: (Ljava/lang/String;Ljava/lang/String;)I
+ *
+ * 设置**当前进程**环境变量（子进程 fork 时继承）。
+ * Kotlin 层在 App 启动时调用，用于注入 HOME / PATH / ANDROID_HOME / JAVA_HOME 等。
+ */
+JNIEXPORT jint JNICALL
+Java_com_mobilecoder_ide_core_nativebridge_TerminalNative_setEnv(
+        JNIEnv *env, jobject thiz, jstring key, jstring value) {
+    (void) thiz;
+    char *k = mc_jstring_to_cstr(env, key);
+    char *v = mc_jstring_to_cstr(env, value);
+    int rc = -1;
+
+    if (k != NULL && k[0] != '\0' && v != NULL) {
+        rc = setenv(k, v, 1) == 0 ? 0 : -1;
+    }
+    free(k);
+    free(v);
+    return rc;
 }
 
 /*

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        feature_build 自身需要的权限与组件（与 app/AndroidManifest.xml 中的声明一致，
+        manifest 合并后不会产生冲突；单独声明可让本模块在被单独引用时也可用）。
+        对应 TECH.md 6. 权限清单：WAKE_LOCK 后台编译保活、POST_NOTIFICATIONS 任务完成通知。
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application>
+        <!--
+            构建期间的前台服务：承载「构建进行中…」通知 + PARTIAL_WAKE_LOCK，
+            锁屏 / 切后台不中断编译（PRD 4.2「后台任务保活」）。
+        -->
+        <service
+            android:name="com.mobilecoder.ide.feature.build.BuildForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>

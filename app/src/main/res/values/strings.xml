@@ -10,4 +10,8 @@
     <string name="theme_dark">深色</string>
     <string name="theme_system">跟随系统</string>
     <string name="theme_scope_hint">生效范围：全部页面、代码高亮、终端配色、Git Diff 配色、日志高亮、弹窗组件</string>
+
+    <!-- 全局导航 -->
+    <string name="no_project_open">未打开项目</string>
+    <string name="no_project_hint">尚未打开项目，请先在「项目」页新建或打开一个项目</string>
 </resources>

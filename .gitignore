@@ -3,6 +3,8 @@
 .idea/
 .kotlin/
 build/
+# 例外：源码包目录 com/mobilecoder.ide.feature.build（否则会被上面的 build/ 规则误忽略）
+!**/src/main/java/**/build/
 local.properties
 captures/
 .externalNativeBuild/
