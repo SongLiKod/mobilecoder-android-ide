@@ -312,16 +312,30 @@ Java_com_mobilecoder_ide_core_nativebridge_CliNative_exec(
         setpgid(0, 0); /* 独立进程组，便于整组终止 */
 
         if (workdir != NULL && chdir(workdir) != 0) {
-            const char *msg = "mobilecoder: 无法进入工作目录\r\n";
+            char msg[512];
+            snprintf(msg, sizeof(msg),
+                     "mobilecoder: 无法进入工作目录 (%s)\r\n", strerror(errno));
             ssize_t ignored = write(STDERR_FILENO, msg, strlen(msg));
             (void) ignored;
             _exit(127);
         }
 
         execvpe(argv[0], argv, envp);
-        const char *msg = "mobilecoder: 命令执行失败 (execvp)\r\n";
-        ssize_t ignored = write(STDERR_FILENO, msg, strlen(msg));
-        (void) ignored;
+        {
+            /*
+             * 必须把 errno 打出来：原先只有固定文案 + _exit(127)，
+             * 127 只代表「execvpe 返回了」，分不清是 glibc 解释器缺失（ENOENT）、
+             * SELinux/执行位（EACCES）还是架构不匹配（ENOEXEC），
+             * 线上排查只能靠猜。
+             */
+            char msg[512];
+            int e = errno;
+            snprintf(msg, sizeof(msg),
+                     "mobilecoder: 命令执行失败 (execvp): %s (errno=%d, %s)\r\n",
+                     strerror(e), e, argv[0]);
+            ssize_t ignored = write(STDERR_FILENO, msg, strlen(msg));
+            (void) ignored;
+        }
         _exit(127);
     }
 

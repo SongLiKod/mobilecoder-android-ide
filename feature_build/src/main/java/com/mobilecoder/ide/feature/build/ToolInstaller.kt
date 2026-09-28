@@ -4,6 +4,7 @@ import android.content.Context
 import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -169,6 +170,19 @@ object ToolInstaller {
             emit("Node.js 已就绪：${exec?.absolutePath ?: File(BuildEnvironment.sdkDir(context), "node").absolutePath}")
         }
 
+        // 1.5) 执行探测：上面只判断「文件在不在」，这里真跑一次，
+        //      否则 npm 跑到最后只给一个看不出原因的 127。
+        //      ok = 继续；skip = 没探成（并发上限），不拦；fail = 真起不来
+        val probe = probeNode(context)
+        if (probe.startsWith("fail")) {
+            emit("[ERROR] node 无法执行：${probe.removePrefix("fail ").trim()}")
+            emit("       文件存在 ≠ 能启动：官方 nodejs.org 构建链的是 glibc，Android 上没有")
+            emit("       /lib/ld-linux-aarch64.so.1，内核在 exec 阶段就失败；执行位/SELinux、")
+            emit("       架构不匹配也会是同一副症状。上面一行就是内核给出的具体原因。")
+            emit("       自查：终端里执行 \$HOME/sdk/node/bin/node -v")
+            return@withContext 1
+        }
+
         // 2) npm 全局 prefix → files（bin 落入 files/bin）
         writeNpmPrefix(context)
         emit("npm prefix → ${context.filesDir.absolutePath}")
@@ -181,6 +195,9 @@ object ToolInstaller {
             val code = runNpm(context, npmArgs("install", listOf("-g") + targets, source), emit)
             if (code != 0) {
                 emit("[ERROR] npm 安装失败（退出码 $code）")
+                if (code == 127) {
+                    emit("       127 = exec 失败，具体原因见上方 `mobilecoder: 命令执行失败` 那一行")
+                }
                 // npm 半途失败也可能已经往 files/bin 写了文件，仍要补 shebang 与执行位，
                 // 否则剩下的命令在终端里直接报 Permission denied
                 val partial = fixBinScripts(context)
@@ -290,7 +307,79 @@ object ToolInstaller {
         runNpm(context, npmArgs("search", keywords, source), emit)
     }
 
-    /** 拼 npm 参数：统一附加镜像 registry（如需）。 */
+    /** 输出里的 ANSI 转义（npm 与构建工具都会打，不剥会在 UI 上显示成乱码）。 */
+    private val ANSI = Regex("\\u001b\\[[0-9;?]*[A-Za-z]")
+
+    /**
+     * 子进程环境：`HOME` 指向 files，npm 因此自动读 `files/.npmrc`；
+     * `PATH` 首位是 `files/bin`（node / npm / npx 入口都在这里）。
+     */
+    private fun execEnv(context: Context): Array<String> {
+        val files = context.filesDir
+        return arrayOf(
+            "HOME=${files.absolutePath}",
+            "TMPDIR=${BuildEnvironment.tmpDir(context).absolutePath}",
+            "PATH=${BuildEnvironment.binDir(context).absolutePath}:/system/bin:/system/xbin:/vendor/bin",
+            "LANG=C.UTF-8",
+            "SHELL=/system/bin/sh",
+        )
+    }
+
+    /**
+     * 真跑一次 `node --version`，**与 npm 走完全相同的 exec 路径**，
+     * 返回：
+     *  - `ok <版本>`          —— 能启动；
+     *  - `fail <原因>`        —— 启动失败，原因取自 stderr（含内核 errno 文案）；
+     *  - `skip <原因>`        —— 没探成（并发上限等），不代表 node 坏了。
+     *
+     * 为什么必须单独探：[nodeReady] 只看 ELF / 文件存在性。官方 nodejs.org 的
+     * linux 构建链的是 glibc，同样「存在 + 有执行位」，但内核解析
+     * `/lib/ld-linux-aarch64.so.1` 时就 ENOENT。不先探一次，就得等
+     * `npm i -g` 跑完才拿到一个孤零零的 127，看不出任何原因。
+     */
+    private suspend fun probeNode(context: Context): String {
+        val files = context.filesDir
+        val node = BuildEnvironment.resolveNodeExec(files)
+            ?: return "fail 未找到可执行的 node（files/bin/node 与 files/sdk/node/bin/node 均不可用）"
+        val first = AtomicReference<String>()
+        val exit = CompletableDeferred<Int>()
+        val pid = CliNative.exec(
+            arrayOf(node.absolutePath, "--version"),
+            files.absolutePath,
+            execEnv(context),
+            object : CliCallback {
+                override fun onOutput(pid: Int, stream: Int, data: ByteArray?) {
+                    if (data == null || first.get() != null) return
+                    val line = String(data, Charsets.UTF_8)
+                        .replace(ANSI, "")
+                        .lineSequence()
+                        .map { it.trim() }
+                        .firstOrNull { it.isNotEmpty() } ?: return
+                    first.compareAndSet(null, line)
+                }
+
+                override fun onExit(pid: Int, code: Int) {
+                    exit.complete(code)
+                }
+            },
+        )
+        if (pid < 0) return "skip 并发进程数已达上限，未探测"
+        val code = try {
+            exit.await()
+        } finally {
+            if (!exit.isCompleted) runCatching { CliNative.killProcess(pid, 15) }
+        }
+        val out = first.get()
+        return when {
+            code == 0 -> "ok ${out.orEmpty()}"
+            out.isNullOrBlank() -> "fail 无法启动（退出码 $code，无输出）"
+            else -> "fail $out（退出码 $code）"
+        }
+    }
+
+    /**
+     * 拼 npm 参数：统一附加镜像 registry（如需）。
+     */
     private fun npmArgs(cmd: String, rest: List<String>, source: EnvSource): List<String> =
         listOf(cmd) + rest + if (source == EnvSource.MIRROR) {
             listOf("--registry=https://registry.npmmirror.com")
@@ -328,20 +417,12 @@ object ToolInstaller {
             }
         }
         if (node != null) emit("node → ${node.absolutePath}")
-        val env = arrayOf(
-            "HOME=${files.absolutePath}",
-            "TMPDIR=${BuildEnvironment.tmpDir(context).absolutePath}",
-            "PATH=${BuildEnvironment.binDir(context).absolutePath}:/system/bin:/system/xbin:/vendor/bin",
-            "LANG=C.UTF-8",
-            "SHELL=/system/bin/sh",
-        )
         val exit = CompletableDeferred<Int>()
-        val ansi = Regex("\\u001b\\[[0-9;?]*[A-Za-z]")
-        val pid = CliNative.exec(argv, files.absolutePath, env, object : CliCallback {
+        val pid = CliNative.exec(argv, files.absolutePath, execEnv(context), object : CliCallback {
             override fun onOutput(pid: Int, stream: Int, data: ByteArray?) {
                 if (data == null) return
                 String(data, Charsets.UTF_8)
-                    .replace(ansi, "")
+                    .replace(ANSI, "")
                     .split('\n')
                     .map { it.trim() }
                     .filter { it.isNotEmpty() }
