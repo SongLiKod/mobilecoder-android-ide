@@ -58,13 +58,7 @@ object GitCli {
         "clone" to "克隆仓库（-b 分支，目标目录可选）",
         "rev-parse" to "--show-toplevel / --abbrev-ref / HEAD",
         "config" to "user.name / user.email 读写",
-        "help" to "本帮助",
-    )
-
-    /** 终端未知子命令的兜底提示。 */
-    private val UNSUPPORTED = setOf(
-        "rebase", "stash", "cherry-pick", "bisect", "submodule", "blame", "show",
-        "clean", "grep", "am", "revert", "worktree", "notes", "bundle",
+        "help" to "本帮助；help porcelain 列出日常命令参考",
     )
 
     /**
@@ -105,7 +99,7 @@ object GitCli {
             }
 
             "--help", "-h", "help" -> {
-                printHelp(emit)
+                if (rest.firstOrNull() == "porcelain") printPorcelain(emit) else printHelp(emit)
                 0
             }
 
@@ -140,18 +134,24 @@ object GitCli {
         emit("可用子命令（进程内 libgit2 实现）：")
         COMMANDS.forEach { (name, desc) -> emit("  %-9s %s".format(name, desc)) }
         emit("")
-        emit("说明：设备上没有 git 可执行文件，输出与标准 git 对齐，子命令集有限；")
-        emit("      未实现的子命令会给出提示。任意子命令后加 --help 等价于本帮助。")
+        emit("说明：设备上没有 git 可执行文件，输出与标准 git 对齐，子命令集有限。")
+        emit("日常命令完整参考：git help porcelain")
+        emit("也可在 Git 页 → 设置 →「日常命令参考」查阅。")
+    }
+
+    private fun printPorcelain(emit: (String) -> Unit) {
+        GitPorcelain.lines().forEach(emit)
     }
 
     private fun unknown(sub: String, emit: (String) -> Unit): Int {
-        if (sub in UNSUPPORTED) {
-            emit("git: '$sub' 本终端尚未实现（进程内 libgit2 子命令集有限）")
-            emit("可视化操作请到「Git」页；可用子命令见 `git help`")
+        if (sub in GitPorcelain.referenceNames) {
+            emit("git: '$sub' 为 Main Porcelain 日常命令，本终端尚未实现")
+            emit("可视化操作请到「Git」页；完整参考见 `git help porcelain`")
             return 1
         }
         emit("git: '$sub' is not a git command. See 'git help'.")
         emit("已支持：" + COMMANDS.keys.joinToString(" "))
+        emit("日常命令参考：git help porcelain")
         return 1
     }
 
