@@ -49,6 +49,14 @@ android {
         compose = true
     }
 
+    lint {
+        // 刻意停在 targetSdk = 28：Android 10+ 对 targetSdk >= 29 的应用禁止
+        // execve() 自己 app home 目录里的文件（W^X，SELinux 拒 execute_no_trans），
+        // 会把内置终端、Gradle 构建、npm 全部打死（报成 Permission denied）。
+        // 本项目只自行分发、不上 Google Play，这条按 Play 政策写死的检查不适用。
+        disable += "ExpiredTargetSdkVersion"
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/INDEX.LIST"

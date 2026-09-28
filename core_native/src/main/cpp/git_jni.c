@@ -745,6 +745,92 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_workdirPath(JNIEnv *env, jc
 /*  JNI —— 克隆                                                        */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  克隆 —— 上游配置兜底                                              */
+/* ------------------------------------------------------------------ */
+
+/* 真 git clone 会写 branch.<检出分支>.remote / .merge；缺了它们，
+ * clone 完第一次 `git pull` 就报
+ *   There is no tracking information for the current branch.
+ * 必须手动 `git branch --set-upstream-to=...` 才能用。
+ *
+ * libgit2 的 update_head_to_new_branch 在本地分支已存在（GIT_EEXISTS）时
+ * 会直接短路，跳过 setup_tracking_config（clone.c:125-137），上游就丢了。
+ * 这里在克隆收尾时按「缺失才写、已有绝不覆盖」补一次：
+ *   - 未出生 / 分离头指针 → 与真 git 一致，不自动关联；
+ *   - 远程取真正拥有 refs/remotes/<r>/<分支> 的那个，找不到再退回 origin。 */
+static void mc_ensure_tracking_config(git_repository *repo)
+{
+	git_reference *head = NULL;
+	git_config *cfg = NULL;
+	const char *refname, *branch, *val = NULL;
+	char key[MC_REFNAME_MAX];
+	char remote_name[MC_REFNAME_MAX];
+	char tracking_ref[MC_REFNAME_MAX];
+	int have_remote = 0;
+
+	if (repo == NULL)
+		return;
+	if (git_repository_head(&head, repo) < 0 || head == NULL)
+		return; /* 尚无提交，没有分支可关联 */
+
+	refname = git_reference_name(head);
+	if (strncmp(refname, "refs/heads/", 11) != 0) {
+		git_reference_free(head);
+		return;
+	}
+	branch = refname + 11;
+
+	if (git_repository_config(&cfg, repo) < 0) {
+		git_reference_free(head);
+		return;
+	}
+
+	snprintf(key, sizeof(key), "branch.%s.merge", branch);
+	if (git_config_get_string(&val, cfg, key) == 0 && val != NULL && val[0] != '\0')
+		goto done; /* 用户已配置过上游，保持原样 */
+
+	remote_name[0] = '\0';
+	{
+		git_strarray remotes = {NULL, 0};
+		size_t i;
+
+		if (git_remote_list(&remotes, repo) == 0) {
+			for (i = 0; i < remotes.count; i++) {
+				git_reference *rf = NULL;
+				snprintf(tracking_ref, sizeof(tracking_ref), "refs/remotes/%s/%s",
+					 remotes.strings[i], branch);
+				if (git_reference_lookup(&rf, repo, tracking_ref) == 0) {
+					git_reference_free(rf);
+					snprintf(remote_name, sizeof(remote_name), "%s", remotes.strings[i]);
+					have_remote = 1;
+					break;
+				}
+			}
+			git_strarray_free(&remotes);
+		}
+	}
+
+	if (!have_remote) {
+		git_remote *origin = NULL;
+		if (git_remote_lookup(&origin, repo, "origin") < 0) {
+			/* 连 origin 都没有：宁可不写，也不留一条查不到远程的配置 */
+			goto done;
+		}
+		git_remote_free(origin);
+		snprintf(remote_name, sizeof(remote_name), "%s", "origin");
+	}
+
+	snprintf(key, sizeof(key), "branch.%s.remote", branch);
+	git_config_set_string(cfg, key, remote_name);
+	snprintf(key, sizeof(key), "branch.%s.merge", branch);
+	git_config_set_string(cfg, key, refname);
+
+done:
+	git_config_free(cfg);
+	git_reference_free(head);
+}
+
 JNIEXPORT jint JNICALL
 Java_com_mobilecoder_ide_core_nativebridge_GitNative_clone(
         JNIEnv *env, jclass clazz, jstring url, jstring path, jstring branch) {
@@ -786,6 +872,9 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_clone(
         g_repo = NULL;
     }
     g_repo = cloned;
+
+    /* 克隆收尾：缺上游就补上，保证 clone 完 `git pull` 直接可用 */
+    mc_ensure_tracking_config(g_repo);
 
     free(c_url);
     free(c_path);
@@ -1609,8 +1698,24 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_headInfo(JNIEnv *env, jclas
 
     if (git_repository_head(&head, g_repo) == 0 && head != NULL) {
         /* shorthand 指向 head 内部内存，必须在 free 之前拷贝 */
-        snprintf(name, sizeof(name), "%s", git_reference_shorthand(head));
         detached = git_repository_head_detached(g_repo) == 1;
+        if (detached) {
+            /* 分离态的 HEAD 是名为 "HEAD" 的直接引用，shorthand 恒等于 "HEAD"，
+             * 于是 status 输出 "HEAD detached at HEAD"、终端徽标 "HEAD (HEAD)"——
+             * 全是废话。与 git status 一致，这里改用缩写提交号
+             * （位数与 log 的 shortOid 保持一致，都是 10）。 */
+            const git_oid *id = git_reference_target(head);
+            if (id != NULL) {
+                char full[GIT_OID_MAX_HEXSIZE + 1];
+                size_t n;
+                mc_oid_str(full, sizeof(full), id);
+                n = strlen(full);
+                if (n > 10) n = 10;
+                snprintf(name, sizeof(name), "%.*s", (int) n, full);
+            }
+        } else {
+            snprintf(name, sizeof(name), "%s", git_reference_shorthand(head));
+        }
         if (!detached && git_reference_target(head) != NULL) {
             git_reference *upstream = NULL;
             if (git_branch_upstream(&upstream, head) == 0 && upstream != NULL) {
