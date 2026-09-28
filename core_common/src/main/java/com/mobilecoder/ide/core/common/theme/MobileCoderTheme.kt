@@ -1,6 +1,8 @@
 package com.mobilecoder.ide.core.common.theme
 
 import android.content.res.Configuration
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -39,7 +41,17 @@ fun MobileCoderTheme(
     val isDark = ThemeManager.resolveIsDark(mode, systemIsDark)
     val palette = remember(isDark) { AppPalette.of(isDark) }
 
-    CompositionLocalProvider(LocalAppPalette provides palette) {
+    CompositionLocalProvider(
+        LocalAppPalette provides palette,
+        // 全站选中高亮。Material 默认的 LocalTextSelectionColors 是
+        // Color.Black.copy(alpha = 0.4f)，深色主题（背景 0x0F172A）下几乎看不出来，
+        // 表现为「文字选中了却没有高亮」。统一换成调色板的 terminalSelection，
+        // 终端 / CLI 日志 / 输入框 / 编辑器用同一套颜色，随主题自动切换。
+        LocalTextSelectionColors provides TextSelectionColors(
+            handleColor = palette.primary.toComposeColor(),
+            backgroundColor = palette.terminalSelection.toComposeColor(),
+        ),
+    ) {
         MaterialTheme(
             colorScheme = palette.toColorScheme(),
             content = content,
