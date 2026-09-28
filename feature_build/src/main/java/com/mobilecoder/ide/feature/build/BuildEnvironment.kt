@@ -403,9 +403,10 @@ object BuildEnvironment {
         listOf(files, bin, sdk).forEach { dir ->
             if (dir.isDirectory && !dir.canExecute()) makeExecutable(dir)
         }
-        // 2) Node 就绪 → （重）建 node/npm/npx 入口
+        // 2) 有可用 node（files/bin ELF 或 sdk/node）→ （重）建 npm/npx 入口；
+        //    不覆盖 files/bin/node 真 ELF（官方 linux 构建在 Android 上会 ENOENT）
         val nodeRoot = File(sdk, "node")
-        if (File(nodeRoot, "bin/node").exists()) writeNodeShims(context, nodeRoot)
+        if (resolveNodeExec(files) != null) writeNodeShims(context, nodeRoot)
         // 3) 需要执行位的普通文件（files/bin + sdk 各级 bin）
         val targets = mutableListOf<File>()
         bin.listFiles()?.forEach { f -> if (f.isFile) targets += f }
@@ -487,25 +488,80 @@ object BuildEnvironment {
         }
     }.getOrElse { "exec失败：${it.message}" }
 
-    /** Node 安装目录（`files/sdk/node`），以 `bin/node` 存在为准。 */
+    /** Node 安装目录：优先 `files/sdk/node`，否则 `files/bin` 下的 ELF node。 */
     private fun resolveNode(context: Context): String? {
         val root = File(sdkDir(context), "node")
-        return if (File(root, "bin/node").exists()) root.absolutePath else null
+        if (File(root, "bin/node").exists()) return root.absolutePath
+        val binNode = File(binDir(context), "node")
+        return if (isElfBinary(binNode)) binDir(context).absolutePath else null
+    }
+
+    /**
+     * 真正用来 exec 的 node 二进制。
+     *
+     * 官方 nodejs.org linux-arm64 依赖 `/lib/ld-linux-aarch64.so.1`，Android 上
+     * execve 会报 `No such file or directory`（退出码 126）。
+     * 用户放到 `files/bin/node` 的 Android/bionic ELF（约 90MB+）可以跑，必须优先用它，
+     * 且 [writeNodeShims] 不得把它覆盖成指向 sdk 的 shell 包装。
+     */
+    fun resolveNodeExec(filesDir: File): File? {
+        val binNode = File(filesDir, "bin/node")
+        if (isElfBinary(binNode)) return binNode
+        val sdkNode = File(filesDir, "sdk/node/bin/node")
+        if (sdkNode.exists()) return sdkNode
+        return if (binNode.isFile) binNode else null
+    }
+
+    fun findNpmCli(filesDir: File): File? = listOf(
+        File(filesDir, "sdk/node/lib/node_modules/npm/bin/npm-cli.js"),
+        File(filesDir, "lib/node_modules/npm/bin/npm-cli.js"),
+    ).firstOrNull { it.isFile }
+
+    fun findNpxCli(filesDir: File): File? = listOf(
+        File(filesDir, "sdk/node/lib/node_modules/npm/bin/npx-cli.js"),
+        File(filesDir, "lib/node_modules/npm/bin/npx-cli.js"),
+    ).firstOrNull { it.isFile }
+
+    /** ELF 魔数 `\x7fELF`：用来识别 `files/bin/node` 真二进制（相对 shell shim / 符号链接）。 */
+    internal fun isElfBinary(file: File): Boolean {
+        if (!file.exists() || file.length() < 4L) return false
+        if (runCatching { Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)) return false
+        return runCatching {
+            file.inputStream().use { ins ->
+                val magic = ByteArray(4)
+                if (ins.read(magic) != 4) return@use false
+                magic[0] == 0x7F.toByte() &&
+                    magic[1] == 'E'.code.toByte() &&
+                    magic[2] == 'L'.code.toByte() &&
+                    magic[3] == 'F'.code.toByte()
+            }
+        }.getOrDefault(false)
     }
 
     /**
      * 在 `files/bin` 生成 node / npm / npx 命令入口（PATH 已包含 files/bin）。
-     * npm 通过 node 直接执行 CLI 脚本，`npm i -g` 的全局包落在 node 目录内的 lib/node_modules。
+     * npm 通过**可执行的** node 直跑 CLI 脚本。
+     * `files/bin/node` 已是 ELF 时不覆盖。
      */
     private fun writeNodeShims(context: Context, nodeRoot: File) {
         val bin = binDir(context)
         if (!bin.isDirectory && !bin.mkdirs()) return
-        val node = File(nodeRoot, "bin/node").absolutePath
-        val npmCli = File(nodeRoot, "lib/node_modules/npm/bin/npm-cli.js").absolutePath
-        val npxCli = File(nodeRoot, "lib/node_modules/npm/bin/npx-cli.js").absolutePath
-        writeShim(File(bin, "node"), "#!/system/bin/sh\nexec \"$node\" \"\$@\"\n")
-        writeShim(File(bin, "npm"), "#!/system/bin/sh\nexec \"$node\" \"$npmCli\" \"\$@\"\n")
-        writeShim(File(bin, "npx"), "#!/system/bin/sh\nexec \"$node\" \"$npxCli\" \"\$@\"\n")
+        val files = context.filesDir
+        val nodeExec = resolveNodeExec(files)?.absolutePath
+            ?: File(nodeRoot, "bin/node").absolutePath
+        val binNode = File(bin, "node")
+        if (!isElfBinary(binNode)) {
+            writeShim(binNode, "#!/system/bin/sh\nexec \"$nodeExec\" \"\$@\"\n")
+        } else {
+            // 旧 npm shebang 仍指向 sdk/node/bin/node（glibc，Android 上 ENOENT）
+            relinkBrokenSdkNode(files)
+        }
+        val npmCli = findNpmCli(files)?.absolutePath
+            ?: File(nodeRoot, "lib/node_modules/npm/bin/npm-cli.js").absolutePath
+        val npxCli = findNpxCli(files)?.absolutePath
+            ?: File(nodeRoot, "lib/node_modules/npm/bin/npx-cli.js").absolutePath
+        writeShim(File(bin, "npm"), "#!/system/bin/sh\nexec \"$nodeExec\" \"$npmCli\" \"\$@\"\n")
+        writeShim(File(bin, "npx"), "#!/system/bin/sh\nexec \"$nodeExec\" \"$npxCli\" \"\$@\"\n")
     }
 
     /**
@@ -514,9 +570,11 @@ object BuildEnvironment {
      *
      * 目标是符号链接时先删链接本身（避免写穿到链接指向的文件），
      * 是目录时整个删掉——**目录**被 PATH 命中同样报 `Permission denied`。
+     * ELF 真二进制（如用户放入的 Android node）绝不覆盖。
      */
     private fun writeShim(file: File, body: String) {
         runCatching {
+            if (isElfBinary(file)) return@runCatching
             val link = runCatching { Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
             when {
                 link -> file.delete()
@@ -524,6 +582,29 @@ object BuildEnvironment {
             }
             if (runCatching { file.readText() }.getOrNull() != body) file.writeText(body)
             if (!file.canExecute()) makeExecutable(file)
+        }
+    }
+
+    /**
+     * `files/bin/node` 是可跑的 ELF 时，把 `sdk/node/bin/node` 换成指向它的符号链接。
+     * 官方 linux 构建缺 `/lib/ld-linux-aarch64.so.1`，内核报 `No such file or directory`。
+     */
+    internal fun relinkBrokenSdkNode(filesDir: File) {
+        val working = File(filesDir, "bin/node")
+        if (!isElfBinary(working)) return
+        val sdkNode = File(filesDir, "sdk/node/bin/node")
+        val parent = sdkNode.parentFile ?: return
+        if (!parent.isDirectory && !parent.mkdirs()) return
+        runCatching {
+            if (sdkNode.exists() && sdkNode.canonicalFile == working.canonicalFile) return@runCatching
+            val path = sdkNode.toPath()
+            if (Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                Files.delete(path)
+            } else if (sdkNode.exists()) {
+                sdkNode.delete()
+            }
+            Files.createSymbolicLink(path, working.toPath())
+            makeExecutable(working)
         }
     }
 

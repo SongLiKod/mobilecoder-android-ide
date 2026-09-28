@@ -54,9 +54,9 @@ object ToolInstaller {
     internal fun resolvePackage(input: String): String? =
         (ALIASES[input.lowercase()] ?: input).takeIf { validToken(it) }
 
-    /** Node.js 是否已就绪（`files/sdk/node/bin/node`）。 */
+    /** Node.js 是否已就绪：`files/bin/node` ELF 或 `files/sdk/node/bin/node`。 */
     fun nodeReady(context: Context): Boolean =
-        File(BuildEnvironment.sdkDir(context), "node/bin/node").exists()
+        BuildEnvironment.resolveNodeExec(context.filesDir) != null
 
     /** 内置工具是否已安装（`files/bin/<bin>`）。 */
     fun installed(context: Context, tool: Tool): Boolean =
@@ -93,12 +93,11 @@ object ToolInstaller {
     /** 状态明细（`apt tools` 无参输出）。 */
     fun statusLines(context: Context): List<String> {
         val files = context.filesDir
-        val node = File(BuildEnvironment.sdkDir(context), "node/bin/node")
         val installed = installedPackages(File(files, "lib/node_modules"))
         return buildList {
             add("—— 终端软件 ——")
             add(
-                "  Node.js    " + if (node.exists()) "就绪"
+                "  Node.js    " + if (nodeReady(context)) "就绪"
                 else "未安装（`apt tools install` 在线下载）",
             )
             add("  npm prefix ${files.absolutePath}（-g 全局包 → files/bin，PATH 已含）")
@@ -151,8 +150,13 @@ object ToolInstaller {
         val targets = if (default) TOOLS.map { it.pkg } else packages
 
         // 1) Node.js（复用构建环境下载器：官方源 / 国内镜像 + 自动回退）
-        if (!nodeReady(context)) {
-            emit("Node.js 未安装 → 在线下载 Node v20.18.0 …")
+        //    files/bin 已有可跑的 Android ELF 时仍可能缺 npm-cli.js，需要补装发行包
+        val needNpmCli = BuildEnvironment.findNpmCli(context.filesDir) == null
+        if (!nodeReady(context) || needNpmCli) {
+            emit(
+                if (!nodeReady(context)) "Node.js 未安装 → 在线下载 Node v20.18.0 …"
+                else "npm 运行时缺失 → 补装 Node.js 发行包 …",
+            )
             val path = EnvDownloader.install(
                 context,
                 EnvKind.NODE,
@@ -161,7 +165,8 @@ object ToolInstaller {
             )
             emit("Node.js 已安装：$path")
         } else {
-            emit("Node.js 已就绪：${File(BuildEnvironment.sdkDir(context), "node").absolutePath}")
+            val exec = BuildEnvironment.resolveNodeExec(context.filesDir)
+            emit("Node.js 已就绪：${exec?.absolutePath ?: File(BuildEnvironment.sdkDir(context), "node").absolutePath}")
         }
 
         // 2) npm 全局 prefix → files（bin 落入 files/bin）
@@ -294,7 +299,7 @@ object ToolInstaller {
         }
 
     /**
-     * 以 `files/bin/npm` 执行（npm shim 内部用 node 直跑 npm-cli.js，不依赖 shebang）。
+     * 以可执行的 node 直跑 `npm-cli.js`（绕过可能仍指向 glibc node 的旧 npm shim）。
      * 输出逐行转发到 [emit]；取消时杀死子进程。
      */
     private suspend fun runNpm(
@@ -302,11 +307,6 @@ object ToolInstaller {
         args: List<String>,
         emit: (String) -> Unit,
     ): Int {
-        val npm = File(BuildEnvironment.binDir(context), "npm")
-        if (!npm.exists()) {
-            emit("[ERROR] 未找到 npm（Node.js 未安装）")
-            return 1
-        }
         // 终端能用的前提是 files/bin 与 sdk/*/bin 都有执行位；这里统一自愈一次，
         // 覆盖 npm 二进制入口本身，也覆盖 node 解释器与 PATH 上的其他命令。
         val broken = BuildEnvironment.repairExecutable(context)
@@ -315,6 +315,19 @@ object ToolInstaller {
             broken.forEach { emit("       $it") }
         }
         val files = context.filesDir
+        val node = BuildEnvironment.resolveNodeExec(files)
+        val npmCli = BuildEnvironment.findNpmCli(files)
+        val argv = when {
+            node != null && npmCli != null ->
+                arrayOf(node.absolutePath, npmCli.absolutePath) + args.toTypedArray()
+            File(BuildEnvironment.binDir(context), "npm").exists() ->
+                arrayOf(File(BuildEnvironment.binDir(context), "npm").absolutePath) + args.toTypedArray()
+            else -> {
+                emit("[ERROR] 未找到 npm（Node.js 未安装）")
+                return 1
+            }
+        }
+        if (node != null) emit("node → ${node.absolutePath}")
         val env = arrayOf(
             "HOME=${files.absolutePath}",
             "TMPDIR=${BuildEnvironment.tmpDir(context).absolutePath}",
@@ -324,7 +337,6 @@ object ToolInstaller {
         )
         val exit = CompletableDeferred<Int>()
         val ansi = Regex("\\u001b\\[[0-9;?]*[A-Za-z]")
-        val argv = arrayOf(npm.absolutePath) + args.toTypedArray()
         val pid = CliNative.exec(argv, files.absolutePath, env, object : CliCallback {
             override fun onOutput(pid: Int, stream: Int, data: ByteArray?) {
                 if (data == null) return
@@ -385,7 +397,8 @@ object ToolInstaller {
      */
     private fun fixBinScripts(context: Context): Int {
         val bin = BuildEnvironment.binDir(context)
-        val nodeFile = File(BuildEnvironment.sdkDir(context), "node/bin/node")
+        val nodeFile = BuildEnvironment.resolveNodeExec(context.filesDir)
+            ?: File(BuildEnvironment.sdkDir(context), "node/bin/node")
         val node = nodeFile.absolutePath
         var fixed = 0
         // node 解释器本体（shim 的 shebang 会指向它）
@@ -394,6 +407,7 @@ object ToolInstaller {
             if (!file.isFile) return@forEach
             // 先补执行位：后续内容修正失败或无 shebang 也不能丢执行权限
             grantExecutable(file)
+            if (BuildEnvironment.isElfBinary(file)) return@forEach
             val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@forEach
             var nl = -1
             for (i in bytes.indices) {
