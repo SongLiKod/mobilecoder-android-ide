@@ -26,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -70,9 +71,10 @@ fun SettingsTab(
                 scope.launch { runCatching { GitController.clearIgnoreRules() } }
             },
         )
+        PorcelainCard()
         Text(
             text = "提示：提交身份保存在本机应用存储；忽略规则仅内存生效，" +
-                "需要持久化请在项目里编辑 .gitignore。",
+                "需要持久化请在项目里编辑 .gitignore。终端也可输入 git help porcelain。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -240,6 +242,66 @@ private fun IgnoreCard(
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("清空忽略规则") }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main Porcelain 日常命令参考
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun PorcelainCard() {
+    SettingCard(title = "日常命令参考（Main Porcelain）") {
+        Text(
+            text = "终端可执行标为「可用」；其余为标准 git 对照，可在 Git 页用可视化操作完成同类工作。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        GitPorcelain.groups.forEach { group ->
+            Text(
+                text = group.title,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            group.commands.forEach { cmd ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Text(
+                        text = cmd.name,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(0.32f),
+                    )
+                    Text(
+                        text = if (cmd.implemented) "可用" else "参考",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (cmd.implemented) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.weight(0.14f),
+                    )
+                    Text(
+                        text = cmd.summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(0.54f),
+                    )
+                }
+            }
+        }
+        Text(
+            text = "终端：git help porcelain",
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

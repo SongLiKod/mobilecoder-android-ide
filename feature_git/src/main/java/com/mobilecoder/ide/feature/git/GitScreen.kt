@@ -17,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -74,6 +75,7 @@ fun GitScreen(
 
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var showClone by rememberSaveable { mutableStateOf(false) }
+    var showPorcelain by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(projectPath) {
         runCatching { GitController.bind(projectPath) }
@@ -84,6 +86,7 @@ fun GitScreen(
             repo = repo,
             loading = loading,
             onRefresh = { scope.launch { runCatching { GitController.refresh() } } },
+            onHelp = { showPorcelain = true },
         )
 
         message?.let { banner ->
@@ -160,6 +163,10 @@ fun GitScreen(
         }
     }
 
+    if (showPorcelain) {
+        PorcelainHelpDialog(onDismiss = { showPorcelain = false })
+    }
+
     if (showClone) {
         CloneDialog(
             projectPath = projectPath,
@@ -209,6 +216,7 @@ private fun RepoHeader(
     repo: GitRepoUiState,
     loading: Boolean,
     onRefresh: () -> Unit,
+    onHelp: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -262,6 +270,9 @@ private fun RepoHeader(
                     .size(18.dp),
                 strokeWidth = 2.dp,
             )
+        }
+        IconButton(onClick = onHelp) {
+            Icon(Icons.Default.Info, contentDescription = "日常命令参考")
         }
         IconButton(onClick = onRefresh) {
             Icon(Icons.Default.Refresh, contentDescription = "刷新")
@@ -460,6 +471,67 @@ private fun CloneDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+@Composable
+private fun PorcelainHelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("日常命令参考") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = "Main Porcelain 日常命令。终端可执行标为「可用」，其余为标准 git 对照。也可在 Git → 设置 查阅。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                GitPorcelain.groups.forEach { group ->
+                    Text(
+                        text = group.title,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    group.commands.forEach { cmd ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = cmd.name,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(0.34f),
+                            )
+                            Text(
+                                text = if (cmd.implemented) "可用" else "参考",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (cmd.implemented) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.weight(0.16f),
+                            )
+                            Text(
+                                text = cmd.summary,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(0.50f),
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
 }
