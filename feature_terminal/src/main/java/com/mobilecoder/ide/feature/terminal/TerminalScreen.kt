@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,6 +26,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.selection.TextSelectionColors
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -463,8 +465,14 @@ fun TerminalScreen(
                         MaterialTheme.colorScheme.surfaceVariant,
                         RoundedCornerShape(8.dp),
                     )
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                singleLine = true,
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    // 长命令软换行：约 4 行内自动换行，更长则在框内滚动，
+                    // 不让输入框把上方终端区整个顶掉
+                    .heightIn(max = 80.dp)
+                    .verticalScroll(rememberScrollState()),
+                // 关键：singleLine=true 会把文本压成一屏横向滚动，长命令看不见全貌。
+                // 换行靠软换行，真实换行符仍在 onValueChange 里被过滤掉（命令永远是单行）。
+                singleLine = false,
                 textStyle = TextStyle(
                     color = MaterialTheme.colorScheme.onSurface,
                     fontFamily = FontFamily.Monospace,
