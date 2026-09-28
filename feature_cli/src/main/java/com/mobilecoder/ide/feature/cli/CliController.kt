@@ -2,7 +2,7 @@ package com.mobilecoder.ide.feature.cli
 
 import android.content.Context
 import com.mobilecoder.ide.core.common.cli.CliTask
-import com.mobilecoder.ide.core.common.cli.OpencodeCli
+import com.mobilecoder.ide.core.common.cli.AptCli
 import com.mobilecoder.ide.core.storage.AppStorage
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -41,7 +41,7 @@ data class CliLogLine(
 /**
  * CLI 面板控制器：命令执行、日志流、历史（PRD 2.4「可视化面板一键执行」）。
  *
- * 与终端共享同一引擎（OpencodeCli），因此面板日志与终端输出互不干扰：
+ * 与终端共享同一引擎（AptCli），因此面板日志与终端输出互不干扰：
  * 面板把自己的 emit 接到 [log]，终端把 emit 接到自己的屏幕缓冲。
  */
 object CliController {
@@ -88,7 +88,7 @@ object CliController {
         _busy.value = true
         scope.launch {
             try {
-                OpencodeCli.run(line, target) { output -> append(CliLogLine.of(output)) }
+                AptCli.run(line, target) { output -> append(CliLogLine.of(output)) }
             } finally {
                 // 取消时也会走到这里：StateFlow 线程安全，不能用 withContext
                 //（协程已取消，withContext 会直接抛异常而跳过 busy 复位）
@@ -99,7 +99,7 @@ object CliController {
 
     /** 停止当前正在执行的命令（顶部进度条旁的停止按钮）。 */
     fun cancel() {
-        val stopped = runCatching { OpencodeCli.cancelCurrent() }.getOrDefault(false)
+        val stopped = runCatching { AptCli.cancelCurrent() }.getOrDefault(false)
         if (stopped) {
             append(CliLogLine("已请求停止，正在结束当前命令…", CliLogLine.Level.WARN))
         }
@@ -110,7 +110,7 @@ object CliController {
     }
 
     /** 当前任务快照（用于顶部进度条）。 */
-    fun currentTask(): CliTask? = OpencodeCli.currentTask()
+    fun currentTask(): CliTask? = AptCli.currentTask()
 
     private fun append(line: CliLogLine) {
         val next = _log.value.toMutableList().apply { add(line) }

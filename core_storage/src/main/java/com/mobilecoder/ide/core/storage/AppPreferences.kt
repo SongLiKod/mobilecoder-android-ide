@@ -88,8 +88,13 @@ class AppPreferences(
     suspend fun buildVariant(): String = get(KEY_BUILD_VARIANT) ?: "debug"
     suspend fun setBuildVariant(value: String) = set(KEY_BUILD_VARIANT, value)
 
-    suspend fun buildMemoryLimitMb(): Int = getInt(KEY_BUILD_MEM, 1024)
-    suspend fun setBuildMemoryLimitMb(value: Int) = setInt(KEY_BUILD_MEM, value.coerceIn(256, 4096))
+    /** 构建内存上限（MB）：看门狗阈值 + Gradle 堆（-Xmx）。范围 512–8192，默认 2048。 */
+    suspend fun buildMemoryLimitMb(): Int = getInt(KEY_BUILD_MEM, 2048)
+    suspend fun setBuildMemoryLimitMb(value: Int) = setInt(KEY_BUILD_MEM, value.coerceIn(512, 8192))
+
+    /** 构建环境在线下载源：official（官方）/ mirror（国内镜像）。 */
+    suspend fun envDownloadSource(): String = get(KEY_ENV_SOURCE) ?: "official"
+    suspend fun setEnvDownloadSource(value: String) = set(KEY_ENV_SOURCE, value)
 
     suspend fun jdkPath(): String = get(KEY_JDK_PATH) ?: ""
     suspend fun setJdkPath(value: String) = set(KEY_JDK_PATH, value)
@@ -153,6 +158,7 @@ class AppPreferences(
         private val KEY_CLI_HISTORY = stringPreferencesKey("cli_history")
         private val KEY_BUILD_VARIANT = stringPreferencesKey("build_variant")
         private val KEY_BUILD_MEM = intPreferencesKey("build_memory_limit_mb")
+        private val KEY_ENV_SOURCE = stringPreferencesKey("env_download_source")
         private val KEY_JDK_PATH = stringPreferencesKey("jdk_path")
         private val KEY_GRADLE_PATH = stringPreferencesKey("gradle_path")
         private val KEY_AI_BASE_URL = stringPreferencesKey("ai_base_url")

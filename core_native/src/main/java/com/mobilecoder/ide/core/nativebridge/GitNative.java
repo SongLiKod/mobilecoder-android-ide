@@ -114,7 +114,11 @@ public final class GitNative {
 
     /* ---------------- 分支 / 标签 ---------------- */
 
-    /** 每行 {@code name \x01 isHead \x01 upstream \x01 ahead \x01 behind}。 */
+    /**
+     * 本地 + 远程跟踪分支（远程项带 {@code remotes/} 前缀，与 {@code git branch -a} 数据一致）。
+     * 每行 {@code name \x01 isHead \x01 upstream \x01 ahead \x01 behind \x01 tipOid \x01 tipSummary}；
+     * {@code remotes/<r>/HEAD} 行的 upstream 字段为目标（如 "origin/main"）。
+     */
     public static native String branches();
 
     public static native String currentBranch();
@@ -122,12 +126,29 @@ public final class GitNative {
     /** 每行 {@code branch \x01 detached \x01 unborn \x01 ahead \x01 behind}。 */
     public static native String headInfo();
 
-    public static native boolean createBranch(String name);
+    /**
+     * 创建分支。
+     *
+     * @param start 起始点 revspec（分支 / 远程跟踪 / 标签 / 提交号），null 或空 = HEAD
+     */
+    public static native boolean createBranch(String name, String start);
 
-    /** @return 0 成功 / 2 已经在该分支 / -1 失败 */
+    /**
+     * 切换检出（对齐真 git 的 DWIM：本地分支 → 唯一远程跟踪分支自动建跟踪分支 →
+     * 显式 origin/x / 标签 / 提交号则分离头指针）。
+     *
+     * @return 0 已附着切换 / 2 已在该分支 / 3 DWIM 新建跟踪分支并切换 /
+     *         4 分离头指针 / -1 失败（{@link #lastError()}）/
+     *         -2 引用不存在 / -3 多个远程存在同名分支（lastError 为歧义详情）
+     */
     public static native int checkoutBranch(String name);
 
-    public static native boolean deleteBranch(String name);
+    /**
+     * 删除分支。name 带 {@code remotes/} 前缀时删除远程跟踪引用（等价 {@code git branch -rd}）。
+     *
+     * @param force true = -D（跳过"未合并"检查）；false = -d
+     */
+    public static native boolean deleteBranch(String name, boolean force);
 
     /** @return 0 成功 / 1 存在冲突 / 2 已是最新 / -1 失败 */
     public static native int merge(String name);
@@ -171,6 +192,18 @@ public final class GitNative {
 
     /** 每行 {@code name \x01 url}。 */
     public static native String remotes();
+
+    /**
+     * 某远程的全部跟踪引用（fetch 前后对比生成 {@code * [new branch] …} 输出行）。
+     * 每行 {@code shorthand(origin/dev) \x01 oid}。
+     */
+    public static native String remoteRefs(String remote);
+
+    /** 读取仓库配置项（如 {@code branch.main.remote}）；未配置返回空串。 */
+    public static native String configGet(String key);
+
+    /** 写仓库本地配置项（如上游 {@code branch.<n>.remote}）；0 成功 / -1 失败。 */
+    public static native int configSet(String key, String value);
 
     public static native boolean addRemote(String name, String url);
 

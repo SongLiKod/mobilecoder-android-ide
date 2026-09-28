@@ -17,10 +17,11 @@ data class EditorIssue(
 /** 可折叠区域（1 起始行号，[endLine] > [startLine]，两端行保留可见）。 */
 data class FoldRegion(val startLine: Int, val endLine: Int)
 
-/** 结构分析结果：报错列表 + 可折叠区域。 */
+/** 结构分析结果：报错列表 + 可折叠区域 + 大纲符号。 */
 data class CodeAnalysisResult(
     val issues: List<EditorIssue>,
     val folds: List<FoldRegion>,
+    val symbols: List<CodeSymbol> = emptyList(),
 ) {
     val issueLines: Set<Int> get() = issues.mapTo(HashSet()) { it.line }
 }
@@ -47,7 +48,9 @@ private const val NONE = '\u0000'
  */
 fun analyzeCode(text: String, language: Language): CodeAnalysisResult {
     if (text.isEmpty()) return CodeAnalysisResult(emptyList(), emptyList())
-    if (text.length > MAX_ANALYZE_CHARS) return CodeAnalysisResult(emptyList(), emptyList())
+    // 大纲符号先于体积保护计算：超大文件仍可导航
+    val symbols = extractSymbols(text, language)
+    if (text.length > MAX_ANALYZE_CHARS) return CodeAnalysisResult(emptyList(), emptyList(), symbols)
 
     val issues = ArrayList<EditorIssue>()
     val folds = ArrayList<FoldRegion>()
@@ -263,7 +266,7 @@ fun analyzeCode(text: String, language: Language): CodeAnalysisResult {
     }
 
     folds.sortWith(compareBy({ it.startLine }, { -(it.endLine - it.startLine) }))
-    return CodeAnalysisResult(issues, folds)
+    return CodeAnalysisResult(issues, folds, symbols)
 }
 
 /** 计算行首下标数组（第 k 行 = 下标 k-1，末尾追加 text.length）。 */

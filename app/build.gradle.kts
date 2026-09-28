@@ -11,7 +11,12 @@ android {
     defaultConfig {
         applicationId = "com.mobilecoder.ide"
         minSdk = 29
-        targetSdk = 35
+        // targetSdk 必须保持 28：Android 10+ 对 targetSdk >= 29 的应用禁止 execve()
+        // 自己 app home 目录里的文件（W^X，SELinux 拒 execute_no_trans），会表现为
+        //   sh: …/files/bin/node: Permission denied
+        // ——即使执行位齐全也照样失败，终端 / Gradle 构建 / npm 全都跑不起来。
+        // Termux 至今仍用 28 就是同一个原因。不上 Google Play，故不受 target API 要求限制。
+        targetSdk = 28
         versionCode = 1
         versionName = "1.0.0"
         vectorDrawables { useSupportLibrary = true }
@@ -42,6 +47,14 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    lint {
+        // 刻意停在 targetSdk = 28：Android 10+ 对 targetSdk >= 29 的应用禁止
+        // execve() 自己 app home 目录里的文件（W^X，SELinux 拒 execute_no_trans），
+        // 会把内置终端、Gradle 构建、npm 全部打死（报成 Permission denied）。
+        // 本项目只自行分发、不上 Google Play，这条按 Play 政策写死的检查不适用。
+        disable += "ExpiredTargetSdkVersion"
     }
 
     packaging {

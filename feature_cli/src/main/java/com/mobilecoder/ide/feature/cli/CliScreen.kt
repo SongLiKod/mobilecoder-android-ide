@@ -45,17 +45,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.mobilecoder.ide.core.common.cli.OpencodeCli
+import com.mobilecoder.ide.core.common.cli.AptCli
 import com.mobilecoder.ide.core.common.theme.LocalAppPalette
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.SectionHeader
 import java.io.File
 
 /**
- * PRD 2.4「OpenCode 类 CLI 工具链」可视化面板：
+ * PRD 2.4「CLI 工具链」可视化面板：
  * 一键执行 + 实时日志 + 历史 + 自定义命令行。
  *
- * 与终端共用 [OpencodeCli] 引擎，支持协程队列串行化（TECH.md 4.3）。
+ * 与终端共用 [AptCli] 引擎，支持协程队列串行化（TECH.md 4.3）。
  */
 @Composable
 fun CliScreen(
@@ -66,8 +66,8 @@ fun CliScreen(
     val palette = LocalAppPalette.current
     val log by CliController.log.collectAsStateWithLifecycle()
     val busy by CliController.busy.collectAsStateWithLifecycle()
-    val history by OpencodeCli.history.collectAsStateWithLifecycle()
-    val commands = remember { OpencodeCli.commands() }
+    val history by AptCli.history.collectAsStateWithLifecycle()
+    val commands = remember { AptCli.commands() }
 
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var input by rememberSaveable { mutableStateOf("") }
@@ -84,7 +84,7 @@ fun CliScreen(
         modifier = modifier.fillMaxSize(),
     ) {
         SectionHeader(
-            title = "OpenCode CLI",
+            title = "apt CLI",
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             action = {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -156,7 +156,7 @@ fun CliScreen(
                 modifier = Modifier.weight(1f),
                 singleLine = true,
                 enabled = !busy,
-                placeholder = { Text("opencode …", style = MaterialTheme.typography.bodyMedium) },
+                placeholder = { Text("apt …", style = MaterialTheme.typography.bodyMedium) },
                 textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
                 trailingIcon = {
                     if (busy) {
@@ -204,7 +204,7 @@ private fun LogPane(
     if (log.isEmpty()) {
         EmptyState(
             title = "暂无输出",
-            subtitle = "在下方「命令」页一键执行，或直接输入 opencode 命令",
+            subtitle = "在下方「命令」页一键执行，或直接输入 apt 命令（apt tools install 可在线安装 Node.js 及 npm 源里的任意软件）",
             modifier = modifier.fillMaxWidth(),
         )
         return
@@ -298,7 +298,7 @@ private fun CommandPane(
             }
             items(items, key = { it.name }) { command ->
                 Card(
-                    onClick = { if (!busy) onRun("opencode ${command.name}") },
+                    onClick = { if (!busy) onRun("apt ${command.name}") },
                     enabled = !busy,
                     modifier = Modifier
                         .fillMaxWidth()

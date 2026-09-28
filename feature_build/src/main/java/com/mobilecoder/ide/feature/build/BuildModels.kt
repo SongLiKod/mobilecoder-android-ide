@@ -22,7 +22,7 @@ data class BuildLogLine(
     val at: Long = System.currentTimeMillis(),
 )
 
-/** 一次构建请求：UI「开始构建」按钮与 `opencode build` / `opencode package` 共用同一入口。 */
+/** 一次构建请求：UI「开始构建」按钮与 `apt build` / `apt package` 共用同一入口。 */
 data class BuildRequest(
     val projectDir: File,
     /** `debug` / `release`（对应 assembleDebug / assembleRelease）。 */

@@ -4,7 +4,7 @@ import android.app.ActivityManager
 import android.content.Context
 import android.util.Log
 import com.mobilecoder.ide.core.common.cli.CliCommand
-import com.mobilecoder.ide.core.common.cli.OpencodeCli
+import com.mobilecoder.ide.core.common.cli.AptCli
 import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
@@ -35,10 +35,10 @@ import org.json.JSONObject
  *  3. `CliNative.exec("sh -c …")` 执行 Gradle，注入 JAVA_HOME / ANDROID_HOME / GRADLE_USER_HOME 等环境；
  *  4. 内存监控 [memory]：超限或系统已用 >90% 自动 kill，避免 OOM 崩溃；
  *  5. 前台服务保活 + 完成通知（[BuildForegroundService]）；
- *  6. 向 OpencodeCli 注册 `build` / `package`（group="构建"）。
+ *  6. 向 AptCli 注册 `build` / `package`（group="构建"）。
  *
  * **防自锁**：UI 按钮与 CLI 命令都只走 [start]（进程级单入口），
- * 不会再调用 `OpencodeCli.run`，因此不会与引擎自身的 Mutex 队列互相等待。
+ * 不会再调用 `AptCli.run`，因此不会与引擎自身的 Mutex 队列互相等待。
  *
  * 线程模型：JNI 回调发生在子进程读线程，只更新 StateFlow（快照不可变），
  * Compose 在主线程收集 —— UI 更新天然回到主线程。
@@ -158,15 +158,15 @@ object BuildRunner {
     }
 
     // ------------------------------------------------------------------
-    // CLI 命令注册（opencode build / opencode package）
+    // CLI 命令注册（apt build / apt package）
     // ------------------------------------------------------------------
 
     private fun registerCliCommands() {
-        OpencodeCli.register(
+        AptCli.register(
             CliCommand(
                 name = "build",
                 summary = "项目编译（Gradle assembleDebug/assembleRelease）",
-                usage = "opencode build [--release] [clean]",
+                usage = "apt build [--release] [clean]",
                 group = "构建",
             ) { args, cwd, emit ->
                 val variant = if (args.any { it.equals("--release", true) || it.equals("release", true) }) {
@@ -179,11 +179,11 @@ object BuildRunner {
                 awaitBuild(BuildRequest(cwd, variant, clean, extra), emit)
             },
         )
-        OpencodeCli.register(
+        AptCli.register(
             CliCommand(
                 name = "package",
                 summary = "打包 APK（等价 assemble 并列出产物）",
-                usage = "opencode package [--debug]",
+                usage = "apt package [--debug]",
                 group = "构建",
             ) { args, cwd, emit ->
                 val variant = if (args.any { it.equals("--debug", true) || it.equals("debug", true) }) {
@@ -193,6 +193,103 @@ object BuildRunner {
                 }
                 val extra = args.filter { isSafeTaskName(it) }
                 awaitBuild(BuildRequest(cwd, variant, false, extra), emit)
+            },
+        )
+        AptCli.register(
+            CliCommand(
+                name = "tools",
+                summary = "软件安装（Node.js / AI CLI / npm 源里的任意软件）",
+                usage = "apt tools [install|uninstall|update|list|search] [<软件名>…]",
+                group = "系统",
+            ) { args, _, emit ->
+                val source = runCatching {
+                    if (AppStorage.preferences.envDownloadSource() == "mirror") {
+                        EnvSource.MIRROR
+                    } else {
+                        EnvSource.OFFICIAL
+                    }
+                }.getOrDefault(EnvSource.OFFICIAL)
+                val sub = args.firstOrNull()?.lowercase()
+                val rest = args.drop(1)
+                val invalid = rest.filter { ToolInstaller.resolvePackage(it) == null }
+                when (sub) {
+                    null -> {
+                        ToolInstaller.statusLines(appContext).forEach(emit)
+                        0
+                    }
+
+                    "list", "ls" -> {
+                        ToolInstaller.listLines(appContext).forEach(emit)
+                        0
+                    }
+
+                    "search", "find" -> {
+                        if (rest.isEmpty() || rest.any { !ToolInstaller.validToken(it) }) {
+                            emit("用法：apt tools search <关键字>…")
+                            1
+                        } else {
+                            ToolInstaller.search(appContext, source, emit, rest)
+                        }
+                    }
+
+                    "install" -> when {
+                        invalid.isNotEmpty() -> {
+                            emit("error: 非法软件名：" + invalid.joinToString(" "))
+                            1
+                        }
+
+                        else -> ToolInstaller.install(
+                            appContext,
+                            source,
+                            emit,
+                            packages = rest.map { ToolInstaller.resolvePackage(it)!! },
+                        )
+                    }
+
+                    "uninstall", "rm", "remove" -> when {
+                        invalid.isNotEmpty() -> {
+                            emit("error: 非法软件名：" + invalid.joinToString(" "))
+                            1
+                        }
+
+                        rest.isEmpty() -> {
+                            emit("用法：apt tools uninstall <软件名>…")
+                            1
+                        }
+
+                        else -> ToolInstaller.uninstall(
+                            appContext,
+                            source,
+                            emit,
+                            rest.map { ToolInstaller.resolvePackage(it)!! },
+                        )
+                    }
+
+                    "update", "up" -> when {
+                        invalid.isNotEmpty() -> {
+                            emit("error: 非法软件名：" + invalid.joinToString(" "))
+                            1
+                        }
+
+                        else -> ToolInstaller.update(
+                            appContext,
+                            source,
+                            emit,
+                            rest.map { ToolInstaller.resolvePackage(it)!! },
+                        )
+                    }
+
+                    "help", "-h", "--help" -> {
+                        ToolInstaller.usageLines().forEach(emit)
+                        0
+                    }
+
+                    else -> {
+                        emit("error: unknown command `$sub'")
+                        ToolInstaller.usageLines().forEach(emit)
+                        1
+                    }
+                }
             },
         )
     }
@@ -235,7 +332,7 @@ object BuildRunner {
     // 构建入口
     // ------------------------------------------------------------------
 
-    /** 是否为可构建的 Gradle 工程（缺骨架时给出 `opencode init` 引导）。 */
+    /** 是否为可构建的 Gradle 工程（缺骨架时给出 `apt init` 引导）。 */
     fun isGradleProject(dir: File): Boolean =
         listOf("settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts", "gradlew")
             .any { File(dir, it).exists() }
@@ -376,26 +473,26 @@ object BuildRunner {
             return fail(
                 task, startedAt,
                 "未检测到 Gradle 工程（缺少 settings.gradle / build.gradle / gradlew）。" +
-                    "可在 CLI 面板执行 `opencode init` 生成安卓项目骨架后重试",
+                    "可在 CLI 面板执行 `apt init` 生成安卓项目骨架后重试",
             )
         }
 
-        // ---- 2) 构建环境校验（离线，全部来自本地导入） ---------------------
+        // ---- 2) 构建环境校验（在线下载 / 本地导入，按项目类型动态过滤） ----
         _phase.value = "检查构建环境"
-        val status = BuildEnvironment.refresh(appContext)
+        val status = BuildEnvironment.refresh(appContext, request.projectDir)
         val jdk = status.item(EnvKind.JDK)?.takeIf { it.ready }?.path
         val gradleHome = status.item(EnvKind.GRADLE)?.takeIf { it.ready }?.path
         val sdk = BuildEnvironment.sdkDir(appContext)
         if (jdk == null) {
             return fail(
                 task, startedAt,
-                "构建环境未就绪：缺少 JDK。请点右上角「构建环境」，从本地 zip 导入 JDK",
+                "构建环境未就绪：缺少 JDK。请点右上角「构建环境」在线下载，或从本地导入",
             )
         }
-        if (!BuildEnvironment.sdkLooksReady(sdk)) {
+        if (status.required.contains(EnvKind.SDK) && !BuildEnvironment.sdkLooksReady(sdk)) {
             return fail(
                 task, startedAt,
-                "构建环境未就绪：缺少 Android SDK（需要 platforms / build-tools）。请在「构建环境」中导入 SDK zip",
+                "构建环境未就绪：缺少 Android SDK（需要 platforms / build-tools）。请在「构建环境」中在线安装 SDK，或导入 SDK 压缩包",
             )
         }
         val gradlew = File(request.projectDir, "gradlew")
@@ -403,9 +500,11 @@ object BuildRunner {
         if (gradleHome == null && !(gradlew.exists() && wrapperJar.exists())) {
             return fail(
                 task, startedAt,
-                "构建环境未就绪：缺少 Gradle 发行版。请在「构建环境」中导入 gradle-x.x-bin.zip",
+                "构建环境未就绪：缺少 Gradle 发行版。请在「构建环境」中在线下载，或导入 gradle-x.x-bin.zip",
             )
         }
+        // 内存上限落地：写入项目 gradle.properties（org.gradle.jvmargs），返回 MB 值
+        val heapMb = syncGradleHeap(request.projectDir)
 
         // ---- 3) 命令组装 -------------------------------------------------
         val tasks = buildList {
@@ -420,7 +519,7 @@ object BuildRunner {
             "chmod +x '${bin.absolutePath}' 2>/dev/null; '${bin.absolutePath}'"
         }
         val cmd = "$base ${tasks.joinToString(" ")} --no-daemon --stacktrace"
-        val envArray = buildEnvArray(jdk, gradleHome)
+        val envArray = buildEnvArray(jdk, gradleHome, heapMb)
         BuildEnvironment.tmpDir(appContext).mkdirs()
         BuildEnvironment.gradleUserHome(appContext).mkdirs()
 
@@ -525,9 +624,8 @@ object BuildRunner {
     // 子进程环境（CliNative envArray 会整体替换子进程环境，必须给全）
     // ------------------------------------------------------------------
 
-    private fun buildEnvArray(jdk: String, gradleHome: String?): Array<String> {
+    private fun buildEnvArray(jdk: String, gradleHome: String?, heapMb: Int): Array<String> {
         val files = appContext.filesDir
-        val cache = appContext.cacheDir
         val sdk = BuildEnvironment.sdkDir(appContext)
         return arrayOf(
             "HOME=${files.absolutePath}",
@@ -542,9 +640,31 @@ object BuildRunner {
             "GRADLE_USER_HOME=${BuildEnvironment.gradleUserHome(appContext).absolutePath}",
             "MOBILECODER_HOME=${files.absolutePath}",
             "MOBILECODER_GRADLE_HOME=${gradleHome.orEmpty()}",
-            "GRADLE_OPTS=-Dorg.gradle.daemon=false",
+            "GRADLE_OPTS=-Xmx${heapMb}m -Dorg.gradle.daemon=false",
             "JAVA_OPTS=-Dfile.encoding=UTF-8",
         )
+    }
+
+    /**
+     * 让项目 `gradle.properties` 的 `org.gradle.jvmargs` 与用户设定的内存上限一致
+     * （[com.mobilecoder.ide.core.storage.AppPreferences.buildMemoryLimitMb]），每次构建前执行，
+     * Slider 调整后下一次构建即生效。
+     *
+     * @return 当前内存上限（MB）
+     */
+    private suspend fun syncGradleHeap(projectDir: File): Int {
+        val heapMb = runCatching { AppStorage.preferences.buildMemoryLimitMb() }.getOrDefault(2048)
+        runCatching {
+            val file = File(projectDir, "gradle.properties")
+            val line = "org.gradle.jvmargs=-Xmx${heapMb}m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8"
+            val old = if (file.exists()) file.readText() else ""
+            val kept = old.lines().dropLastWhile { it.isBlank() }
+                .filter { !it.startsWith("org.gradle.jvmargs") }
+            val newText = (kept + line).joinToString("\n") + "\n"
+            if (newText != old) file.writeText(newText)
+        }
+        Log.i(TAG, "构建内存上限 → -Xmx${heapMb}m")
+        return heapMb
     }
 
     // ------------------------------------------------------------------
@@ -967,7 +1087,7 @@ object BuildRunner {
     /** 附加 Gradle 任务名校验（默认无附加任务，只有用户显式输入时才生效）。 */
     private fun isSafeTaskName(value: String): Boolean {
         if (value.isBlank() || value.startsWith("-")) return false
-        if (value.startsWith("opencode")) return false
+        if (value.startsWith("apt")) return false
         return value.matches(Regex("""^[A-Za-z0-9_.:\-]+$"""))
     }
 

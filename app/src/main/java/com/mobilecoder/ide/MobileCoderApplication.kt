@@ -70,6 +70,11 @@ class MobileCoderApplication : Application() {
         // 3) 进程环境（终端 PTY / CLI 子进程继承）
         NativeRuntime.ensureProcessEnvironment(this)
 
+        // 3.5) 自愈可执行权限：终端里直接敲 `node`/`npm` 不经过安装流程，
+        //      只要 files/bin 或 sdk/*/bin 丢了执行位，就只表现为
+        //      `sh: …/files/bin/node: Permission denied`，启动时统一补一次（幂等、毫秒级）
+        runCatching { com.mobilecoder.ide.feature.build.BuildEnvironment.repairExecutable(this) }
+
         // 4) feature 进程级服务
         runCatching { CliController.init(this) }
         runCatching { TerminalManager.init(this) }

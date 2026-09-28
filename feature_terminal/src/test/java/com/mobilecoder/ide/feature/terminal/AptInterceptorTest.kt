@@ -7,23 +7,23 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * 终端命令拦截器状态机测试：`git` / `opencode` 被进程内接管，其余命令直通 shell。
+ * 终端命令拦截器状态机测试：`git` / `apt` 被进程内接管，其余命令直通 shell。
  */
-class OpencodeInterceptorTest {
+class AptInterceptorTest {
 
     private val pty = StringBuilder()
     private val echo = StringBuilder()
     private var rollbacks = 0
 
-    private lateinit var interceptor: OpencodeInterceptor
+    private lateinit var interceptor: AptInterceptor
 
     @Before
     fun setUp() {
         pty.setLength(0)
         echo.setLength(0)
         rollbacks = 0
-        interceptor = OpencodeInterceptor(
-            targets = { listOf("opencode", "git") },
+        interceptor = AptInterceptor(
+            targets = { listOf("apt", "git") },
             onWritePty = { bytes -> pty.append(String(bytes, Charsets.UTF_8)) },
             onLocalEcho = { text -> echo.append(text) },
             onRollback = { count -> rollbacks += count },
@@ -47,8 +47,8 @@ class OpencodeInterceptorTest {
     }
 
     @Test
-    fun `opencode 命令仍被拦截`() {
-        val line = "opencode help"
+    fun `apt 命令仍被拦截`() {
+        val line = "apt help"
         interceptor.feed(line)
         assertEquals(line, interceptor.enter())
         assertEquals("", pty.toString())
@@ -112,6 +112,40 @@ class OpencodeInterceptorTest {
         val line = "git commit -m \"hello world\""
         line.forEach { interceptor.feed(it.toString()) }
         assertEquals(line, interceptor.enter())
+        assertEquals("", pty.toString())
+    }
+
+    @Test
+    fun `accept 拒绝时回滚回显并整行交回 shell`() {
+        // 模拟：`apt <子命令>` 未注册且外部 apt CLI 已安装 → 交回 shell 执行
+        val outer = AptInterceptor(
+            targets = { listOf("apt", "git") },
+            accept = { line -> !line.startsWith("apt external") },
+            onWritePty = { bytes -> pty.append(String(bytes, Charsets.UTF_8)) },
+            onLocalEcho = { text -> echo.append(text) },
+            onRollback = { count -> rollbacks += count },
+        )
+        val line = "apt external run"
+        outer.feed(line)
+
+        assertNull(outer.enter())
+        assertEquals(line.length, rollbacks)          // 本地回显全部撤销
+        assertEquals("$line\r", pty.toString())       // 整行 + 回车交给 PTY
+    }
+
+    @Test
+    fun `accept 放行时照常拦截`() {
+        val strict = AptInterceptor(
+            targets = { listOf("apt", "git") },
+            accept = { line -> line.startsWith("apt help") },
+            onWritePty = { bytes -> pty.append(String(bytes, Charsets.UTF_8)) },
+            onLocalEcho = { text -> echo.append(text) },
+            onRollback = { count -> rollbacks += count },
+        )
+        val line = "apt help"
+        strict.feed(line)
+
+        assertEquals(line, strict.enter())
         assertEquals("", pty.toString())
     }
 }

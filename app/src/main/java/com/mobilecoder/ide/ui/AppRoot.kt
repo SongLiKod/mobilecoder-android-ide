@@ -3,6 +3,8 @@ package com.mobilecoder.ide.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -628,6 +630,7 @@ private fun CloneRepoDialog(
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CreateProjectDialog(
     onDismiss: () -> Unit,
@@ -652,7 +655,10 @@ private fun CreateProjectDialog(
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("模板", style = MaterialTheme.typography.labelMedium)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         ProjectTemplate.entries.forEachIndexed { index, item ->
                             FilterChip(
                                 selected = templateIndex == index,

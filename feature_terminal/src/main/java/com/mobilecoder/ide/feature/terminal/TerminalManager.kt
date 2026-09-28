@@ -129,6 +129,12 @@ object TerminalManager {
             appendLine(" *) PATH=\"\$PATH:$bin\" ;;")
             appendLine("esac")
             appendLine("export PATH")
+            appendLine("# 自愈：解压 / npm 写入后若丢了执行位，终端敲 node 或 npm 只会报 Permission denied")
+            appendLine("# （父目录缺 x 时里面的文件再有 x 也一样），所以每次进 shell 统一补一次")
+            appendLine(
+                "chmod u+rwx \"\$HOME\" \"\$HOME/bin\" \"\$HOME/bin\"/* " +
+                    "\"\$HOME/sdk/node/bin\" \"\$HOME/sdk/node/bin\"/* 2>/dev/null",
+            )
             appendLine("# 简洁提示符：显示当前目录名（mksh 支持参数替换，不支持 \\w）")
             appendLine("PS1='\${PWD##*/} \$ '")
             appendLine("alias ll='ls -l'")
@@ -136,6 +142,16 @@ object TerminalManager {
             appendLine("alias grep='grep --color=auto'")
         }
     }
+
+    /**
+     * `files/bin/<name>` 是否存在（npm 全局安装的外部 CLI，如 opencode-ai 的 `opencode`）。
+     * 内建前缀已改为 `apt`，外部 `opencode` 不再与内建命令冲突：输入 `opencode …`
+     * 会直通 shell 直接运行该二进制。
+     */
+    fun externalBinExists(name: String): Boolean = runCatching {
+        val ctx = appContext ?: return false
+        File(ctx.filesDir, "bin/$name").exists()
+    }.getOrDefault(false)
 
     // ------------------------------------------------------------------
     // 会话管理

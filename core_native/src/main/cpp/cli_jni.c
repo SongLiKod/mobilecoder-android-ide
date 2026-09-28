@@ -2,7 +2,7 @@
  * MobileCoder —— CLI / 外部进程执行引擎（JNI）
  *
  * 需求对应（PRD 2.4 / TECH 4.3）：
- *  - OpenCode CLI 在终端沙箱环境中运行，日志实时回调 UI 层展示
+ *  - apt CLI 在终端沙箱环境中运行，日志实时回调 UI 层展示
  *  - 协程任务队列在 Kotlin 层串行化，本层提供进程级并发执行能力
  *  - 编译任务独立线程执行、实时流式输出（feature_build 复用）
  */

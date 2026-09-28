@@ -226,14 +226,21 @@ internal fun parseLog(raw: String?): List<GitCommit> {
     }
 }
 
-/** 分支：name / isHead / upstream / ahead / behind。 */
+/** 分支：name（远程带 `remotes/` 前缀）/ isHead / upstream / ahead / behind / 顶端提交。 */
 data class GitBranch(
     val name: String,
     val isHead: Boolean,
     val upstream: String,
     val ahead: Int,
     val behind: Int,
-)
+    /** 顶端提交 7 位缩写（`branch -v` 输出；旧数据帧可能缺失）。 */
+    val tipOid: String = "",
+    /** 顶端提交标题（`branch -v` 输出；旧数据帧可能缺失）。 */
+    val tipSummary: String = "",
+) {
+    /** 是否远程跟踪分支（`remotes/origin/main` 形式）。 */
+    val isRemote: Boolean get() = name.startsWith("remotes/")
+}
 
 internal fun parseBranches(raw: String?): List<GitBranch> {
     if (raw.isNullOrEmpty()) return emptyList()
@@ -244,6 +251,8 @@ internal fun parseBranches(raw: String?): List<GitBranch> {
             upstream = f[2],
             ahead = f[3].trim().toIntOrNull() ?: 0,
             behind = f[4].trim().toIntOrNull() ?: 0,
+            tipOid = f.getOrNull(5).orEmpty(),
+            tipSummary = f.getOrNull(6).orEmpty(),
         )
     }
 }

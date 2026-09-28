@@ -745,6 +745,92 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_workdirPath(JNIEnv *env, jc
 /*  JNI —— 克隆                                                        */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  克隆 —— 上游配置兜底                                              */
+/* ------------------------------------------------------------------ */
+
+/* 真 git clone 会写 branch.<检出分支>.remote / .merge；缺了它们，
+ * clone 完第一次 `git pull` 就报
+ *   There is no tracking information for the current branch.
+ * 必须手动 `git branch --set-upstream-to=...` 才能用。
+ *
+ * libgit2 的 update_head_to_new_branch 在本地分支已存在（GIT_EEXISTS）时
+ * 会直接短路，跳过 setup_tracking_config（clone.c:125-137），上游就丢了。
+ * 这里在克隆收尾时按「缺失才写、已有绝不覆盖」补一次：
+ *   - 未出生 / 分离头指针 → 与真 git 一致，不自动关联；
+ *   - 远程取真正拥有 refs/remotes/<r>/<分支> 的那个，找不到再退回 origin。 */
+static void mc_ensure_tracking_config(git_repository *repo)
+{
+	git_reference *head = NULL;
+	git_config *cfg = NULL;
+	const char *refname, *branch, *val = NULL;
+	char key[MC_REFNAME_MAX];
+	char remote_name[MC_REFNAME_MAX];
+	char tracking_ref[MC_REFNAME_MAX];
+	int have_remote = 0;
+
+	if (repo == NULL)
+		return;
+	if (git_repository_head(&head, repo) < 0 || head == NULL)
+		return; /* 尚无提交，没有分支可关联 */
+
+	refname = git_reference_name(head);
+	if (strncmp(refname, "refs/heads/", 11) != 0) {
+		git_reference_free(head);
+		return;
+	}
+	branch = refname + 11;
+
+	if (git_repository_config(&cfg, repo) < 0) {
+		git_reference_free(head);
+		return;
+	}
+
+	snprintf(key, sizeof(key), "branch.%s.merge", branch);
+	if (git_config_get_string(&val, cfg, key) == 0 && val != NULL && val[0] != '\0')
+		goto done; /* 用户已配置过上游，保持原样 */
+
+	remote_name[0] = '\0';
+	{
+		git_strarray remotes = {NULL, 0};
+		size_t i;
+
+		if (git_remote_list(&remotes, repo) == 0) {
+			for (i = 0; i < remotes.count; i++) {
+				git_reference *rf = NULL;
+				snprintf(tracking_ref, sizeof(tracking_ref), "refs/remotes/%s/%s",
+					 remotes.strings[i], branch);
+				if (git_reference_lookup(&rf, repo, tracking_ref) == 0) {
+					git_reference_free(rf);
+					snprintf(remote_name, sizeof(remote_name), "%s", remotes.strings[i]);
+					have_remote = 1;
+					break;
+				}
+			}
+			git_strarray_free(&remotes);
+		}
+	}
+
+	if (!have_remote) {
+		git_remote *origin = NULL;
+		if (git_remote_lookup(&origin, repo, "origin") < 0) {
+			/* 连 origin 都没有：宁可不写，也不留一条查不到远程的配置 */
+			goto done;
+		}
+		git_remote_free(origin);
+		snprintf(remote_name, sizeof(remote_name), "%s", "origin");
+	}
+
+	snprintf(key, sizeof(key), "branch.%s.remote", branch);
+	git_config_set_string(cfg, key, remote_name);
+	snprintf(key, sizeof(key), "branch.%s.merge", branch);
+	git_config_set_string(cfg, key, refname);
+
+done:
+	git_config_free(cfg);
+	git_reference_free(head);
+}
+
 JNIEXPORT jint JNICALL
 Java_com_mobilecoder_ide_core_nativebridge_GitNative_clone(
         JNIEnv *env, jclass clazz, jstring url, jstring path, jstring branch) {
@@ -786,6 +872,9 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_clone(
         g_repo = NULL;
     }
     g_repo = cloned;
+
+    /* 克隆收尾：缺上游就补上，保证 clone 完 `git pull` 直接可用 */
+    mc_ensure_tracking_config(g_repo);
 
     free(c_url);
     free(c_path);
@@ -1413,16 +1502,25 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_log(
 /*  JNI —— 分支                                                        */
 /* ------------------------------------------------------------------ */
 
+/* 分支帧：name \x01 isHead \x01 upstream \x01 ahead \x01 behind \x01 tipOid \x01 tipSummary
+ * 远程跟踪分支的 name 带 "remotes/" 前缀（与 `git branch -a` 输出一致）。 */
 static void mc_append_branch(mc_sb *sb, git_reference *ref) {
     const char *name = git_reference_shorthand(ref);
     const git_oid *local_id;
+    const git_oid *tip_id;
     char upstream_name[MC_REFNAME_MAX];
+    char tip[16];
+    char summary[256];
     size_t ahead = 0, behind = 0;
     int is_head;
+    int is_remote;
     git_reference *upstream = NULL;
 
     upstream_name[0] = '\0';
+    tip[0] = '\0';
+    summary[0] = '\0';
     is_head = git_branch_is_head(ref);
+    is_remote = strncmp(git_reference_name(ref), "refs/remotes/", 13) == 0;
 
     if (git_branch_upstream(&upstream, ref) == 0 && upstream != NULL) {
         /* shorthand 指向 upstream 内部内存，必须先拷贝再 free */
@@ -1436,6 +1534,26 @@ static void mc_append_branch(mc_sb *sb, git_reference *ref) {
         git_reference_free(upstream);
     }
 
+    /* 顶端提交号（7 位缩写）+ 提交标题：`git branch -v/-vv` 输出用 */
+    tip_id = git_reference_target(ref);
+    if (tip_id != NULL) {
+        git_commit *c = NULL;
+        if (git_commit_lookup(&c, g_repo, tip_id) == 0) {
+            char full[GIT_OID_MAX_HEXSIZE + 1];
+            const char *s;
+            mc_oid_str(full, sizeof(full), tip_id);
+            snprintf(tip, sizeof(tip), "%.7s", full);
+            s = git_commit_summary(c);
+            if (s != NULL) {
+                snprintf(summary, sizeof(summary), "%s", s);
+            }
+            git_commit_free(c);
+        }
+    }
+
+    if (is_remote) {
+        sb_puts(sb, "remotes/");
+    }
     sb_puts(sb, name != NULL ? name : "");
     sb_putc(sb, MC_FIELD_SEP);
     sb_printf(sb, "%d", is_head ? 1 : 0);
@@ -1445,6 +1563,10 @@ static void mc_append_branch(mc_sb *sb, git_reference *ref) {
     sb_printf(sb, "%zu", ahead);
     sb_putc(sb, MC_FIELD_SEP);
     sb_printf(sb, "%zu", behind);
+    sb_putc(sb, MC_FIELD_SEP);
+    sb_puts(sb, tip);
+    sb_putc(sb, MC_FIELD_SEP);
+    sb_puts(sb, summary);
     sb_putc(sb, MC_REC_SEP);
 }
 
@@ -1454,6 +1576,8 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_branches(JNIEnv *env, jclas
     git_branch_iterator *iter = NULL;
     git_reference *ref = NULL;
     git_branch_t type;
+    git_strarray remotes = {NULL, 0};
+    size_t i;
     mc_sb sb;
 
     if (!mc_require_repo()) {
@@ -1461,18 +1585,65 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_branches(JNIEnv *env, jclas
     }
     mc_clear_error();
 
-    if (git_branch_iterator_new(&iter, g_repo, GIT_BRANCH_LOCAL) < 0) {
+    /* 本地 + 远程跟踪分支（`branch` 只显本地、`branch -a`/`-r` 的过滤由上层完成） */
+    if (git_branch_iterator_new(&iter, g_repo, GIT_BRANCH_ALL) < 0) {
         mc_set_error("读取分支失败");
         return mc_cstr_to_jstring(env, "");
     }
 
     sb_init(&sb);
     while (git_branch_next(&ref, &type, iter) == 0) {
-        mc_append_branch(&sb, ref);
+        /* 符号引用（refs/remotes/<r>/HEAD）在循环后单独补 "-> 目标" 行 */
+        if (git_reference_type(ref) != GIT_REFERENCE_SYMBOLIC) {
+            mc_append_branch(&sb, ref);
+        }
         git_reference_free(ref);
         ref = NULL;
     }
     git_branch_iterator_free(iter);
+
+    /* remotes/<name>/HEAD：真 git 的 `branch -a` 显示 "remotes/origin/HEAD -> origin/main" */
+    if (git_remote_list(&remotes, g_repo) == 0) {
+        for (i = 0; i < remotes.count; i++) {
+            git_reference *h = NULL;
+            char refname[MC_REFNAME_MAX];
+            char shown[MC_REFNAME_MAX];
+
+            snprintf(refname, sizeof(refname), "refs/remotes/%s/HEAD", remotes.strings[i]);
+            if (git_reference_lookup(&h, g_repo, refname) < 0 || h == NULL) {
+                continue;
+            }
+            shown[0] = '\0';
+            {
+                const char *target = git_reference_symbolic_target(h);
+                if (target != NULL && target[0] != '\0') {
+                    if (strncmp(target, "refs/remotes/", 13) == 0) {
+                        snprintf(shown, sizeof(shown), "%s", target + 13);
+                    } else if (strncmp(target, "refs/heads/", 11) == 0) {
+                        snprintf(shown, sizeof(shown), "%s", target + 11);
+                    } else {
+                        snprintf(shown, sizeof(shown), "%s", target);
+                    }
+                }
+            }
+            sb_puts(&sb, "remotes/");
+            sb_puts(&sb, remotes.strings[i]);
+            sb_puts(&sb, "/HEAD");
+            sb_putc(&sb, MC_FIELD_SEP);
+            sb_puts(&sb, "0");
+            sb_putc(&sb, MC_FIELD_SEP);
+            sb_puts(&sb, shown);
+            sb_putc(&sb, MC_FIELD_SEP);
+            sb_puts(&sb, "0");
+            sb_putc(&sb, MC_FIELD_SEP);
+            sb_puts(&sb, "0");
+            sb_putc(&sb, MC_FIELD_SEP);
+            sb_putc(&sb, MC_FIELD_SEP); /* tip 空帧 */
+            sb_putc(&sb, MC_REC_SEP);
+            git_reference_free(h);
+        }
+        git_strarray_free(&remotes);
+    }
 
     {
         char *out = sb_detach(&sb);
@@ -1527,8 +1698,24 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_headInfo(JNIEnv *env, jclas
 
     if (git_repository_head(&head, g_repo) == 0 && head != NULL) {
         /* shorthand 指向 head 内部内存，必须在 free 之前拷贝 */
-        snprintf(name, sizeof(name), "%s", git_reference_shorthand(head));
         detached = git_repository_head_detached(g_repo) == 1;
+        if (detached) {
+            /* 分离态的 HEAD 是名为 "HEAD" 的直接引用，shorthand 恒等于 "HEAD"，
+             * 于是 status 输出 "HEAD detached at HEAD"、终端徽标 "HEAD (HEAD)"——
+             * 全是废话。与 git status 一致，这里改用缩写提交号
+             * （位数与 log 的 shortOid 保持一致，都是 10）。 */
+            const git_oid *id = git_reference_target(head);
+            if (id != NULL) {
+                char full[GIT_OID_MAX_HEXSIZE + 1];
+                size_t n;
+                mc_oid_str(full, sizeof(full), id);
+                n = strlen(full);
+                if (n > 10) n = 10;
+                snprintf(name, sizeof(name), "%.*s", (int) n, full);
+            }
+        } else {
+            snprintf(name, sizeof(name), "%s", git_reference_shorthand(head));
+        }
         if (!detached && git_reference_target(head) != NULL) {
             git_reference *upstream = NULL;
             if (git_branch_upstream(&upstream, head) == 0 && upstream != NULL) {
@@ -1564,54 +1751,173 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_headInfo(JNIEnv *env, jclas
     }
 }
 
+/* 创建分支。start 为起始点 revspec（分支 / 远程跟踪 / 标签 / 提交号），
+ * null 或空表示从 HEAD 创建。错误文案对齐 git：
+ *   fatal: a branch named 'x' already exists
+ *   fatal: 'x' is not a valid branch name */
 JNIEXPORT jboolean JNICALL
 Java_com_mobilecoder_ide_core_nativebridge_GitNative_createBranch(
-        JNIEnv *env, jclass clazz, jstring name) {
+        JNIEnv *env, jclass clazz, jstring name, jstring start) {
     (void) clazz;
     char *c_name = mc_jstring_to_cstr(env, name);
-    git_oid head;
+    char *c_start = mc_jstring_to_cstr(env, start);
+    git_oid base;
     git_commit *commit = NULL;
     git_reference *ref = NULL;
     int rc;
 
     if (c_name == NULL || c_name[0] == '\0' || !mc_require_repo()) {
         free(c_name);
+        free(c_start);
         return JNI_FALSE;
     }
     mc_clear_error();
 
-    if (mc_head_oid(&head) < 0) {
+    if (c_start != NULL && c_start[0] != '\0') {
+        git_annotated_commit *ac = NULL;
+        if (git_annotated_commit_from_revspec(&ac, g_repo, c_start) < 0) {
+            const git_error *e = git_error_last();
+            mc_set_error((e != NULL && e->message != NULL) ? e->message : "无效的起始点");
+            free(c_name);
+            free(c_start);
+            return JNI_FALSE;
+        }
+        git_oid_cpy(&base, git_annotated_commit_id(ac));
+        git_annotated_commit_free(ac);
+    } else if (mc_head_oid(&base) < 0) {
         mc_set_error("当前没有可分支的提交");
         free(c_name);
+        free(c_start);
         return JNI_FALSE;
     }
-    if (git_commit_lookup(&commit, g_repo, &head) < 0) {
-        mc_set_error("读取 HEAD 提交失败");
+
+    if (git_commit_lookup(&commit, g_repo, &base) < 0) {
+        mc_set_error("读取提交失败");
         free(c_name);
+        free(c_start);
         return JNI_FALSE;
     }
 
     rc = git_branch_create(&ref, g_repo, c_name, commit, 0);
     git_commit_free(commit);
     git_reference_free(ref);
-    free(c_name);
 
     if (rc < 0) {
-        mc_set_error("创建分支失败");
+        if (rc == GIT_EEXISTS) {
+            mc_set_errorf("a branch named '%s' already exists", c_name);
+        } else {
+            const git_error *e = git_error_last();
+            mc_set_error((e != NULL && e->message != NULL) ? e->message : "创建分支失败");
+        }
+        free(c_name);
+        free(c_start);
         return JNI_FALSE;
     }
+    free(c_name);
+    free(c_start);
     return JNI_TRUE;
 }
 
+/* 把提交检出到工作区并移动 HEAD：refname 非空 = 附着到该分支；NULL = 分离头指针。
+ * 返回 0 成功 / -1 失败（g_err 未置时由调用方补充冲突提示）。 */
+static int mc_checkout_commit(const git_oid *id, const char *refname) {
+    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
+    git_commit *target = NULL;
+    int rc;
+
+    if (git_commit_lookup(&target, g_repo, id) < 0) {
+        mc_set_error("读取提交失败");
+        return -1;
+    }
+    /* 先移动工作区/索引，再更新 HEAD 指向 */
+    opts.checkout_strategy = GIT_CHECKOUT_SAFE;
+    rc = git_checkout_tree(g_repo, (const git_object *) target, &opts);
+    git_commit_free(target);
+    if (rc < 0) {
+        return -1;
+    }
+    if (refname != NULL) {
+        rc = git_repository_set_head(g_repo, refname);
+    } else {
+        rc = git_repository_set_head_detached(g_repo, id);
+    }
+    return rc < 0 ? -1 : 0;
+}
+
+/* 把解析出的引用检出（本地分支附着 / 远程跟踪与标签分离，与真 git 一致）。
+ * 返回 0 附着切换 / 2 已在该分支 / 4 分离头指针 / -1 失败。 */
+static int mc_checkout_ref(git_reference *ref) {
+    const char *refname = git_reference_name(ref);
+    const git_oid *id;
+    int rc;
+
+    /* 符号引用（如 origin/HEAD）：解到真实目标后重走一遍 */
+    if (git_reference_type(ref) == GIT_REFERENCE_SYMBOLIC) {
+        const char *target = git_reference_symbolic_target(ref);
+        git_reference *resolved = NULL;
+        if (target == NULL || git_reference_lookup(&resolved, g_repo, target) < 0) {
+            git_reference_free(ref);
+            mc_set_error("引用指向不存在的目标");
+            return -1;
+        }
+        git_reference_free(ref);
+        return mc_checkout_ref(resolved);
+    }
+
+    if (strncmp(refname, "refs/heads/", 11) == 0) {
+        if (git_branch_is_head(ref)) {
+            git_reference_free(ref);
+            return 2;
+        }
+        id = git_reference_target(ref);
+        rc = id != NULL ? mc_checkout_commit(id, refname) : -1;
+        git_reference_free(ref);
+        return rc == 0 ? 0 : -1;
+    }
+
+    if (strncmp(refname, "refs/tags/", 10) == 0) {
+        const git_oid *tag_id = git_reference_target(ref);
+        git_object *obj = NULL;
+        git_object *commit_obj = NULL;
+        int peeled = -1;
+
+        if (tag_id != NULL &&
+            git_object_lookup(&obj, g_repo, tag_id, GIT_OBJECT_ANY) == 0) {
+            peeled = git_object_peel(&commit_obj, obj, GIT_OBJECT_COMMIT);
+        }
+        git_object_free(obj);
+        git_reference_free(ref);
+        if (peeled < 0 || commit_obj == NULL) {
+            git_object_free(commit_obj);
+            mc_set_error("读取标签提交失败");
+            return -1;
+        }
+        rc = mc_checkout_commit(git_object_id(commit_obj), NULL);
+        git_object_free(commit_obj);
+        return rc == 0 ? 4 : -1;
+    }
+
+    /* 远程跟踪引用（显式 origin/dev 这类指向 refs/remotes/ 下的检出）→ 分离头指针 */
+    id = git_reference_target(ref);
+    rc = id != NULL ? mc_checkout_commit(id, NULL) : -1;
+    git_reference_free(ref);
+    return rc == 0 ? 4 : -1;
+}
+
+/* 切换检出（对齐真 git 的 DWIM 语义）：
+ *   0 = 已附着切换到本地分支
+ *   2 = 已经在该分支（无需操作）
+ *   3 = 本地不存在、由唯一拥有它的远程 DWIM 新建跟踪分支并切换
+ *   4 = 分离头指针（显式 origin/x / 标签 / 提交号）
+ *  -1 = 失败（工作区冲突等，详见 lastError）
+ *  -2 = 引用不存在（上层按 checkout/switch 输出对应 git 文案）
+ *  -3 = 多个远程存在同名分支（lastError 为 git 同款歧义文案） */
 JNIEXPORT jint JNICALL
 Java_com_mobilecoder_ide_core_nativebridge_GitNative_checkoutBranch(
         JNIEnv *env, jclass clazz, jstring name) {
     (void) clazz;
     char *c_name = mc_jstring_to_cstr(env, name);
     git_reference *ref = NULL;
-    git_annotated_commit *ac = NULL;
-    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
-    char refname[512];
     int rc;
 
     if (c_name == NULL || c_name[0] == '\0' || !mc_require_repo()) {
@@ -1620,54 +1926,186 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_checkoutBranch(
     }
     mc_clear_error();
 
-    if (git_branch_lookup(&ref, g_repo, c_name, GIT_BRANCH_LOCAL) < 0) {
-        mc_set_errorf("分支不存在：%s", c_name);
-        free(c_name);
-        return -1;
-    }
-    snprintf(refname, sizeof(refname), "%s", git_reference_name(ref));
-
-    if (git_annotated_commit_from_ref(&ac, g_repo, ref) < 0) {
-        git_reference_free(ref);
-        free(c_name);
-        mc_set_error("读取分支提交失败");
-        return -1;
-    }
-    git_reference_free(ref);
-
-    /* 先移动工作区/索引，再更新 HEAD 指向 */
-    opts.checkout_strategy = GIT_CHECKOUT_SAFE;
+    /* UI 列表项带 "remotes/" 前缀：剥掉后与终端输入等价 */
     {
-        git_commit *target = NULL;
-        if (git_commit_lookup(&target, g_repo, git_annotated_commit_id(ac)) < 0) {
-            git_annotated_commit_free(ac);
+        size_t len = strlen(c_name);
+        if (len > 8 && strncmp(c_name, "remotes/", 8) == 0) {
+            memmove(c_name, c_name + 8, len - 8 + 1);
+        }
+    }
+
+    /* 1) 本地分支优先（分支先于标签 / 远程，与真 git 检出优先级一致） */
+    if (git_branch_lookup(&ref, g_repo, c_name, GIT_BRANCH_LOCAL) == 0) {
+        rc = mc_checkout_ref(ref);
+        if (rc < 0) {
+            if (g_err[0] == '\0') {
+                mc_set_error("切换分支失败（工作区有未提交的冲突改动？）");
+            }
             free(c_name);
-            mc_set_error("读取分支提交失败");
             return -1;
         }
-        rc = git_checkout_tree(g_repo, (const git_object *) target, &opts);
-        git_commit_free(target);
-    }
-    if (rc == 0) {
-        rc = git_repository_set_head(g_repo, refname);
+        free(c_name);
+        return rc; /* 0 / 2 */
     }
 
-    git_annotated_commit_free(ac);
-    free(c_name);
+    /* 2) HEAD：已在当前位置 */
+    if (strcmp(c_name, "HEAD") == 0) {
+        free(c_name);
+        return 2;
+    }
 
-    if (rc < 0) {
-        mc_set_error("切换分支失败（工作区有未提交的冲突改动？）");
+    /* 3) 显式限定的引用（origin/dev、release/v1 等带 / 的名字）→ dwim 直接解析 */
+    if (strchr(c_name, '/') != NULL && git_reference_dwim(&ref, g_repo, c_name) == 0) {
+        rc = mc_checkout_ref(ref);
+        free(c_name);
+        if (rc >= 0) {
+            return rc; /* 0 / 4 */
+        }
+        if (g_err[0] == '\0') {
+            mc_set_error("切换分支失败（工作区有未提交的冲突改动？）");
+        }
         return -1;
     }
-    return 0;
+
+    /* 4) 跨远程 DWIM：本地没有 → 在唯一拥有该分支的远程上建跟踪分支（真 git 行为） */
+    {
+        git_strarray remotes = {NULL, 0};
+        int found = 0;
+        char *owner = NULL;
+        git_oid found_id;
+        size_t i;
+
+        memset(&found_id, 0, sizeof(found_id));
+        if (git_remote_list(&remotes, g_repo) == 0) {
+            for (i = 0; i < remotes.count; i++) {
+                char buf[MC_REFNAME_MAX];
+                git_reference *rf = NULL;
+                snprintf(buf, sizeof(buf), "refs/remotes/%s/%s", remotes.strings[i], c_name);
+                if (git_reference_lookup(&rf, g_repo, buf) == 0 && rf != NULL) {
+                    const git_oid *id = git_reference_target(rf);
+                    if (found == 0 && id != NULL) {
+                        git_oid_cpy(&found_id, id);
+                        owner = strdup(remotes.strings[i]);
+                    }
+                    found++;
+                    git_reference_free(rf);
+                }
+            }
+            git_strarray_free(&remotes);
+        }
+
+        if (found > 1) {
+            mc_set_errorf("'%s' matches more than one remote, cannot guess", c_name);
+            free(owner);
+            free(c_name);
+            return -3;
+        }
+
+        if (found == 1) {
+            git_commit *commit = NULL;
+            git_reference *newref = NULL;
+            int created_branch = 0;
+
+            if (git_commit_lookup(&commit, g_repo, &found_id) < 0) {
+                mc_set_error("读取提交失败");
+                free(owner);
+                free(c_name);
+                return -1;
+            }
+            rc = git_branch_create(&newref, g_repo, c_name, commit, 0);
+            git_commit_free(commit);
+            git_reference_free(newref);
+            if (rc == 0) {
+                created_branch = 1;
+                /* 与真 git 相同：自动设置上游，之后 pull/push/status 直接可用 */
+                if (owner != NULL) {
+                    git_config *cfg = NULL;
+                    char key[MC_REFNAME_MAX];
+                    char mergeval[MC_REFNAME_MAX];
+                    if (git_repository_config(&cfg, g_repo) == 0) {
+                        snprintf(key, sizeof(key), "branch.%s.remote", c_name);
+                        git_config_set_string(cfg, key, owner);
+                        snprintf(key, sizeof(key), "branch.%s.merge", c_name);
+                        snprintf(mergeval, sizeof(mergeval), "refs/heads/%s", c_name);
+                        git_config_set_string(cfg, key, mergeval);
+                        git_config_free(cfg);
+                    }
+                }
+            } else if (rc != GIT_EEXISTS) {
+                const git_error *e = git_error_last();
+                mc_set_error((e != NULL && e->message != NULL) ? e->message : "创建分支失败");
+                free(owner);
+                free(c_name);
+                return -1;
+            }
+
+            {
+                char localref[MC_REFNAME_MAX];
+                snprintf(localref, sizeof(localref), "refs/heads/%s", c_name);
+                rc = mc_checkout_commit(&found_id, localref);
+            }
+            free(owner);
+            free(c_name);
+            if (rc < 0) {
+                if (g_err[0] == '\0') {
+                    mc_set_error("切换分支失败（工作区有未提交的冲突改动？）");
+                }
+                return -1;
+            }
+            return created_branch ? 3 : 0;
+        }
+        /* found == 0 → 继续向下解析 */
+    }
+
+    /* 5) 其他 commit-ish：标签（纯名字）/ 提交号 / HEAD~1 等 → 分离头指针 */
+    if (git_reference_dwim(&ref, g_repo, c_name) == 0) {
+        rc = mc_checkout_ref(ref);
+        free(c_name);
+        if (rc >= 0) {
+            return rc;
+        }
+        if (g_err[0] == '\0') {
+            mc_set_error("切换分支失败（工作区有未提交的冲突改动？）");
+        }
+        return -1;
+    }
+    {
+        git_object *obj = NULL;
+        if (git_revparse_single(&obj, g_repo, c_name) == 0) {
+            git_object *commit_obj = NULL;
+            int peeled = git_object_peel(&commit_obj, obj, GIT_OBJECT_COMMIT);
+            git_object_free(obj);
+            if (peeled == 0 && commit_obj != NULL) {
+                rc = mc_checkout_commit(git_object_id(commit_obj), NULL);
+                git_object_free(commit_obj);
+                free(c_name);
+                if (rc < 0) {
+                    if (g_err[0] == '\0') {
+                        mc_set_error("切换分支失败（工作区有未提交的冲突改动？）");
+                    }
+                    return -1;
+                }
+                return 4;
+            }
+            git_object_free(commit_obj);
+        }
+    }
+
+    /* 6) 未找到：清掉 libgit2 的底层报错，由上层输出 git 同款文案 */
+    mc_clear_error();
+    free(c_name);
+    return -2;
 }
 
+/* 删除分支。name 带 "remotes/" 前缀时删除远程跟踪引用（等价 git branch -rd）。
+ * force 对应 -D（跳过未合并检查）；-d 对齐 git：顶端提交未并入 HEAD 时拒绝。 */
 JNIEXPORT jboolean JNICALL
 Java_com_mobilecoder_ide_core_nativebridge_GitNative_deleteBranch(
-        JNIEnv *env, jclass clazz, jstring name) {
+        JNIEnv *env, jclass clazz, jstring name, jboolean force) {
     (void) clazz;
     char *c_name = mc_jstring_to_cstr(env, name);
     git_reference *ref = NULL;
+    int is_remote = 0;
     int rc;
 
     if (c_name == NULL || c_name[0] == '\0' || !mc_require_repo()) {
@@ -1676,16 +2114,56 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_deleteBranch(
     }
     mc_clear_error();
 
-    if (git_branch_lookup(&ref, g_repo, c_name, GIT_BRANCH_LOCAL) < 0) {
-        mc_set_errorf("分支不存在：%s", c_name);
+    if (strncmp(c_name, "remotes/", 8) == 0) {
+        char refname[MC_REFNAME_MAX];
+        snprintf(refname, sizeof(refname), "refs/remotes/%s", c_name + 8);
+        if (git_reference_lookup(&ref, g_repo, refname) < 0) {
+            mc_set_errorf("the branch '%s' not found", c_name);
+            free(c_name);
+            return JNI_FALSE;
+        }
+        is_remote = 1;
+    } else if (git_branch_lookup(&ref, g_repo, c_name, GIT_BRANCH_LOCAL) < 0) {
+        mc_set_errorf("the branch '%s' not found", c_name);
         free(c_name);
         return JNI_FALSE;
     }
+
+    if (is_remote) {
+        rc = git_reference_delete(ref); /* 内部释放 ref */
+        free(c_name);
+        if (rc < 0) {
+            mc_set_error("删除远程跟踪分支失败");
+            return JNI_FALSE;
+        }
+        return JNI_TRUE;
+    }
+
     if (git_branch_is_head(ref)) {
+        const char *wd = git_repository_workdir(g_repo);
+        if (wd != NULL && wd[0] != '\0') {
+            mc_set_errorf("Cannot delete branch '%s' checked out at '%s'", c_name, wd);
+        } else {
+            mc_set_errorf("Cannot delete branch '%s' checked out", c_name);
+        }
         git_reference_free(ref);
         free(c_name);
-        mc_set_error("不能删除当前所在分支");
         return JNI_FALSE;
+    }
+
+    /* -d：顶端提交必须已并入 HEAD（ahead = 可从分支顶端到达、但不可从 HEAD 到达的提交数） */
+    if (!force) {
+        const git_oid *tid = git_reference_target(ref);
+        git_oid head_id;
+        size_t ahead = 0, behind = 0;
+        if (tid != NULL && mc_head_oid(&head_id) == 0 &&
+            git_graph_ahead_behind(&ahead, &behind, g_repo, tid, &head_id) == 0 &&
+            ahead > 0) {
+            mc_set_errorf("The branch '%s' is not fully merged.", c_name);
+            git_reference_free(ref);
+            free(c_name);
+            return JNI_FALSE;
+        }
     }
 
     rc = git_branch_delete(ref); /* 内部释放 ref */
@@ -1798,7 +2276,6 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_merge(
         JNIEnv *env, jclass clazz, jstring name) {
     (void) clazz;
     char *c_name = mc_jstring_to_cstr(env, name);
-    git_reference *ref = NULL;
     git_annotated_commit *ac = NULL;
     const git_annotated_commit *their[1];
     git_merge_analysis_t analysis = GIT_MERGE_ANALYSIS_NONE;
@@ -1814,18 +2291,12 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_merge(
     }
     mc_clear_error();
 
-    if (git_branch_lookup(&ref, g_repo, c_name, GIT_BRANCH_LOCAL) < 0) {
-        mc_set_errorf("分支不存在：%s", c_name);
+    /* 接受任意可合并引用：本地分支 / origin/x 远程跟踪 / 标签 / 提交号（与真 git 一致） */
+    if (git_annotated_commit_from_revspec(&ac, g_repo, c_name) < 0) {
+        mc_set_errorf("'%s' is not something we can merge", c_name);
         free(c_name);
         return -1;
     }
-    if (git_annotated_commit_from_ref(&ac, g_repo, ref) < 0) {
-        git_reference_free(ref);
-        free(c_name);
-        mc_set_error("读取分支提交失败");
-        return -1;
-    }
-    git_reference_free(ref);
 
     if (git_merge_analysis(&analysis, &preference, g_repo,
                            (const git_annotated_commit **) &ac, 1) < 0) {
@@ -2504,6 +2975,119 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_remotes(JNIEnv *env, jclass
     }
 }
 
+/* 列出某远程的全部跟踪引用：shorthand(origin/dev) \x01 oid(40 hex)。
+ * 供 fetch 输出 ` * [new branch] x -> origin/x` / `   a..b  y -> origin/y` 行。 */
+JNIEXPORT jstring JNICALL
+Java_com_mobilecoder_ide_core_nativebridge_GitNative_remoteRefs(
+        JNIEnv *env, jclass clazz, jstring name) {
+    (void) clazz;
+    char *c_name = mc_jstring_to_cstr(env, name);
+    git_reference_iterator *iter = NULL;
+    git_reference *ref = NULL;
+    char prefix[MC_REFNAME_MAX];
+    mc_sb sb;
+
+    if (c_name == NULL || c_name[0] == '\0' || !mc_require_repo()) {
+        free(c_name);
+        return mc_cstr_to_jstring(env, "");
+    }
+    mc_clear_error();
+    snprintf(prefix, sizeof(prefix), "refs/remotes/%s/", c_name);
+
+    if (git_reference_iterator_new(&iter, g_repo) < 0) {
+        mc_set_error("读取远程引用失败");
+        free(c_name);
+        return mc_cstr_to_jstring(env, "");
+    }
+
+    sb_init(&sb);
+    while (git_reference_next(&ref, iter) == 0) {
+        if (strncmp(git_reference_name(ref), prefix, strlen(prefix)) == 0) {
+            const git_oid *id = git_reference_target(ref); /* origin/HEAD 符号引用无 oid，跳过 */
+            if (id != NULL) {
+                char oid[GIT_OID_MAX_HEXSIZE + 1];
+                mc_oid_str(oid, sizeof(oid), id);
+                sb_puts(&sb, git_reference_shorthand(ref));
+                sb_putc(&sb, MC_FIELD_SEP);
+                sb_puts(&sb, oid);
+                sb_putc(&sb, MC_REC_SEP);
+            }
+        }
+        git_reference_free(ref);
+        ref = NULL;
+    }
+    git_reference_iterator_free(iter);
+    free(c_name);
+
+    {
+        char *out = sb_detach(&sb);
+        jstring result = mc_cstr_to_jstring(env, out != NULL ? out : "");
+        free(out);
+        return result;
+    }
+}
+
+/* 读取仓库配置项（branch.<n>.remote / user.name 等）；未配置返回空串。 */
+JNIEXPORT jstring JNICALL
+Java_com_mobilecoder_ide_core_nativebridge_GitNative_configGet(
+        JNIEnv *env, jclass clazz, jstring key) {
+    (void) clazz;
+    char *c_key = mc_jstring_to_cstr(env, key);
+    git_config *cfg = NULL;
+    const char *val = NULL;
+    jstring result;
+
+    if (c_key == NULL || c_key[0] == '\0' || !mc_require_repo()) {
+        free(c_key);
+        return mc_cstr_to_jstring(env, "");
+    }
+    mc_clear_error();
+    if (git_repository_config(&cfg, g_repo) < 0) {
+        free(c_key);
+        return mc_cstr_to_jstring(env, "");
+    }
+    if (git_config_get_string(&val, cfg, c_key) < 0 || val == NULL) {
+        val = ""; /* 未配置不是错误 */
+    }
+    result = mc_cstr_to_jstring(env, val); /* 先拷贝再释放 config */
+    git_config_free(cfg);
+    free(c_key);
+    return result;
+}
+
+/* 写仓库本地配置（branch.<n>.remote/merge 上游等）；成功返回 0，失败 -1。 */
+JNIEXPORT jint JNICALL
+Java_com_mobilecoder_ide_core_nativebridge_GitNative_configSet(
+        JNIEnv *env, jclass clazz, jstring key, jstring value) {
+    (void) clazz;
+    char *c_key = mc_jstring_to_cstr(env, key);
+    char *c_value = mc_jstring_to_cstr(env, value);
+    git_config *cfg = NULL;
+    int rc;
+
+    if (c_key == NULL || c_key[0] == '\0' || c_value == NULL || !mc_require_repo()) {
+        free(c_key);
+        free(c_value);
+        mc_set_error("配置项无效或仓库未打开");
+        return -1;
+    }
+    mc_clear_error();
+    if (git_repository_config(&cfg, g_repo) < 0) {
+        free(c_key);
+        free(c_value);
+        mc_set_error("无法打开仓库配置");
+        return -1;
+    }
+    rc = git_config_set_string(cfg, c_key, c_value);
+    git_config_free(cfg);
+    if (rc < 0) {
+        mc_set_error("写入配置失败");
+    }
+    free(c_key);
+    free(c_value);
+    return rc < 0 ? -1 : 0;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_mobilecoder_ide_core_nativebridge_GitNative_addRemote(
         JNIEnv *env, jclass clazz, jstring name, jstring url) {
@@ -2523,6 +3107,15 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_addRemote(
 
     rc = git_remote_create(&remote, g_repo, c_name, c_url);
     git_remote_free(remote);
+    if (rc == 0) {
+        /* 与真 git `remote add` 一致：写入默认 fetch refspec，
+         * 否则 fetch 无 refspec 可用、拉不到任何远程跟踪分支 */
+        char spec[MC_REFNAME_MAX * 2];
+        snprintf(spec, sizeof(spec), "+refs/heads/*:refs/remotes/%s/*", c_name);
+        if (git_remote_add_fetch(g_repo, c_name, spec) < 0) {
+            mc_clear_error(); /* 非致命：远程已创建成功 */
+        }
+    }
     free(c_name);
     free(c_url);
 
@@ -2599,6 +3192,32 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_fetch(
         mc_set_errorf("远程仓库不存在：%s", c_name);
         free(c_name);
         return -1;
+    }
+
+    /* 兜底：仓库缺少 remote.<n>.fetch（旧版添加的远程）→ 补写默认 refspec，
+     * 否则 NULL refspec 的 fetch 拉不到任何远程跟踪分支 */
+    {
+        git_strarray specs = {NULL, 0};
+        int have_spec = 0;
+        if (git_remote_get_fetch_refspecs(&specs, remote) == 0) {
+            have_spec = specs.count > 0;
+            git_strarray_free(&specs);
+        }
+        if (!have_spec) {
+            char spec[MC_REFNAME_MAX * 2];
+            snprintf(spec, sizeof(spec), "+refs/heads/*:refs/remotes/%s/*", c_name);
+            if (git_remote_add_fetch(g_repo, c_name, spec) == 0) {
+                git_remote_free(remote);
+                remote = NULL;
+                if (git_remote_lookup(&remote, g_repo, c_name) < 0) {
+                    mc_set_errorf("远程仓库不存在：%s", c_name);
+                    free(c_name);
+                    return -1;
+                }
+            } else {
+                mc_clear_error(); /* 写不进去也按原样继续，不比旧行为差 */
+            }
+        }
     }
 
     opts.callbacks = mc_remote_callbacks();
