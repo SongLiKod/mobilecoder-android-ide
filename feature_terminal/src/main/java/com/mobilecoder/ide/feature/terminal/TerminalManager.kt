@@ -129,6 +129,12 @@ object TerminalManager {
             appendLine(" *) PATH=\"\$PATH:$bin\" ;;")
             appendLine("esac")
             appendLine("export PATH")
+            appendLine("# 自愈：解压 / npm 写入后若丢了执行位，终端敲 node 或 npm 只会报 Permission denied")
+            appendLine("# （父目录缺 x 时里面的文件再有 x 也一样），所以每次进 shell 统一补一次")
+            appendLine(
+                "chmod u+rwx \"\$HOME\" \"\$HOME/bin\" \"\$HOME/bin\"/* " +
+                    "\"\$HOME/sdk/node/bin\" \"\$HOME/sdk/node/bin\"/* 2>/dev/null",
+            )
             appendLine("# 简洁提示符：显示当前目录名（mksh 支持参数替换，不支持 \\w）")
             appendLine("PS1='\${PWD##*/} \$ '")
             appendLine("alias ll='ls -l'")

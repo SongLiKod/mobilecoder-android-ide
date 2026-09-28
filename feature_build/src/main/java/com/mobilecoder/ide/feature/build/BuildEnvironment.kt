@@ -5,9 +5,11 @@ import android.net.Uri
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
 import com.mobilecoder.ide.core.storage.AppStorage
 import java.io.File
+import java.nio.file.Files
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -338,10 +340,152 @@ object BuildEnvironment {
     /** 对目录下所有普通文件授予可执行权限（zip 不保留权限位）。 */
     private fun fixExecutable(bin: File) {
         if (!bin.isDirectory) return
-        bin.walkTopDown().forEach { file ->
-            if (file.isFile) runCatching { file.setExecutable(true, false) }
+        val files = mutableListOf<File>()
+        bin.walkTopDown().forEach { file -> if (file.isFile) files += file }
+        makeExecutableAll(files)
+    }
+
+    // ------------------------------------------------------------------
+    // 可执行权限自愈
+    // ------------------------------------------------------------------
+
+    /**
+     * 补执行位并**校验**：`File.setExecutable` 静默失败（返回 false、不抛异常）时，
+     * 终端里照样报 `Permission denied`，所以对**没生效的那些**回退一次系统 `chmod`
+     * （与 BuildRunner / EnvDownloader 已有的 shell `chmod` 兜底一致）。
+     *
+     * 批量处理：一个 JDK 的 `bin` 就有几十个文件，逐个起 shell 会拖慢导入流程。
+     */
+    private fun makeExecutable(file: File) = makeExecutableAll(listOf(file))
+
+    private fun makeExecutableAll(files: List<File>) {
+        if (files.isEmpty()) return
+        files.forEach { file -> runCatching { file.setExecutable(true, false) } }
+        chmodViaShell(files.filter { !it.canExecute() })
+    }
+
+    /** 一次性 `chmod u+rwx` 多个路径（走 /system/bin/sh，避免逐个起进程）。 */
+    private fun chmodViaShell(files: List<File>) {
+        if (files.isEmpty()) return
+        runCatching {
+            val args = files.joinToString(" ") { "'${it.absolutePath}'" }
+            val process = ProcessBuilder("/system/bin/sh", "-c", "chmod u+rwx $args")
+                .redirectOutput(ProcessBuilder.Redirect.from(File("/dev/null")))
+                .redirectErrorStream(true)
+                .start()
+            runCatching { process.waitFor() }
+            runCatching { process.outputStream.close() }
+            runCatching { process.inputStream.close() }
+            runCatching { process.errorStream.close() }
         }
     }
+
+    /**
+     * 自愈 `files/bin` 与 `files/sdk` 下各级 `bin` 的可执行权限（幂等，App 启动与执行 npm 前各跑一次）。
+     *
+     * 终端里直接敲 `node -v` **不经过** `apt tools install`，此前只有安装流程会补执行位：
+     * 只要某次解压 / npm 写入 / 目录被改过导致权限位丢失，用户就会看到
+     * `sh: …/files/bin/node: Permission denied`，且没有任何命令能修好它。
+     *
+     *  1. 目录本身必须可穿越——目录缺 `x` 时，里面的文件再有执行位同样报 Permission denied；
+     *  2. Node 就绪则重建 `node` / `npm` / `npx` 入口（内容 + 执行位一起修）；
+     *  3. `files/bin` 与各级 `bin` 下的普通文件补执行位（`canExecute()` 会跟随符号链接，
+     *     因此 npm 生成的链接目标也会被一并修好）；
+     *  4. `File.setExecutable` 没生效的路径回退系统 `chmod`，仍不行才作为异常返回。
+     *
+     * @return 校验后仍不可执行的路径（空 = 一切正常）
+     */
+    fun repairExecutable(context: Context): List<String> {
+        val files = context.filesDir
+        val sdk = sdkDir(context)
+        val bin = binDir(context)
+        // 1) 目录可穿越
+        listOf(files, bin, sdk).forEach { dir ->
+            if (dir.isDirectory && !dir.canExecute()) makeExecutable(dir)
+        }
+        // 2) Node 就绪 → （重）建 node/npm/npx 入口
+        val nodeRoot = File(sdk, "node")
+        if (File(nodeRoot, "bin/node").exists()) writeNodeShims(context, nodeRoot)
+        // 3) 需要执行位的普通文件（files/bin + sdk 各级 bin）
+        val targets = mutableListOf<File>()
+        bin.listFiles()?.forEach { f -> if (f.isFile) targets += f }
+        sdkBinDirs(sdk).forEach { dir -> dir.listFiles()?.forEach { f -> if (f.isFile) targets += f } }
+        // 4) 一次性补执行位，setExecutable 没生效的批量回退系统 chmod
+        makeExecutableAll(targets)
+        return targets.filter { !it.canExecute() }.map { it.absolutePath }.distinct()
+    }
+
+    /** `files/sdk` 下各级 `bin` 目录（兼容 `sdk/node/bin` 与 `sdk/jdk/jdk-17/bin` 两种结构）。 */
+    private fun sdkBinDirs(sdk: File): List<File> = buildList {
+        sdk.listFiles()?.filter { it.isDirectory }?.forEach { root ->
+            val direct = File(root, "bin")
+            if (direct.isDirectory) {
+                add(direct)
+                return@forEach
+            }
+            root.listFiles()?.filter { it.isDirectory }?.forEach { inner ->
+                val nested = File(inner, "bin")
+                if (nested.isDirectory) add(nested)
+            }
+        }
+    }
+
+    /**
+     * 关键命令入口的执行位状态（`apt doctor` / 环境体检展示）。
+     * 例：`node=+x  npm=+x  npx=缺执行位`——出现「缺执行位 / 非普通文件」即可定位
+     * 终端里的 `Permission denied`。
+     */
+    fun binModesLine(context: Context): String {
+        val bin = binDir(context)
+        return listOf("node", "npm", "npx").joinToString("  ") { name ->
+            val f = File(bin, name)
+            when {
+                !f.exists() -> "$name=缺失"
+                !f.isFile -> "$name=非普通文件"
+                f.canExecute() -> "$name=+x"
+                else -> "$name=缺执行位"
+            }
+        }
+    }
+
+    /**
+     * 真 `execve` 一次 `files/bin/node`（[binModesLine] 只看位图，看不到 SELinux 拦截），
+     * 用来区分两种同名的 `Permission denied`：
+     *
+     *  - `ok v22.x` —— 执行链正常；
+     *  - `exec失败：Permission denied` —— 入口本身/父目录缺执行位，自愈没跑到；
+     *  - `exit=126 Permission denied …/sdk/…/node` —— shim 能跑、但 **node ELF** 被拒：
+     *    Android 10 起禁止 targetSdk ≥ 29 的应用执行 app home 目录里的文件
+     *    （W^X，SELinux 拒 `execute_no_trans`），此时再 chmod 也没用，属另一类问题。
+     */
+    fun execProbeLine(context: Context): String {
+        val node = File(binDir(context), "node")
+        if (!node.exists()) return "node=缺失"
+        return "node → ${probeExec(node)}"
+    }
+
+    /** 跑一次 `file --version`，3 秒兜底超时，返回 `ok <输出>` / `exit=N <输出>` / `exec失败：<原因>`。 */
+    private fun probeExec(file: File): String = runCatching {
+        val process = ProcessBuilder(file.absolutePath, "--version")
+            .redirectErrorStream(true)
+            .start()
+        runCatching { process.outputStream.close() }
+        // 先限时等待、再读输出：反过来会在进程挂住时阻塞在读上
+        val done = runCatching { process.waitFor(3, TimeUnit.SECONDS) }.getOrDefault(false)
+        if (!done) {
+            runCatching { process.destroy() }
+            runCatching { process.destroyForcibly() }
+        }
+        val text = runCatching { process.inputStream.bufferedReader().readText() }.getOrDefault("")
+            .lineSequence().firstOrNull { it.isNotBlank() }.orEmpty().trim()
+        if (!done) return@runCatching "超时（3s 未退出）"
+        val code = process.exitValue()
+        when {
+            code == 0 -> "ok ${text.take(24)}"
+            text.isEmpty() -> "exit=$code"
+            else -> "exit=$code ${text.take(90)}"
+        }
+    }.getOrElse { "exec失败：${it.message}" }
 
     /** Node 安装目录（`files/sdk/node`），以 `bin/node` 存在为准。 */
     private fun resolveNode(context: Context): String? {
@@ -364,10 +508,22 @@ object BuildEnvironment {
         writeShim(File(bin, "npx"), "#!/system/bin/sh\nexec \"$node\" \"$npxCli\" \"\$@\"\n")
     }
 
+    /**
+     * 写 shim：内容一致则不重写（自愈会反复调用），写完**校验**执行位，
+     * `setExecutable` 静默失败时由 [makeExecutable] 回退系统 `chmod`。
+     *
+     * 目标是符号链接时先删链接本身（避免写穿到链接指向的文件），
+     * 是目录时整个删掉——**目录**被 PATH 命中同样报 `Permission denied`。
+     */
     private fun writeShim(file: File, body: String) {
         runCatching {
-            file.writeText(body)
-            file.setExecutable(true, false)
+            val link = runCatching { Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
+            when {
+                link -> file.delete()
+                file.isDirectory -> file.deleteRecursively()
+            }
+            if (runCatching { file.readText() }.getOrNull() != body) file.writeText(body)
+            if (!file.canExecute()) makeExecutable(file)
         }
     }
 
@@ -390,6 +546,8 @@ object BuildEnvironment {
         return buildList {
             add("—— 环境体检 $time ——")
             add("  files         ${context.filesDir.absolutePath}")
+            add("  files/bin     ${binModesLine(context)}（终端 Permission denied 看这里）")
+            add("  执行探测     ${execProbeLine(context)}")
             status?.required?.let {
                 add("  本项目所需   ${it.joinToString(" / ") { kind -> kind.title }}")
             }

@@ -102,6 +102,7 @@ object ToolInstaller {
                 else "未安装（`apt tools install` 在线下载）",
             )
             add("  npm prefix ${files.absolutePath}（-g 全局包 → files/bin，PATH 已含）")
+            add("  执行位     ${BuildEnvironment.binModesLine(context)}")
             if (installed.isEmpty()) {
                 add("  全局软件   无")
             } else {
@@ -175,6 +176,10 @@ object ToolInstaller {
             val code = runNpm(context, npmArgs("install", listOf("-g") + targets, source), emit)
             if (code != 0) {
                 emit("[ERROR] npm 安装失败（退出码 $code）")
+                // npm 半途失败也可能已经往 files/bin 写了文件，仍要补 shebang 与执行位，
+                // 否则剩下的命令在终端里直接报 Permission denied
+                val partial = fixBinScripts(context)
+                if (partial > 0) emit("已修正 $partial 个启动脚本（shebang 适配 Android）")
                 return@withContext code
             }
         }
@@ -302,7 +307,13 @@ object ToolInstaller {
             emit("[ERROR] 未找到 npm（Node.js 未安装）")
             return 1
         }
-        runCatching { npm.setExecutable(true, false) }
+        // 终端能用的前提是 files/bin 与 sdk/*/bin 都有执行位；这里统一自愈一次，
+        // 覆盖 npm 二进制入口本身，也覆盖 node 解释器与 PATH 上的其他命令。
+        val broken = BuildEnvironment.repairExecutable(context)
+        if (broken.isNotEmpty()) {
+            emit("[WARN] 执行位修复失败（终端里会报 Permission denied）：")
+            broken.forEach { emit("       $it") }
+        }
         val files = context.filesDir
         val env = arrayOf(
             "HOME=${files.absolutePath}",
@@ -407,6 +418,9 @@ object ToolInstaller {
                 }
             }
         }
+        // 内容修完再整体自愈一次：覆盖 npm 新写入的符号链接目标、目录穿越位，
+        // 并对 setExecutable 静默失败的路径回退系统 chmod
+        BuildEnvironment.repairExecutable(context)
         return fixed
     }
 
