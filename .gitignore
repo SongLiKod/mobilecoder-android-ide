@@ -11,3 +11,6 @@ captures/
 .externalNativeBuild/
 .cxx/
 .DS_Store
+# glibc 运行时打包产物与下载缓存（tools/glibc-runtime/build.sh 生成）
+tools/glibc-runtime/dist/
+tools/glibc-runtime/.cache/

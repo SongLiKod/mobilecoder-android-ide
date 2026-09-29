@@ -627,6 +627,15 @@ object BuildRunner {
     private fun buildEnvArray(jdk: String, gradleHome: String?, heapMb: Int): Array<String> {
         val files = appContext.filesDir
         val sdk = BuildEnvironment.sdkDir(appContext)
+        // 构建命令先经 `sh -c`（bionic），由钩子在 exec 时逐级换成对应 ABI 的那份；
+        // glibc 运行时没装时一个变量都不给，构建流程完全不依赖阶段 2
+        val glibc = BuildEnvironment.glibcEnv(appContext)
+        val glibcReady = glibc.any { it.startsWith("MOBILECODER_GLIBC=") }
+        val preload = if (glibcReady) {
+            BuildEnvironment.bionicHook(appContext)?.let { arrayOf("LD_PRELOAD=$it") } ?: emptyArray()
+        } else {
+            emptyArray()
+        }
         return arrayOf(
             "HOME=${files.absolutePath}",
             "TMPDIR=${BuildEnvironment.tmpDir(appContext).absolutePath}",
@@ -642,7 +651,8 @@ object BuildRunner {
             "MOBILECODER_GRADLE_HOME=${gradleHome.orEmpty()}",
             "GRADLE_OPTS=-Xmx${heapMb}m -Dorg.gradle.daemon=false",
             "JAVA_OPTS=-Dfile.encoding=UTF-8",
-        )
+            // Adoptium 的 java 同样是 glibc 程序：没有这两个变量它连 loader 都找不到 libc
+        ) + glibc + preload
     }
 
     /**

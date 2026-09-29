@@ -83,6 +83,34 @@ object NativeRuntime {
         runCatching { TerminalNative.setEnv("JAVA_HOME", jdkDir) }
     }
 
+    /**
+     * glibc 运行时（`MOBILECODER_GLIBC` + `LD_LIBRARY_PATH`）注入进程环境，
+     * 由终端 PTY 与 CLI 子进程继承；未安装时清空，避免残留一个不存在的目录。
+     *
+     * Android 没有 `/lib`，glibc 程序全靠 `LD_LIBRARY_PATH` 找到 `libc.so.6`。
+     *
+     * 两套 ABI 的钩子路径（[glibcHook] / [bionicHook]）也一起下发：
+     * `mc_exec_hook.c` 在 exec 前按**子目标**的 loader 二选一写进 `LD_PRELOAD`，
+     * 异架构的 .so 一旦被装载，`ld.so` 会报 `cannot be preloaded`。
+     * 这里**不**设 `LD_PRELOAD` 本身——只有直接目标是 glibc 的场景
+     * （工具安装 / 终端）才需要钩子，进程级注入会波及所有子进程。
+     */
+    fun setGlibcEnv(
+        context: Context,
+        root: String?,
+        lib: String?,
+        glibcHook: String?,
+        bionicHook: String?,
+    ) {
+        runCatching {
+            TerminalNative.setEnv("MOBILECODER_GLIBC", root.orEmpty())
+            TerminalNative.setEnv("MOBILECODER_GLIBC_LIB", lib.orEmpty())
+            TerminalNative.setEnv("MOBILECODER_GLIBC_HOOK", glibcHook.orEmpty())
+            TerminalNative.setEnv("MOBILECODER_BIONIC_HOOK", bionicHook.orEmpty())
+            TerminalNative.setEnv("LD_LIBRARY_PATH", lib.orEmpty())
+        }
+    }
+
     /** assets/certs/cacert.pem → cache/certs/cacert.pem（返回 null 表示失败）。 */
     private fun extractCaBundle(context: Context): File? = runCatching {
         val target = File(context.cacheDir, "certs/cacert.pem")

@@ -127,3 +127,26 @@ target_link_libraries(mobilecoder PRIVATE
     z
     ${LOG_LIB}
 )
+
+# ------------------------------------------------------------------
+# glibc 兼容层 LD_PRELOAD 钩子（阶段 2）
+#
+# 这里编出来的是 **bionic 版**（`libmcexechook.so`，随 APK 打包，供终端 / CLI
+# 这些 bionic 进程 LD_PRELOAD）。**glibc 版**必须用 Debian 的 gcc 交叉编译，
+# 由 `tools/glibc-runtime/build.sh` 产出并放进 glibc 运行时压缩包 ——
+# 一份 .so 只能被它对应的加载器装载，两边缺一不可。
+#
+# 作用见 mc_exec_hook.c 顶部注释：exec 前修 PT_INTERP（堵 npm 解包瞬间的窗口），
+# 以及按目标 ABI 切换 LD_PRELOAD，避免异架构 .so 被装载。
+# ------------------------------------------------------------------
+add_library(mcexechook SHARED
+    mc_compat.c
+    mc_dns.c
+    mc_exec_hook.c
+)
+
+target_include_directories(mcexechook PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+target_compile_options(mcexechook PRIVATE
+    -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
+)

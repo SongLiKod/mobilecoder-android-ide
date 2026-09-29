@@ -17,8 +17,8 @@ import kotlinx.coroutines.withContext
 
 /** 在线下载源（「构建环境」页可切换并持久化）。 */
 enum class EnvSource(val title: String, val subtitle: String) {
-    OFFICIAL("官方源", "Temurin · Gradle · Node.js · Google 官方 CDN"),
-    MIRROR("国内镜像", "清华 TUNA · npmmirror · 腾讯云"),
+    OFFICIAL("官方源", "Temurin · Gradle · Node.js · glibc 运行时 · Google 官方 CDN"),
+    MIRROR("国内镜像", "清华 TUNA · npmmirror · 腾讯云 · MobileCoder 国内镜像"),
 }
 
 /** 用户取消了下载。 */
@@ -49,6 +49,26 @@ object EnvDownloader {
         return if (abi.startsWith("arm64") || abi.startsWith("aarch64")) "aarch64" else "x64"
     }
 
+    /**
+     * glibc 运行时包版本（必须与 `tools/glibc-runtime/build.sh` 打出的包名一致）。
+     */
+    private const val GLIBC_VERSION = "2.39"
+
+    /**
+     * glibc 运行时**自托管**下载基址（官方源）。
+     *
+     * nodejs.org / Adoptium / gradle 官方包都依赖 glibc，但三家都不提供 Android 可用的
+     * 运行时，所以这一份由仓库内 `tools/glibc-runtime/build.sh` 从 Debian `libc6` 解包、
+     * 交叉编译钩子后打成 `glibc-<版本>-<arch>.tar.gz` 自行上传。
+     *
+     * **发布前必须把域名换成真实地址**，上传路径见 `tools/glibc-runtime/README.md`；
+     * 未发布时下载会失败，`ToolInstaller.ensureGlibc` 会提示改从「构建环境」页导入。
+     */
+    private const val GLIBC_OFFICIAL_BASE = "https://cdn.mobilecoder.dev/glibc"
+
+    /** glibc 运行时国内镜像基址（与 [GLIBC_OFFICIAL_BASE] 同一份文件）。 */
+    private const val GLIBC_MIRROR_BASE = "https://cdn-mobilecoder.cn-shanghai.myqcloud.com/glibc"
+
     /** 候选地址：所选源在前、另一源兜底（URL 相同则去重）。 */
     fun candidateSources(kind: EnvKind, source: EnvSource, arch: String): List<Source> {
         val nodeArch = if (arch == "aarch64") "arm64" else "x64"
@@ -67,6 +87,11 @@ object EnvDownloader {
             EnvKind.SDK -> {
                 val url = "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
                 Source("dl.google.com", url) to Source("dl.google.com", url)
+            }
+            EnvKind.GLIBC -> {
+                val file = "glibc-$GLIBC_VERSION-$arch.tar.gz"
+                Source("MobileCoder 官方", "$GLIBC_OFFICIAL_BASE/$file") to
+                    Source("国内镜像", "$GLIBC_MIRROR_BASE/$file")
             }
         }
         val ordered = if (source == EnvSource.MIRROR) listOf(mirror, official) else listOf(official, mirror)
@@ -218,7 +243,7 @@ object EnvDownloader {
             "ANDROID_SDK_ROOT=${sdk.absolutePath}",
             "LANG=C.UTF-8",
             "SHELL=/system/bin/sh",
-        )
+        ) + BuildEnvironment.glibcEnv(context)
         val exit = CompletableDeferred<Int>()
         val tail = StringBuilder()
         val percent = Regex("""(\d+)%""")

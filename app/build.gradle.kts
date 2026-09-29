@@ -58,6 +58,13 @@ android {
     }
 
     packaging {
+        // LD_PRELOAD 需要 nativeLibraryDir 里有**真实文件**：minSdk ≥ 23 时 AGP 默认
+        // .so 不压缩不解压（extractNativeLibs=false），nativeLibraryDir 是空的，
+        // BuildEnvironment.bionicHook() 就会一直拿不到 libmcexechook.so，
+        // 阶段 2（子进程 exec 钩子）会静默失效。这里退回 legacy 打包保证解压。
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
             excludes += "/META-INF/INDEX.LIST"
             excludes += "/META-INF/*.kotlin_module"

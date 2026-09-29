@@ -112,12 +112,26 @@ object TerminalManager {
      */
     private fun writeShellConfig(context: Context) {
         val files = context.filesDir
-        val content = shellConfigContent(files)
+        val bionicHook = runCatching {
+            File(context.applicationInfo.nativeLibraryDir, "libmcexechook.so")
+                .takeIf { it.exists() }
+                ?.absolutePath
+        }.getOrNull()
+        val content = shellConfigContent(files, bionicHook)
         File(files, ".mkshrc").writeText(content)
         File(files, ".profile").writeText(content)
     }
 
-    private fun shellConfigContent(files: File): String {
+    /**
+     * 终端启动配置正文。
+     *
+     * [bionicHook] 是 APK 打包的 bionic 版 exec 钩子（`libmcexechook.so`）。
+     * 只在 glibc 运行时就绪时才 export `LD_PRELOAD`：钩子在 exec 前按**子目标**
+     * 换成对应 ABI 的那份（glibc 目标 → 运行时里的 glibc 版），所以
+     * 「shell → node → npm 子命令」这条链上不会出现异架构 .so 被装载的问题；
+     * 运行时没装时一个变量都不设，终端退回纯阶段 1 行为。
+     */
+    private fun shellConfigContent(files: File, bionicHook: String?): String {
         val bin = files.absolutePath + "/bin"
         return buildString {
             appendLine("# MobileCoder 内置终端启动配置（由 TerminalManager.init 写入）")
@@ -135,6 +149,30 @@ object TerminalManager {
                 "chmod u+rwx \"\$HOME\" \"\$HOME/bin\" \"\$HOME/bin\"/* " +
                     "\"\$HOME/sdk/node/bin\" \"\$HOME/sdk/node/bin\"/* 2>/dev/null",
             )
+            appendLine("# glibc 运行时（官方 nodejs.org / Adoptium 包的 loader 与 libc 在这里）")
+            appendLine("# Android 没有 /lib，glibc 程序必须靠 LD_LIBRARY_PATH 才能找到 libc.so.6")
+            appendLine("for mc_glibc_lib in \"\$HOME/sdk/glibc/lib\" \"\$HOME/sdk/glibc/lib64\"; do")
+            appendLine("  if [ -e \"\$mc_glibc_lib/ld-linux-aarch64.so.1\" ] ||")
+            appendLine("     [ -e \"\$mc_glibc_lib/ld-linux-x86-64.so.2\" ]; then")
+            appendLine("    export MOBILECODER_GLIBC=\"\$HOME/sdk/glibc\"")
+            appendLine("    export MOBILECODER_GLIBC_LIB=\"\$mc_glibc_lib\"")
+            appendLine("    export LD_LIBRARY_PATH=\"\$mc_glibc_lib\"")
+            appendLine("    # 阶段 2：glibc 版钩子（与 loader 同目录），exec glibc 目标时用它")
+            appendLine("    if [ -f \"\$mc_glibc_lib/mcexechook-glibc.so\" ]; then")
+            appendLine("      export MOBILECODER_GLIBC_HOOK=\"\$mc_glibc_lib/mcexechook-glibc.so\"")
+            appendLine("    fi")
+            appendLine("    break")
+            appendLine("  fi")
+            appendLine("done")
+            appendLine("unset mc_glibc_lib")
+            if (bionicHook != null) {
+                appendLine("# 阶段 2：bionic 版钩子常驻 shell；它在 exec 时按子目标切换 ABI，")
+                appendLine("# 直接把 glibc 版 .so 留在 bionic 进程上会让 ld.so 打 cannot be preloaded")
+                appendLine("if [ -n \"\$MOBILECODER_GLIBC\" ]; then")
+                appendLine("  export MOBILECODER_BIONIC_HOOK=\"$bionicHook\"")
+                appendLine("  export LD_PRELOAD=\"$bionicHook\"")
+                appendLine("fi")
+            }
             appendLine("# 简洁提示符：显示当前目录名（mksh 支持参数替换，不支持 \\w）")
             appendLine("PS1='\${PWD##*/} \$ '")
             appendLine("alias ll='ls -l'")
