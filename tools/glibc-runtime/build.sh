@@ -29,7 +29,7 @@ set -euo pipefail
 # ------------------------------------------------------------------
 
 # 与 EnvDownloader.GLIBC_VERSION 保持一致；不一致会导致下载文件名对不上
-GLIBC_VERSION="2.39"
+GLIBC_VERSION="2.41"
 # glibc 版本取自 Debian trixie（13），换 suite 必须同步改上面的版本号
 SUITE="trixie"
 MIRROR="https://deb.debian.org/debian"
@@ -148,7 +148,7 @@ build_one() {
     if command -v dpkg-deb >/dev/null 2>&1; then
         libc6_ver="$(dpkg-deb -f "$libc6_deb" Version)"
     else
-        # 文件名形如 libc6_2.39-18_arm64.deb，版本段就是第二个下划线前的部分
+        # 文件名形如 libc6_2.41-12+deb13u4_arm64.deb，版本段就是第二个下划线前的部分
         libc6_ver="$(basename "$libc6_deb" | awk -F_ '{print $2}')"
     fi
     case "$libc6_ver" in
@@ -248,7 +248,7 @@ build_one() {
         -ldl
 
     # ---- 5) 符号版本自检 -------------------------------------------
-    # 用比 trixie 更新的发行版编译时，钩子可能带上超过 2.39 的 GLIBC_ 符号版本，
+    # 用比 trixie 更新的发行版编译时，钩子可能带上超过 2.41 的 GLIBC_ 符号版本，
     # 装到设备上会 `version 'GLIBC_2.4x' not found`。这里直接判失败。
     if command -v objdump >/dev/null 2>&1; then
         local max ver
@@ -308,7 +308,10 @@ esac
 
 note "产物目录：$OUT_DIR"
 cat <<EOF
-上传对应关系（见 tools/glibc-runtime/README.md）：
-  glibc-$GLIBC_VERSION-aarch64.tar.gz -> <GLIBC_OFFICIAL_BASE>/ 与 <GLIBC_MIRROR_BASE>/
-  glibc-$GLIBC_VERSION-x64.tar.gz     -> 同上
+产物去向（见 tools/glibc-runtime/README.md）：
+  glibc-$GLIBC_VERSION-aarch64.tar.gz
+  glibc-$GLIBC_VERSION-x64.tar.gz
+    1) 自托管 HTTP：作为「构建环境」页的 glibc 自定义源（含 DNS/exec 钩子）；
+    2) 放进 app/src/main/assets/glibc/ 随 APK 内置（离线零网络，首选兜底）。
+  注：App 内置 4 镜像已改为真实 Debian 仓库（在线 .deb 组装，不含钩子），本包可选。
 EOF

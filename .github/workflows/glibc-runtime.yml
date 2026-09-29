@@ -1,0 +1,47 @@
+# 生成 glibc 运行时包（tools/glibc-runtime/build.sh）并作为 artifact 上传。
+#
+# 产物下载后放进 tools/glibc-runtime/dist/，app/build.gradle.kts 的 copyGlibcAssets
+# 任务会自动把它打进 APK 的 assets/glibc/ —— App 侧 EnvDownloader 走
+# 「内置包优先 → 自定义源 → 内置在线镜像」三级兜底（详见 tools/glibc-runtime/README.md）。
+#
+# 手动触发：Actions → glibc-runtime → Run workflow。
+# 改动打包脚本 / exec 钩子 C 源 / 本 workflow 时会自动触发。
+name: glibc-runtime
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "tools/glibc-runtime/**"
+      - "core_native/src/main/cpp/mc_exec_hook.c"
+      - "core_native/src/main/cpp/mc_dns.c"
+      - "core_native/src/main/cpp/mc_compat.c"
+      - ".github/workflows/glibc-runtime.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 与脚本内推荐一致：debian:trixie 保证打包进包里的 glibc 版本（2.41）与目标一致
+    container: debian:trixie
+    steps:
+      - name: 安装依赖
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl gzip tar binutils gcc libc6-dev \
+            gcc-aarch64-linux-gnu dpkg xz-utils git
+
+      - uses: actions/checkout@v4
+
+      - name: 打包 glibc 运行时（aarch64 + x64）
+        run: bash tools/glibc-runtime/build.sh --arch all
+
+      - name: 校验产物
+        run: ls -la tools/glibc-runtime/dist/ && test -f tools/glibc-runtime/dist/glibc-2.41-aarch64.tar.gz && test -f tools/glibc-runtime/dist/glibc-2.41-x64.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glibc-runtime
+          path: tools/glibc-runtime/dist/glibc-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30

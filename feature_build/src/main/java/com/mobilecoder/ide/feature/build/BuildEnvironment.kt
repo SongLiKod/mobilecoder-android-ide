@@ -254,17 +254,34 @@ object BuildEnvironment {
     }
 
     /**
-     * node 是官方 glibc 构建时，把 [EnvKind.GLIBC] 并入「所需组件」。
+     * 把「需要 glibc 运行时」的组件并入「所需组件」：
      *
-     * 不并进去的后果：node「文件在 + 有执行位」被体检判成就绪，
-     * 真跑 `npm i -g` 才炸出 127，而「构建环境」页什么都不缺、看不出该装什么。
+     * 1. **需要 NODE 且 node 是官方 glibc 构建** —— 不并入的后果是 node「文件在 +
+     *    有执行位」被体检判成就绪，真跑 `npm i -g` 才炸出 127，而「构建环境」页
+     *    什么都不缺、看不出该装什么；
+     * 2. **需要 JDK** —— Temurin / gradle daemon 同为 glibc ELF。纯安卓 / JVM 工程
+     *    没有 node，以前不并入 → `java` 照样 127，页面却只显示「缺 JDK」。
+     *    java 还没安装时按「将安装的是官方 glibc 构建」预判并入；已安装则按真实
+     *    ELF 判断（将来若有非 glibc 构建则不并入）。
      *
      * @return 追加后的所需组件（无需追加则原样返回）
      */
-    internal fun withGlibcIfNeeded(context: Context, required: List<EnvKind>): List<EnvKind> {
-        if (EnvKind.GLIBC in required || EnvKind.NODE !in required) return required
-        val node = resolveNodeExec(context.filesDir) ?: return required
-        return if (GlibcCompat.kind(node) == InterpKind.GLIBC) required + EnvKind.GLIBC else required
+    internal suspend fun withGlibcIfNeeded(context: Context, required: List<EnvKind>): List<EnvKind> {
+        if (EnvKind.GLIBC in required) return required
+        // 1) node：官方 glibc 构建（解析不出 node 时交给下面的 JDK 分支判断）
+        if (EnvKind.NODE in required) {
+            val node = resolveNodeExec(context.filesDir)
+            if (node != null && GlibcCompat.kind(node) == InterpKind.GLIBC) return required + EnvKind.GLIBC
+        }
+        // 2) JDK：Temurin / gradle daemon 同为 glibc ELF。纯安卓 / JVM 工程没有 node，
+        //    以前不并入 → `java` 照样 127，页面却只显示「缺 JDK」。
+        if (EnvKind.JDK in required) {
+            val java = resolveJdk(context)?.let { File(it, "bin/java") }
+            if (java?.exists() != true || GlibcCompat.kind(java) == InterpKind.GLIBC) {
+                return required + EnvKind.GLIBC
+            }
+        }
+        return required
     }
 
     /**

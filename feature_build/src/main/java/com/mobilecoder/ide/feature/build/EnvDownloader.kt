@@ -7,6 +7,7 @@ import com.mobilecoder.ide.core.nativebridge.CliNative
 import com.mobilecoder.ide.core.storage.AppStorage
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.CompletableDeferred
@@ -18,8 +19,8 @@ import kotlinx.coroutines.withContext
 
 /** 在线下载源（「构建环境」页可切换并持久化）。 */
 enum class EnvSource(val title: String, val subtitle: String) {
-    OFFICIAL("官方源", "Temurin · Gradle · Node.js · glibc 运行时 · Google 官方 CDN"),
-    MIRROR("国内镜像", "清华 TUNA · npmmirror · 腾讯云 · MobileCoder 国内镜像"),
+    OFFICIAL("官方源", "Temurin · Gradle · Node.js · Debian 官方镜像 · Google 官方 CDN"),
+    MIRROR("国内镜像", "清华 TUNA · npmmirror · 腾讯云 · 阿里云 Debian 镜像"),
 }
 
 /** 用户取消了下载。 */
@@ -29,14 +30,30 @@ class DownloadCancelled(message: String) : Exception(message)
  * 构建环境在线下载器：下载 → 解压 → 静默落位 `files/sdk/`，完成即可用。
  *
  * - 每类组件给出**官方源 + 国内镜像**两个候选，按所选源排序、失败自动回退；
- *   glibc 运行时额外内置多个镜像（[GLIBC_MIRRORS]，按序全部回退），并支持在
- *   「构建环境」页点选**首选源**、手动输入**自定义源**（优先于全部内置源）；
+ *   glibc 运行时内置 **4 个真实 Debian 仓库**（[GLIBC_MIRRORS]，按序回退，在线下载
+ *   `.deb` 并组装成运行时，见 `GlibcDebRuntime`），并支持在「构建环境」页点选
+ *   **首选源**、手动输入**自定义源**（完整 tar.gz 地址，优先于全部内置源）；
+ * - glibc 还有最后一级**APK 内置包**（`assets/glibc/`，见 [bundledGlibcAsset]）：
+ *   在线之前零网络直接落位，断网也能完成安装；
  * - 进度按下载/解压字节回报，支持取消（[cancel]）。
  */
 object EnvDownloader {
 
+    /** 候选下载源的包格式（glibc 内置源为 Debian 仓库，需按索引组装；其余为单文件包）。 */
+    enum class SourceFormat {
+        /** 单文件压缩包（`.tar.gz` / `.zip`），[Source.url] 即包地址。 */
+        TARBALL,
+
+        /** Debian 仓库基址，[Source.url] 为镜像根（安装时再拼 `dists/.../Packages.gz` 与 `pool/...` 路径）。 */
+        DEB,
+    }
+
     /** 一个候选下载源。 */
-    data class Source(val label: String, val url: String)
+    data class Source(
+        val label: String,
+        val url: String,
+        val format: SourceFormat = SourceFormat.TARBALL,
+    )
 
     @Volatile
     private var cancelled = false
@@ -53,53 +70,64 @@ object EnvDownloader {
     }
 
     /**
-     * glibc 运行时包版本（必须与 `tools/glibc-runtime/build.sh` 打出的包名一致）。
+     * glibc 运行时包版本（必须与 `tools/glibc-runtime/build.sh` 的 `GLIBC_VERSION` 一致）。
+     *
+     * 仅用于 **tar.gz 包名**（自定义源 / APK 内置包）；内置 Debian 镜像走索引动态解析，
+     * 不依赖此常量。trixie 实测当前 libc6 为 2.41 系（2026-09：`libc6_2.41-12+deb13u4`）。
      */
-    private const val GLIBC_VERSION = "2.39"
+    private const val GLIBC_VERSION = "2.41"
+
+    /** APK 内置 glibc 运行时包所在 assets 目录（`app/build.gradle.kts` 的 `copyGlibcAssets` 拷入）。 */
+    private const val BUNDLED_GLIBC_DIR = "glibc"
 
     /**
      * 一个内置 glibc 运行时镜像源。
      *
      * @param id 稳定标识（持久化「首选源」用，改 label 不能改 id）
      * @param domestic true = 国内可达（EnvSource.MIRROR 时排前），false = 海外
+     * @param format [SourceFormat.DEB] = Debian 仓库（安装时解析索引 + 下载 `.deb` 组装），
+     *   [SourceFormat.TARBALL] = 单文件 tar.gz
      */
-    data class MirrorSource(val id: String, val label: String, val base: String, val domestic: Boolean)
-
-    /**
-     * glibc 运行时**内置默认镜像（多个）**：按顺序逐个回退，全失败才报错。
-     *
-     * nodejs.org / Adoptium / gradle 官方包都依赖 glibc，但三家都不提供 Android 可用的
-     * 运行时，所以这一份由仓库内 `tools/glibc-runtime/build.sh` 从 Debian `libc6` 解包、
-     * 交叉编译钩子后打成 `glibc-<版本>-<arch>.tar.gz` 自行上传（见该目录 README）。
-     *
-     * 除前两个（`GLIBC_OFFICIAL_BASE` / `GLIBC_MIRROR_BASE`）外还内置 GitHub Releases 与
-     * jsDelivr 加速两条托管位，同一份文件传到任一处即可用；用户也可在「构建环境」页
-     * 点选首选源或手动输入任意地址（`AppPreferences.glibcCustomSource`）覆盖。
-     */
-    val GLIBC_MIRRORS = listOf(
-        MirrorSource("official", "MobileCoder 官方", GLIBC_OFFICIAL_BASE, domestic = false),
-        MirrorSource("github", "GitHub Releases", GLIBC_GITHUB_BASE, domestic = false),
-        MirrorSource("tencent", "腾讯云镜像", GLIBC_MIRROR_BASE, domestic = true),
-        MirrorSource("jsdelivr", "jsDelivr 加速", GLIBC_JSDELIVR_BASE, domestic = true),
+    data class MirrorSource(
+        val id: String,
+        val label: String,
+        val base: String,
+        val domestic: Boolean,
+        val format: SourceFormat = SourceFormat.TARBALL,
     )
 
-    /** glibc 运行时**自托管**下载基址（官方源）。
+    /**
+     * glibc 运行时**内置默认镜像（4 个，全部为真实 Debian 仓库）**：按顺序逐个回退，全失败才报错。
      *
-     * **发布前必须把域名换成真实地址**，上传路径见 `tools/glibc-runtime/README.md`；
-     * 未发布时下载会失败，`ToolInstaller.ensureGlibc` 会提示改从「构建环境」页导入，
-     * 或在该页手动输入其它可达镜像地址。 */
-    private const val GLIBC_OFFICIAL_BASE = "https://cdn.mobilecoder.dev/glibc"
+     * 每个源按 [SourceFormat.DEB] 安装：`dists/<suite>/main/binary-<arch>/Packages.gz` 动态
+     * 解析 `libc6` / `libgcc-s1` / `libstdc++6` → 下载 `.deb` → ar+xz 解包 → 扁平化组装 `lib/`
+     * （`GlibcDebRuntime`，与 `tools/glibc-runtime/build.sh` 同流程）。
+     *
+     * 四个地址均为公开、持续可达的 Debian 镜像，**2026-09 实测「索引 + 三个 .deb 均 HTTP 200」**，
+     * 不再依赖任何自建占位域名（旧的 cdn.mobilecoder.dev / mobilecoder-glibc / myqcloud 占位
+     * 域名均无法解析或 404，已全部移除）。
+     *
+     * 用户仍可在「构建环境」页点选首选源，或手动输入**自托管完整 tar.gz**（含 DNS/exec 钩子，
+     * 见 `tools/glibc-runtime/README.md`）作为自定义源优先尝试。
+     */
+    val GLIBC_MIRRORS = listOf(
+        MirrorSource("official", "Debian 官方", DEBIAN_OFFICIAL_BASE, domestic = false, format = SourceFormat.DEB),
+        MirrorSource("tuna", "清华 TUNA", DEBIAN_TUNA_BASE, domestic = true, format = SourceFormat.DEB),
+        MirrorSource("aliyun", "阿里云镜像", DEBIAN_ALIYUN_BASE, domestic = true, format = SourceFormat.DEB),
+        MirrorSource("tencent", "腾讯云镜像", DEBIAN_TENCENT_BASE, domestic = true, format = SourceFormat.DEB),
+    )
 
-    /** glibc 运行时国内镜像基址（与 [GLIBC_OFFICIAL_BASE] 同一份文件）。 */
-    private const val GLIBC_MIRROR_BASE = "https://cdn-mobilecoder.cn-shanghai.myqcloud.com/glibc"
+    /** Debian 官方镜像（pool 全量；实测索引与 .deb 均 200）。 */
+    private const val DEBIAN_OFFICIAL_BASE = "https://deb.debian.org/debian"
 
-    /** glibc 运行时 GitHub Releases 托管位（仓库见 README；文件挂在 release 资产）。 */
-    private const val GLIBC_GITHUB_BASE =
-        "https://github.com/mobilecoder/mobilecoder-glibc/releases/download/v1"
+    /** 清华 TUNA 的 Debian 镜像（国内）。 */
+    private const val DEBIAN_TUNA_BASE = "https://mirrors.tuna.tsinghua.edu.cn/debian"
 
-    /** glibc 运行时 jsDelivr 加速位（同一仓库 main 分支根目录，国内可达）。 */
-    private const val GLIBC_JSDELIVR_BASE =
-        "https://cdn.jsdelivr.net/gh/mobilecoder/mobilecoder-glibc@main"
+    /** 阿里云的 Debian 镜像（国内）。 */
+    private const val DEBIAN_ALIYUN_BASE = "https://mirrors.aliyun.com/debian"
+
+    /** 腾讯云的 Debian 镜像（国内）。 */
+    private const val DEBIAN_TENCENT_BASE = "https://mirrors.cloud.tencent.com/debian"
 
     /** 候选地址（含 glibc 的首选源 / 自定义源）。
      *
@@ -136,7 +164,8 @@ object EnvDownloader {
         val stem = "glibc-$GLIBC_VERSION-$arch"
         val list = mutableListOf<Source>()
         custom?.takeIf { it.isNotBlank() }?.let { input ->
-            list += Source("自定义源", resolveCustomUrl(input, stem))
+            // 自定义源 = 自托管单文件 tar.gz（含钩子），优先于全部内置源
+            list += Source("自定义源", resolveCustomUrl(input, stem), SourceFormat.TARBALL)
         }
         val domesticFirst = source == EnvSource.MIRROR
         val preferred = GLIBC_MIRRORS.firstOrNull { it.id == preferredId }
@@ -144,7 +173,8 @@ object EnvDownloader {
             .filter { it.id != preferredId }
             .sortedBy { it.domestic != domesticFirst } // sortedBy 稳定：组内保原序
         (listOfNotNull(preferred) + rest).forEach { mirror ->
-            list += Source(mirror.label, "${mirror.base}/$stem.tar.gz")
+            // 内置源 = Debian 仓库基址（DEB 格式：安装时拼索引 / pool 路径，非单文件地址）
+            list += Source(mirror.label, mirror.base, mirror.format)
         }
         return list.distinctBy { it.url }
     }
@@ -160,6 +190,24 @@ object EnvDownloader {
         } else {
             "$trimmed/$fileStem.tar.gz"
         }
+    }
+
+    /**
+     * APK 内置 glibc 运行时包名（`assets/glibc/` 下）：精确版本优先，否则在
+     * `glibc-*-<arch>.tar.gz` 里取字典序最大者。
+     *
+     * 产物由 `tools/glibc-runtime/build.sh` 生成、`app/build.gradle.kts` 的
+     * `copyGlibcAssets` 任务拷入（缺位时该任务跳过）。
+     *
+     * @return null = 没有内置包（回退在线镜像 / 用户手动导入）
+     */
+    fun bundledGlibcAsset(assetNames: Array<String>?, arch: String): String? {
+        val names = assetNames ?: return null
+        val exact = "glibc-$GLIBC_VERSION-$arch.tar.gz"
+        if (exact in names) return exact
+        return names
+            .filter { it.startsWith("glibc-") && it.endsWith("-$arch.tar.gz") }
+            .maxOrNull()
     }
 
     /**
@@ -199,6 +247,9 @@ object EnvDownloader {
     /**
      * 下载并安装 [kind] 组件（Android SDK 请用 [installSdk]），完成后即可用。
      *
+     * 顺序（glibc）：**APK 内置包（[bundledGlibcAsset]）→ 自定义源（tar.gz）→ 内置 Debian
+     * 镜像（在线组装 .deb）**，逐级兜底；其余组件直接走在线两候选。
+     *
      * @param onStage 阶段文案（下载源 / 解压 …）
      * @param onProgress 0..1；-1 表示不确定进度
      * @return 最终落地目录绝对路径
@@ -211,16 +262,59 @@ object EnvDownloader {
         onProgress: (Float) -> Unit = {},
     ): String = withContext(Dispatchers.IO) {
         cancelled = false
-        val sdk = BuildEnvironment.sdkDir(context)
-        if (!sdk.isDirectory && !sdk.mkdirs()) throw IOException("无法创建目录：${sdk.absolutePath}")
         val cache = File(context.cacheDir, "envdl").apply { mkdirs() }
         // glibc：首选内置源与手动输入的自定义源（其余组件忽略这两项，读失败不阻断下载）
         val custom = runCatching { AppStorage.preferences.glibcCustomSource() }.getOrDefault("")
         val preferredId = runCatching { AppStorage.preferences.glibcPreferredSource() }.getOrDefault("")
         val candidates = candidateSources(kind, source, primaryArch(), custom, preferredId)
         val failures = mutableListOf<String>()
+
+        // 1) glibc：优先 APK 内置包（零网络、零托管；产物见 tools/glibc-runtime/README.md）。
+        //    内置包缺位/损坏 → 回退第 2 步在线镜像（自定义源 + 内置多源），
+        //    再全失败由用户从「构建环境」页手动导入，三级兜底。
+        if (kind == EnvKind.GLIBC) {
+            val names = runCatching { context.assets.list(BUNDLED_GLIBC_DIR) }.getOrNull()
+            val asset = bundledGlibcAsset(names, primaryArch())
+            if (asset != null) {
+                try {
+                    onStage("使用内置 glibc 运行时（$asset）…")
+                    onProgress(-1f)
+                    return@withContext extractAndPlace(
+                        context,
+                        kind,
+                        context.assets.open("$BUNDLED_GLIBC_DIR/$asset"),
+                        totalBytes = 0L,
+                        onProgress = onProgress,
+                    )
+                } catch (c: DownloadCancelled) {
+                    throw c
+                } catch (t: Throwable) {
+                    failures += "内置包 $asset：${t.message ?: t::class.java.simpleName}"
+                }
+            }
+        }
+
+        // 2) 在线镜像：按序逐个回退（glibc 内置源 = Debian 仓库在线组装，自定义源 = tar.gz 单文件）
         candidates.forEachIndexed { index, cand ->
             if (cancelled) throw DownloadCancelled("已取消下载")
+            if (cand.format == SourceFormat.DEB) {
+                try {
+                    return@withContext installFromDebRepo(
+                        context = context,
+                        base = cand.url,
+                        label = cand.label,
+                        arch = primaryArch(),
+                        cache = cache,
+                        onStage = onStage,
+                        onProgress = onProgress,
+                    )
+                } catch (c: DownloadCancelled) {
+                    throw c
+                } catch (t: Throwable) {
+                    failures += "${cand.label}：${t.message ?: t::class.java.simpleName}"
+                }
+                return@forEachIndexed
+            }
             val suffix = if (cand.url.endsWith(".zip")) ".zip" else ".tar.gz"
             val archive = File(cache, "${kind.name.lowercase()}_$index$suffix")
             try {
@@ -231,22 +325,13 @@ object EnvDownloader {
                 if (cancelled) throw DownloadCancelled("已取消下载")
                 onStage("正在解压 ${kind.title} …")
                 onProgress(-1f)
-                val tmp = File(sdk, ".dl_${kind.name.lowercase()}_${System.nanoTime()}")
-                if (!tmp.mkdirs() && !tmp.isDirectory) throw IOException("无法创建临时目录：${tmp.absolutePath}")
-                try {
-                    archive.inputStream().use { input ->
-                        ArchiveExtractor.extract(input, tmp, archive.length()) { p ->
-                            onProgress((p * 0.9f + 0.05f).coerceIn(0f, 0.99f))
-                        }
-                    }
-                    onProgress(0.99f)
-                    // SDK 先只并入 cmdline-tools（此时结构尚不完整），由 installSdk 补齐平台组件
-                    val target = BuildEnvironment.placeExtracted(context, kind, tmp, requireReady = kind != EnvKind.SDK)
-                    onProgress(1f)
-                    return@withContext target
-                } finally {
-                    runCatching { tmp.deleteRecursively() }
-                }
+                return@withContext extractAndPlace(
+                    context,
+                    kind,
+                    archive.inputStream(),
+                    archive.length(),
+                    onProgress,
+                )
             } catch (c: DownloadCancelled) {
                 throw c
             } catch (t: Throwable) {
@@ -255,7 +340,130 @@ object EnvDownloader {
                 runCatching { archive.delete() }
             }
         }
-        throw IllegalStateException("下载失败（已尝试 ${candidates.size} 个源）：${failures.joinToString("；")}")
+        throw IllegalStateException("已尝试 ${failures.size} 个来源均失败：${failures.joinToString("；")}")
+    }
+
+    /**
+     * 从 **Debian 仓库** 在线组装 glibc 运行时（[SourceFormat.DEB] 候选专用）：
+     * `Packages.gz` 动态解析包路径 → 下载 `libc6` / `libgcc-s1` / `libstdc++6` 三个 `.deb`
+     * → ar+xz 解包 → 扁平化 `lib/` → 落位 `files/sdk/glibc`。
+     *
+     * 全程与 `tools/glibc-runtime/build.sh` 同流程（**不含 DNS/exec 钩子**：钩子须在 Linux
+     * 交叉编译，完整包见 [bundledGlibcAsset] 或自定义源）。任一步失败抛异常，由调用方
+     * 记入 failures 并换下一个内置源（四个 Debian 镜像全量同步 pool，其一可达即可）。
+     *
+     * @param base Debian 镜像根（如 `https://deb.debian.org/debian`）
+     * @return 落地目录绝对路径
+     */
+    private suspend fun installFromDebRepo(
+        context: Context,
+        base: String,
+        label: String,
+        arch: String,
+        cache: File,
+        onStage: (String) -> Unit,
+        onProgress: (Float) -> Unit,
+    ): String {
+        val mirror = base.trimEnd('/')
+        val debArch = GlibcDebRuntime.debArch(arch)
+        val wanted = GlibcDebRuntime.REQUIRED_PACKAGES
+        val n = wanted.size
+        val index = File(cache, "packages-$debArch.gz")
+        val root = File(cache, "debroot-${System.nanoTime()}")
+
+        try {
+            // 1) 软件包索引：动态解析包路径（版本随 Debian 点版本滚动，绝不写死文件名）
+            onStage("解析 Debian 软件包索引（$label，${GlibcDebRuntime.DEFAULT_SUITE} $debArch）…")
+            onProgress(0f)
+            download(
+                "$mirror/dists/${GlibcDebRuntime.DEFAULT_SUITE}/main/binary-$debArch/Packages.gz",
+                index,
+            ) { received, total ->
+                onProgress(if (total > 0) (received.toFloat() / total * 0.12f).coerceIn(0f, 0.12f) else -1f)
+            }
+            if (cancelled) throw DownloadCancelled("已取消下载")
+            val paths = index.inputStream().use { GlibcDebRuntime.parseIndex(it, wanted.toSet()) }
+            val missing = wanted.filterNot { it in paths }
+            if (missing.isNotEmpty()) throw IOException("索引里找不到包：${missing.joinToString("、")}")
+
+            // 2) 逐个下载 .deb 并解包到同一根（build.sh 同款：三包共同铺出完整运行时）
+            if (!root.mkdirs() && !root.isDirectory) throw IOException("无法创建临时目录：${root.absolutePath}")
+            wanted.forEachIndexed { i, pkg ->
+                if (cancelled) throw DownloadCancelled("已取消下载")
+                val rel = paths.getValue(pkg)
+                val slice = 0.12f + i * (0.66f / n)
+                val deb = File(cache, rel.substringAfterLast('/'))
+                try {
+                    onStage("下载 $pkg（$label）…")
+                    download("$mirror/$rel", deb) { received, total ->
+                        val frac = if (total > 0) received.toFloat() / total else -1f
+                        onProgress(if (frac >= 0) (slice + frac * 0.66f / n * 0.7f).coerceAtMost(0.99f) else -1f)
+                    }
+                    if (cancelled) throw DownloadCancelled("已取消下载")
+                    onStage("解包 $pkg …")
+                    ArchiveExtractor.extractDeb(deb.inputStream(), root, deb.length()) { p ->
+                        onProgress((slice + 0.66f / n * 0.7f + p * 0.66f / n * 0.3f).coerceAtMost(0.99f))
+                    }
+                } finally {
+                    runCatching { deb.delete() }
+                }
+            }
+
+            // 3) 扁平化组装 lib/ 并落位（没有 ld-linux* = 包结构变了，视为该源失败）
+            onStage("组装 glibc 运行时（lib/）…")
+            onProgress(0.95f)
+            val sdk = BuildEnvironment.sdkDir(context)
+            val tmp = File(sdk, ".dl_glibc_${System.nanoTime()}")
+            if (!tmp.mkdirs() && !tmp.isDirectory) throw IOException("无法创建临时目录：${tmp.absolutePath}")
+            try {
+                val flat = GlibcDebRuntime.flatten(root, File(tmp, "lib"))
+                if (flat.loaderName == null || flat.copied == 0) {
+                    throw IOException("解包后没有 ld-linux* loader（复制 ${flat.copied} 个）")
+                }
+                val target = BuildEnvironment.placeExtracted(context, EnvKind.GLIBC, tmp, requireReady = true)
+                onProgress(1f)
+                return target
+            } finally {
+                runCatching { tmp.deleteRecursively() }
+            }
+        } finally {
+            runCatching { root.deleteRecursively() }
+            runCatching { index.delete() }
+        }
+    }
+
+    /**
+     * 解压 [input] 到临时目录并落位 `files/sdk/<kind>`（在线下载与 APK 内置包共用）。
+     *
+     * 临时目录无论成败都会清理；进度按 0.05..0.99 换算，落位完成置 1。
+     *
+     * @param totalBytes 压缩包字节数（内置包按流式读取传 0，进度只到条目粒度）
+     */
+    private suspend fun extractAndPlace(
+        context: Context,
+        kind: EnvKind,
+        input: InputStream,
+        totalBytes: Long,
+        onProgress: (Float) -> Unit,
+    ): String {
+        val sdk = BuildEnvironment.sdkDir(context)
+        if (!sdk.isDirectory && !sdk.mkdirs()) throw IOException("无法创建目录：${sdk.absolutePath}")
+        val tmp = File(sdk, ".dl_${kind.name.lowercase()}_${System.nanoTime()}")
+        if (!tmp.mkdirs() && !tmp.isDirectory) throw IOException("无法创建临时目录：${tmp.absolutePath}")
+        try {
+            input.use { stream ->
+                ArchiveExtractor.extract(stream, tmp, totalBytes) { p ->
+                    onProgress((p * 0.9f + 0.05f).coerceIn(0f, 0.99f))
+                }
+            }
+            onProgress(0.99f)
+            // SDK 先只并入 cmdline-tools（此时结构尚不完整），由 installSdk 补齐平台组件
+            val target = BuildEnvironment.placeExtracted(context, kind, tmp, requireReady = kind != EnvKind.SDK)
+            onProgress(1f)
+            return target
+        } finally {
+            runCatching { tmp.deleteRecursively() }
+        }
     }
 
     // ------------------------------------------------------------------

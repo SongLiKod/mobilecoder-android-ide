@@ -4,6 +4,19 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// glibc 运行时「内置包」：tools/glibc-runtime/build.sh 产出的 glibc-*-*.tar.gz 自动拷进
+// assets/glibc/，打包进 APK 后 EnvDownloader 走「内置包优先 → 自定义源 → 在线镜像」三级兜底，
+// 断网 / 无托管也能完成 glibc 运行时就位（详见 tools/glibc-runtime/README.md）。
+// dist/ 目录不存在或为空时本任务拷不到任何文件（不报错），此时仍可在线下载 / 手动导入。
+val copyGlibcAssets by tasks.registering(Copy::class) {
+    from(rootProject.layout.projectDirectory.dir("tools/glibc-runtime/dist"))
+    include("glibc-*.tar.gz")
+    into(layout.projectDirectory.dir("src/main/assets/glibc"))
+}
+tasks.named("preBuild") {
+    dependsOn(copyGlibcAssets)
+}
+
 android {
     namespace = "com.mobilecoder.ide"
     compileSdk = 35

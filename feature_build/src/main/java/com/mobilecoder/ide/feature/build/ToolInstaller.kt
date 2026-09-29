@@ -377,6 +377,8 @@ object ToolInstaller {
      * 改写完成后**子进程不需要任何钩子**：npm 拉起来的命令、终端里直接敲的 node
      * 都按新解释器正常 exec（见 [GlibcCompat]）。
      *
+     * @param force false（默认）= 仅当 node 是 glibc 构建才装；true = 不看 node、
+     *   只要运行时不就绪就装（JDK / Gradle 构建链用，见 [ensureGlibcForBuild]）
      * @return true = 可以继续探测 node；false = glibc 装不上（错误信息已 emit）
      */
     private suspend fun ensureGlibc(
@@ -384,13 +386,14 @@ object ToolInstaller {
         source: EnvSource,
         emit: (String) -> Unit,
         onStage: (String) -> Unit,
+        force: Boolean = false,
     ): Boolean {
         val node = BuildEnvironment.resolveNodeExec(context.filesDir)
-        if (node == null || GlibcCompat.kind(node) != InterpKind.GLIBC) return true
+        if (!force && (node == null || GlibcCompat.kind(node) != InterpKind.GLIBC)) return true
 
         val glibc = BuildEnvironment.glibcDir(context)
         if (!BuildEnvironment.glibcReady(glibc)) {
-            emit("node 是 glibc 构建 → 在线下载 glibc 运行时（Android 缺 /lib/ld-linux-aarch64.so.1）…")
+            emit("glibc 运行时未就绪 → 安装（APK 内置包优先 / 在线 Debian 镜像兜底，Android 缺 /lib/ld-linux-aarch64.so.1）…")
             val failure = runCatching {
                 EnvDownloader.install(context, EnvKind.GLIBC, source, onStage = { onStage(it) })
             }.exceptionOrNull()
@@ -399,10 +402,12 @@ object ToolInstaller {
                 emit("[ERROR] glibc 运行时安装失败：${failure.message}")
                 emit("       官方 nodejs.org / Adoptium 包链的是 glibc（/lib/ld-linux-aarch64.so.1），")
                 emit("       Android 没有该文件，内核 exec 阶段直接 ENOENT(2)、退出码 127。")
+                emit("       内置 4 源已是 Debian 官方/国内镜像（实测索引与 .deb 均可下载），")
+                emit("       全部失败通常是网络不可达，可切换官方源/国内镜像重试。")
                 emit("       自救（任选其一）：")
-                emit("         1) 「构建环境」→ glibc 运行时镜像 → 填自定义镜像源（基址或完整 .tar.gz）重试；")
+                emit("         1) 「构建环境」→ glibc 运行时镜像 → 填自定义镜像源（完整 .tar.gz 地址，含 DNS 钩子）重试；")
                 emit("         2) 「构建环境」→ glibc 运行时 → 导入 glibc-$archHint-*.tar.gz 后重试，")
-                emit("            压缩包由 tools/glibc-runtime/build.sh 生成（见该目录 README 上传到内置源）。")
+                emit("            压缩包由 tools/glibc-runtime/build.sh 生成（见该目录 README：自托管或随 APK 内置）。")
                 return false
             }
             emit("glibc 运行时已安装：${glibc.absolutePath}")
@@ -414,6 +419,26 @@ object ToolInstaller {
             else "解释器已指向本机 loader，无需改写",
         )
         return true
+    }
+
+    /**
+     * 构建前置（BuildRunner 用）：确保 glibc 运行时就绪 —— JDK（Temurin）/ Gradle /
+     * node 全是 glibc ELF，缺运行时 `java` 同样会在 exec 阶段 127。
+     *
+     * 与 `apt tools install` 同一条安装路径（[EnvDownloader.install]：APK 内置包优先、
+     * 自定义源 + 内置在线镜像兜底），但**不依赖 node 存在**（[ensureGlibc] 的 force 模式）。
+     *
+     * @return true = 已就绪（或安装成功）
+     */
+    suspend fun ensureGlibcForBuild(
+        context: Context,
+        source: EnvSource,
+        emit: (String) -> Unit,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (BuildEnvironment.glibcReady(BuildEnvironment.glibcDir(context))) {
+            return@withContext true
+        }
+        ensureGlibc(context, source, emit, onStage = { emit(it) }, force = true)
     }
 
     /** 报错文案里的架构提示（包名按 aarch64 / x64 区分）。 */

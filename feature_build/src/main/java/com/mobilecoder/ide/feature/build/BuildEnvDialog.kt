@@ -197,8 +197,9 @@ fun BuildEnvDialog(
                 // ---- glibc 运行时镜像：多内置源自动回退 + 点选首选 + 手动输入自定义源 ----
                 Text("glibc 运行时镜像", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    text = "内置多个源按顺序自动回退（失败换下一个）。点选设为首选（再点取消）；" +
-                        "自定义源填基址或完整 .tar.gz 地址，保存后优先于全部内置源。",
+                    text = "内置 4 个 Debian 官方/国内镜像（真实可达），按顺序自动回退，" +
+                        "在线下载 .deb 自动组装运行时。点选设为首选（再点取消）；" +
+                        "自定义源填自托管完整 .tar.gz 的基址或完整地址（含 DNS 钩子），保存后优先于全部内置源。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

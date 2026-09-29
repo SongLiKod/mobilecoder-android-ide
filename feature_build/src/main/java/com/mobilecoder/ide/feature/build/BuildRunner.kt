@@ -503,6 +503,32 @@ object BuildRunner {
                 "构建环境未就绪：缺少 Gradle 发行版。请在「构建环境」中在线下载，或导入 gradle-x.x-bin.zip",
             )
         }
+        // glibc 运行时：JDK（Temurin）/ Gradle / node 全是 glibc ELF，Android 没有
+        // /lib/ld-linux-aarch64.so.1 → 不先补运行时，java 会在 exec 阶段 127。
+        // 与 apt 链同一条安装路径：APK 内置包优先，在线镜像兜底，装不上给自救提示。
+        if (status.required.contains(EnvKind.GLIBC) &&
+            !BuildEnvironment.glibcReady(BuildEnvironment.glibcDir(appContext))
+        ) {
+            _phase.value = "安装 glibc 运行时"
+            append("glibc 运行时未就绪 → 安装（APK 内置包优先，在线镜像兜底）…", BuildLogLevel.INFO)
+            val source = runCatching {
+                if (AppStorage.preferences.envDownloadSource() == "mirror") {
+                    EnvSource.MIRROR
+                } else {
+                    EnvSource.OFFICIAL
+                }
+            }.getOrDefault(EnvSource.OFFICIAL)
+            val ok = ToolInstaller.ensureGlibcForBuild(appContext, source) {
+                append(it, BuildLogLevel.INFO)
+            }
+            if (!ok) {
+                return fail(
+                    task, startedAt,
+                    "构建环境未就绪：glibc 运行时缺失（JDK / Gradle 均为 glibc 构建）。" +
+                        "请在「构建环境」页导入 glibc-*.tar.gz，或填写自定义镜像源后重试",
+                )
+            }
+        }
         // 内存上限落地：写入项目 gradle.properties（org.gradle.jvmargs），返回 MB 值
         val heapMb = syncGradleHeap(request.projectDir)
 

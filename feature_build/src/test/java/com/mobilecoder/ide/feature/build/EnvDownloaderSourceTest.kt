@@ -53,12 +53,23 @@ class EnvDownloaderSourceTest {
     // ---- glibc：多内置镜像 + 首选源 + 手动输入自定义源 ----
 
     @Test
-    fun glibc_hasMultipleDistinctDefaultMirrors() {
-        // 内置 ≥4 个源、URL 互不相同 → 下载失败时逐个自动回退
+    fun glibc_builtinMirrors_areRealDebianRepos() {
+        // 内置 4 源全部为真实 Debian 仓库基址（DEB 格式 → 安装时按索引在线组装 .deb）；
+        // 下列地址 2026-09 实测「Packages.gz 索引 + 三个 .deb」均 HTTP 200，绝非占位域名。
         val sources = EnvDownloader.candidateSources(EnvKind.GLIBC, EnvSource.OFFICIAL, "aarch64")
         assertTrue(sources.size >= 4)
         assertEquals(sources.size, sources.map { it.url }.distinct().size)
-        assertTrue(sources.all { it.url.endsWith("glibc-2.39-aarch64.tar.gz") })
+        assertTrue(sources.all { it.format == EnvDownloader.SourceFormat.DEB })
+        assertEquals(
+            setOf(
+                "https://deb.debian.org/debian",
+                "https://mirrors.tuna.tsinghua.edu.cn/debian",
+                "https://mirrors.aliyun.com/debian",
+                "https://mirrors.cloud.tencent.com/debian",
+            ),
+            sources.map { it.url }.toSet(),
+        )
+        assertTrue(sources.all { it.url.startsWith("https://") && it.url.contains("debian") })
     }
 
     @Test
@@ -91,8 +102,9 @@ class EnvDownloaderSourceTest {
             preferredId = null,
         )
         assertEquals("自定义源", sources[0].label)
-        assertEquals("https://my.host/glibc/glibc-2.39-aarch64.tar.gz", sources[0].url)
-        // 自定义源在最前，内置源仍全部保留兜底
+        assertEquals("https://my.host/glibc/glibc-2.41-aarch64.tar.gz", sources[0].url)
+        // 自定义源 = 单文件 tar.gz，内置 Debian 仓库源仍全部保留兜底
+        assertEquals(EnvDownloader.SourceFormat.TARBALL, sources[0].format)
         assertTrue(sources.size >= 5)
     }
 
@@ -106,7 +118,7 @@ class EnvDownloaderSourceTest {
             preferredId = "official",
         )
         assertEquals("https://my.host/pkg/glibc-2.39-x64.tar.gz", sources[0].url)
-        assertEquals("MobileCoder 官方", sources[1].label)
+        assertEquals("Debian 官方", sources[1].label)
     }
 
     @Test
@@ -130,6 +142,32 @@ class EnvDownloaderSourceTest {
         assertEquals(
             "https://x/f/glibc-2.39-x64.zip",
             EnvDownloader.resolveCustomUrl("https://x/f/glibc-2.39-x64.zip", "glibc-2.39-x64"),
+        )
+    }
+
+    @Test
+    fun bundledGlibcAsset_prefersExactVersion_thenCompatibleMatch() {
+        val exact = "glibc-2.41-aarch64.tar.gz"
+        assertEquals(
+            exact,
+            EnvDownloader.bundledGlibcAsset(arrayOf("glibc-2.41-x64.tar.gz", exact), "aarch64"),
+        )
+        assertEquals(
+            "glibc-2.42-aarch64.tar.gz",
+            EnvDownloader.bundledGlibcAsset(arrayOf("glibc-2.42-aarch64.tar.gz"), "aarch64"),
+        )
+    }
+
+    @Test
+    fun bundledGlibcAsset_archMismatch_orMissing_returnsNull() {
+        // 架构不匹配 / 无内置包 / 非运行时文件 → null（回退在线镜像 / 手动导入）
+        assertTrue(
+            EnvDownloader.bundledGlibcAsset(arrayOf("glibc-2.41-x64.tar.gz"), "aarch64") == null,
+        )
+        assertTrue(EnvDownloader.bundledGlibcAsset(null, "aarch64") == null)
+        assertTrue(EnvDownloader.bundledGlibcAsset(emptyArray(), "x64") == null)
+        assertTrue(
+            EnvDownloader.bundledGlibcAsset(arrayOf("README.md", "mcexechook.so"), "aarch64") == null,
         )
     }
 
