@@ -399,8 +399,10 @@ object ToolInstaller {
                 emit("[ERROR] glibc 运行时安装失败：${failure.message}")
                 emit("       官方 nodejs.org / Adoptium 包链的是 glibc（/lib/ld-linux-aarch64.so.1），")
                 emit("       Android 没有该文件，内核 exec 阶段直接 ENOENT(2)、退出码 127。")
-                emit("       自救：「构建环境」→ glibc 运行时 → 导入 glibc-$archHint-*.tar.gz 后重试，")
-                emit("       压缩包由 tools/glibc-runtime/build.sh 生成。")
+                emit("       自救（任选其一）：")
+                emit("         1) 「构建环境」→ glibc 运行时镜像 → 填自定义镜像源（基址或完整 .tar.gz）重试；")
+                emit("         2) 「构建环境」→ glibc 运行时 → 导入 glibc-$archHint-*.tar.gz 后重试，")
+                emit("            压缩包由 tools/glibc-runtime/build.sh 生成（见该目录 README 上传到内置源）。")
                 return false
             }
             emit("glibc 运行时已安装：${glibc.absolutePath}")

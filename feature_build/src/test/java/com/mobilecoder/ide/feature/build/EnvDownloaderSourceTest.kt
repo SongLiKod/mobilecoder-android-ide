@@ -50,6 +50,89 @@ class EnvDownloaderSourceTest {
         assertTrue(jdkX64.first().url.contains("/x64/"))
     }
 
+    // ---- glibc：多内置镜像 + 首选源 + 手动输入自定义源 ----
+
+    @Test
+    fun glibc_hasMultipleDistinctDefaultMirrors() {
+        // 内置 ≥4 个源、URL 互不相同 → 下载失败时逐个自动回退
+        val sources = EnvDownloader.candidateSources(EnvKind.GLIBC, EnvSource.OFFICIAL, "aarch64")
+        assertTrue(sources.size >= 4)
+        assertEquals(sources.size, sources.map { it.url }.distinct().size)
+        assertTrue(sources.all { it.url.endsWith("glibc-2.39-aarch64.tar.gz") })
+    }
+
+    @Test
+    fun glibc_mirrorSource_putsDomesticMirrorsFirst() {
+        val sources = EnvDownloader.candidateSources(EnvKind.GLIBC, EnvSource.MIRROR, "aarch64")
+        val domestic = EnvDownloader.GLIBC_MIRRORS.filter { it.domestic }.map { it.label }
+        assertEquals(domestic, sources.take(domestic.size).map { it.label })
+    }
+
+    @Test
+    fun glibc_preferredSource_isTriedFirst_withoutDuplication() {
+        val sources = EnvDownloader.candidateSources(
+            kind = EnvKind.GLIBC,
+            source = EnvSource.OFFICIAL,
+            arch = "aarch64",
+            custom = null,
+            preferredId = "tencent",
+        )
+        assertEquals("腾讯云镜像", sources[0].label)
+        assertEquals(1, sources.count { it.label == "腾讯云镜像" })
+    }
+
+    @Test
+    fun glibc_customSource_isFirst_baseUrlGetsFileAppended() {
+        val sources = EnvDownloader.candidateSources(
+            kind = EnvKind.GLIBC,
+            source = EnvSource.OFFICIAL,
+            arch = "aarch64",
+            custom = "https://my.host/glibc/",
+            preferredId = null,
+        )
+        assertEquals("自定义源", sources[0].label)
+        assertEquals("https://my.host/glibc/glibc-2.39-aarch64.tar.gz", sources[0].url)
+        // 自定义源在最前，内置源仍全部保留兜底
+        assertTrue(sources.size >= 5)
+    }
+
+    @Test
+    fun glibc_customSource_fullArchiveUrl_usedAsIs_thenPreferredFollows() {
+        val sources = EnvDownloader.candidateSources(
+            kind = EnvKind.GLIBC,
+            source = EnvSource.MIRROR,
+            arch = "x64",
+            custom = "https://my.host/pkg/glibc-2.39-x64.tar.gz",
+            preferredId = "official",
+        )
+        assertEquals("https://my.host/pkg/glibc-2.39-x64.tar.gz", sources[0].url)
+        assertEquals("MobileCoder 官方", sources[1].label)
+    }
+
+    @Test
+    fun glibc_customSourceDuplicateOfBuiltIn_deduplicated() {
+        val sources = EnvDownloader.candidateSources(
+            kind = EnvKind.GLIBC,
+            source = EnvSource.OFFICIAL,
+            arch = "aarch64",
+            custom = EnvDownloader.GLIBC_MIRRORS.first().base,
+            preferredId = null,
+        )
+        assertEquals(sources.size, sources.map { it.url }.distinct().size)
+    }
+
+    @Test
+    fun resolveCustomUrl_baseVsFullArchive() {
+        assertEquals(
+            "https://x/g/glibc-2.39-aarch64.tar.gz",
+            EnvDownloader.resolveCustomUrl("  https://x/g/  ", "glibc-2.39-aarch64"),
+        )
+        assertEquals(
+            "https://x/f/glibc-2.39-x64.zip",
+            EnvDownloader.resolveCustomUrl("https://x/f/glibc-2.39-x64.zip", "glibc-2.39-x64"),
+        )
+    }
+
     private fun assertTrue(condition: Boolean) {
         org.junit.Assert.assertTrue(condition)
     }

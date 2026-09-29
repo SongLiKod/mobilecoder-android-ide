@@ -58,37 +58,52 @@ Debian suite 对应（trixie = 2.39），也必须与包文件名一致，否则
 * 钩子 `.so` 的最大 `GLIBC_x.y` 符号版本 > `GLIBC_VERSION` → 报错
   （防止用更新的发行版编译出设备上装不上的 .so）。
 
-## 上传
+## 上传（内置多镜像 + 手动输入）
 
-两个基址是 `EnvDownloader.kt` 里的占位常量，**发布前必须替换为真实地址**：
+App 内置 **4 个默认镜像源**（`EnvDownloader.GLIBC_MIRRORS`），下载按顺序自动回退，
+全失败才报错；同一份文件传到**任意一处**即可用（至少一处就能跑通，其余作为兜底）：
 
-| 常量 | 当前占位值 |
-| --- | --- |
-| `GLIBC_OFFICIAL_BASE` | `https://cdn.mobilecoder.dev/glibc` |
-| `GLIBC_MIRROR_BASE`   | `https://cdn-mobilecoder.cn-shanghai.myqcloud.com/glibc` |
+| id | label | 常量 / 基址 | 拼接规则 |
+| --- | --- | --- | --- |
+| `official` | MobileCoder 官方 | `GLIBC_OFFICIAL_BASE` = `https://cdn.mobilecoder.dev/glibc` | `<基址>/glibc-<版本>-<arch>.tar.gz` |
+| `github` | GitHub Releases | `GLIBC_GITHUB_BASE` = `https://github.com/mobilecoder/mobilecoder-glibc/releases/download/v1` | 同上（release 资产同名） |
+| `tencent` | 腾讯云镜像 | `GLIBC_MIRROR_BASE` = `https://cdn-mobilecoder.cn-shanghai.myqcloud.com/glibc` | 同上 |
+| `jsdelivr` | jsDelivr 加速 | `GLIBC_JSDELIVR_BASE` = `https://cdn.jsdelivr.net/gh/mobilecoder/mobilecoder-glibc@main` | 同上（仓库 main 分支**根目录**） |
 
-拼接规则：`<基址>/glibc-<GLIBC_VERSION>-<arch>.tar.gz`，`arch` 取
-`EnvDownloader.primaryArch()` 的值（`aarch64` / `x64`）。即需要上传 4 个文件：
+`official` / `tencent` 两个基址是占位常量，**发布前必须替换为真实地址**；`github` /
+`jsdelivr` 指向仓库 `mobilecoder/mobilecoder-glibc`（发布前改名或改 `EnvDownloader` 常量）。
+
+`arch` 取 `EnvDownloader.primaryArch()` 的值（`aarch64` / `x64`），即每个托管位
+各需 2 个文件（共 8 个，都是同一份字节的复制）：
 
 ```
-<官方基址>/glibc-2.39-aarch64.tar.gz
-<官方基址>/glibc-2.39-x64.tar.gz
-<镜像基址>/glibc-2.39-aarch64.tar.gz     # 与官方同一份文件，仅域名不同
-<镜像基址>/glibc-2.39-x64.tar.gz
+<托管位>/glibc-2.39-aarch64.tar.gz
+<托管位>/glibc-2.39-x64.tar.gz
 ```
+
+用户侧还有两层覆盖（「构建环境」页 → glibc 运行时镜像，持久化到 `AppPreferences`）：
+
+* **点选首选源**：把某个内置源排到第 1 位尝试，再点一次取消（回退到「官方源 /
+  国内镜像」偏好排序）；
+* **自定义镜像源**：手动输入基址（`https://host/glibc`）或完整包地址
+  （`…/glibc-2.39-aarch64.tar.gz`），保存后作为**第 1 优先候选**，
+  失败仍自动回退全部内置源 —— 传到自己的对象存储 / 局域网 HTTP 即可直接试。
 
 要求：
 
 * `Content-Type: application/gzip`，支持 HTTP Range（`EnvDownloader` 复用现有
   下载逻辑，进度条依赖 Content-Length）；
-* 镜像与官方必须是**同一份字节**（脚本一次产出、复制两处即可）；
-* 路径保持一级子目录 `/glibc/`，不要改成扁平路径 —— 否则要同步改两个常量。
+* 各镜像必须是**同一份字节**（脚本一次产出、复制到各处即可）；
+* 内置源路径保持表中的拼接规则 —— 改路径需同步改 `EnvDownloader` 对应常量。
 
 上传后建议先在真机「构建环境」页在线安装一次 glibc，再执行
 `apt tools install node` 验证 127 是否消失。
 
 ## 离线兜底
 
-包未发布时在线下载必然失败，`ToolInstaller.ensureGlibc` 会提示用户改从
-「构建环境」页手动导入 `glibc-2.39-<arch>.tar.gz`（走 `EnvDownloader` 同一条
-解压落位路径），不阻断阶段 1 的其余功能。
+包未发布时在线下载必然失败（提示会列出已尝试的每个源），此时有三条自救路径：
+
+1. 从「构建环境」页手动导入 `glibc-2.39-<arch>.tar.gz`（走 `EnvDownloader` 同一条
+   解压落位路径），不阻断阶段 1 的其余功能；
+2. 在「构建环境」页填写**自定义镜像源**指向任意可达 URL 后重试在线下载；
+3. 把包上传到任一内置托管位（见上节）。

@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
+import com.mobilecoder.ide.core.storage.AppStorage
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -28,6 +29,8 @@ class DownloadCancelled(message: String) : Exception(message)
  * 构建环境在线下载器：下载 → 解压 → 静默落位 `files/sdk/`，完成即可用。
  *
  * - 每类组件给出**官方源 + 国内镜像**两个候选，按所选源排序、失败自动回退；
+ *   glibc 运行时额外内置多个镜像（[GLIBC_MIRRORS]，按序全部回退），并支持在
+ *   「构建环境」页点选**首选源**、手动输入**自定义源**（优先于全部内置源）；
  * - 进度按下载/解压字节回报，支持取消（[cancel]）。
  */
 object EnvDownloader {
@@ -55,22 +58,121 @@ object EnvDownloader {
     private const val GLIBC_VERSION = "2.39"
 
     /**
-     * glibc 运行时**自托管**下载基址（官方源）。
+     * 一个内置 glibc 运行时镜像源。
+     *
+     * @param id 稳定标识（持久化「首选源」用，改 label 不能改 id）
+     * @param domestic true = 国内可达（EnvSource.MIRROR 时排前），false = 海外
+     */
+    data class MirrorSource(val id: String, val label: String, val base: String, val domestic: Boolean)
+
+    /**
+     * glibc 运行时**内置默认镜像（多个）**：按顺序逐个回退，全失败才报错。
      *
      * nodejs.org / Adoptium / gradle 官方包都依赖 glibc，但三家都不提供 Android 可用的
      * 运行时，所以这一份由仓库内 `tools/glibc-runtime/build.sh` 从 Debian `libc6` 解包、
-     * 交叉编译钩子后打成 `glibc-<版本>-<arch>.tar.gz` 自行上传。
+     * 交叉编译钩子后打成 `glibc-<版本>-<arch>.tar.gz` 自行上传（见该目录 README）。
+     *
+     * 除前两个（`GLIBC_OFFICIAL_BASE` / `GLIBC_MIRROR_BASE`）外还内置 GitHub Releases 与
+     * jsDelivr 加速两条托管位，同一份文件传到任一处即可用；用户也可在「构建环境」页
+     * 点选首选源或手动输入任意地址（`AppPreferences.glibcCustomSource`）覆盖。
+     */
+    val GLIBC_MIRRORS = listOf(
+        MirrorSource("official", "MobileCoder 官方", GLIBC_OFFICIAL_BASE, domestic = false),
+        MirrorSource("github", "GitHub Releases", GLIBC_GITHUB_BASE, domestic = false),
+        MirrorSource("tencent", "腾讯云镜像", GLIBC_MIRROR_BASE, domestic = true),
+        MirrorSource("jsdelivr", "jsDelivr 加速", GLIBC_JSDELIVR_BASE, domestic = true),
+    )
+
+    /** glibc 运行时**自托管**下载基址（官方源）。
      *
      * **发布前必须把域名换成真实地址**，上传路径见 `tools/glibc-runtime/README.md`；
-     * 未发布时下载会失败，`ToolInstaller.ensureGlibc` 会提示改从「构建环境」页导入。
-     */
+     * 未发布时下载会失败，`ToolInstaller.ensureGlibc` 会提示改从「构建环境」页导入，
+     * 或在该页手动输入其它可达镜像地址。 */
     private const val GLIBC_OFFICIAL_BASE = "https://cdn.mobilecoder.dev/glibc"
 
     /** glibc 运行时国内镜像基址（与 [GLIBC_OFFICIAL_BASE] 同一份文件）。 */
     private const val GLIBC_MIRROR_BASE = "https://cdn-mobilecoder.cn-shanghai.myqcloud.com/glibc"
 
-    /** 候选地址：所选源在前、另一源兜底（URL 相同则去重）。 */
-    fun candidateSources(kind: EnvKind, source: EnvSource, arch: String): List<Source> {
+    /** glibc 运行时 GitHub Releases 托管位（仓库见 README；文件挂在 release 资产）。 */
+    private const val GLIBC_GITHUB_BASE =
+        "https://github.com/mobilecoder/mobilecoder-glibc/releases/download/v1"
+
+    /** glibc 运行时 jsDelivr 加速位（同一仓库 main 分支根目录，国内可达）。 */
+    private const val GLIBC_JSDELIVR_BASE =
+        "https://cdn.jsdelivr.net/gh/mobilecoder/mobilecoder-glibc@main"
+
+    /** 候选地址（含 glibc 的首选源 / 自定义源）。
+     *
+     * 排序规则（glibc）：自定义源 → 首选内置源 → 其余内置源（按 [EnvSource] 的
+     * 官方/国内偏好分组，组内保持 [GLIBC_MIRRORS] 顺序），按 URL 去重。
+     * 其余组件仍是「官方 + 国内镜像」两候选，只按 [EnvSource] 排序。
+     *
+     * @param custom 手动输入的自定义源（基址或完整 `.tar.gz/.zip` 地址；null/空忽略）
+     * @param preferredId 首选内置源 id（[MirrorSource.id]；不匹配任何内置源时忽略）
+     */
+    fun candidateSources(
+        kind: EnvKind,
+        source: EnvSource,
+        arch: String,
+        custom: String?,
+        preferredId: String?,
+    ): List<Source> {
+        if (kind == EnvKind.GLIBC) {
+            return glibcCandidates(source, arch, custom, preferredId)
+        }
+        return pairCandidateSources(kind, source, arch)
+    }
+
+    /**
+     * glibc 运行时候选：自定义源 → 首选内置源 → 其余内置源（按 [EnvSource] 的官方/国内
+     * 偏好分组，组内保持 [GLIBC_MIRRORS] 顺序），最后按 URL 去重。
+     */
+    private fun glibcCandidates(
+        source: EnvSource,
+        arch: String,
+        custom: String?,
+        preferredId: String?,
+    ): List<Source> {
+        val stem = "glibc-$GLIBC_VERSION-$arch"
+        val list = mutableListOf<Source>()
+        custom?.takeIf { it.isNotBlank() }?.let { input ->
+            list += Source("自定义源", resolveCustomUrl(input, stem))
+        }
+        val domesticFirst = source == EnvSource.MIRROR
+        val preferred = GLIBC_MIRRORS.firstOrNull { it.id == preferredId }
+        val rest = GLIBC_MIRRORS
+            .filter { it.id != preferredId }
+            .sortedBy { it.domestic != domesticFirst } // sortedBy 稳定：组内保原序
+        (listOfNotNull(preferred) + rest).forEach { mirror ->
+            list += Source(mirror.label, "${mirror.base}/$stem.tar.gz")
+        }
+        return list.distinctBy { it.url }
+    }
+
+    /**
+     * 自定义源解析：完整包地址（`.tar.gz` / `.zip` 结尾）原样用；
+     * 否则当作基址，补上 `/<包文件名>`（与内置源同一拼接规则）。
+     */
+    fun resolveCustomUrl(input: String, fileStem: String): String {
+        val trimmed = input.trim().trimEnd('/')
+        return if (trimmed.endsWith(".tar.gz") || trimmed.endsWith(".zip")) {
+            trimmed
+        } else {
+            "$trimmed/$fileStem.tar.gz"
+        }
+    }
+
+    /**
+     * 候选地址：所选源在前、另一源兜底（URL 相同则去重）。
+     *
+     * glibc 组件会给出**全部内置镜像**（多源自动回退），首选源 / 手动输入的自定义源
+     * 走 5 参重载；本方法等价于「不指定首选与自定义」的调用。
+     */
+    fun candidateSources(kind: EnvKind, source: EnvSource, arch: String): List<Source> =
+        candidateSources(kind, source, arch, custom = null, preferredId = null)
+
+    /** 「官方 + 国内镜像」两候选的排序（[EnvKind.GLIBC] 已在入口分流，不走这里）。 */
+    private fun pairCandidateSources(kind: EnvKind, source: EnvSource, arch: String): List<Source> {
         val nodeArch = if (arch == "aarch64") "arm64" else "x64"
         val (official, mirror) = when (kind) {
             EnvKind.JDK -> {
@@ -88,11 +190,7 @@ object EnvDownloader {
                 val url = "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
                 Source("dl.google.com", url) to Source("dl.google.com", url)
             }
-            EnvKind.GLIBC -> {
-                val file = "glibc-$GLIBC_VERSION-$arch.tar.gz"
-                Source("MobileCoder 官方", "$GLIBC_OFFICIAL_BASE/$file") to
-                    Source("国内镜像", "$GLIBC_MIRROR_BASE/$file")
-            }
+            EnvKind.GLIBC -> error("GLIBC 已在 candidateSources 入口分流到 glibcCandidates")
         }
         val ordered = if (source == EnvSource.MIRROR) listOf(mirror, official) else listOf(official, mirror)
         return ordered.distinctBy { it.url }
@@ -116,7 +214,10 @@ object EnvDownloader {
         val sdk = BuildEnvironment.sdkDir(context)
         if (!sdk.isDirectory && !sdk.mkdirs()) throw IOException("无法创建目录：${sdk.absolutePath}")
         val cache = File(context.cacheDir, "envdl").apply { mkdirs() }
-        val candidates = candidateSources(kind, source, primaryArch())
+        // glibc：首选内置源与手动输入的自定义源（其余组件忽略这两项，读失败不阻断下载）
+        val custom = runCatching { AppStorage.preferences.glibcCustomSource() }.getOrDefault("")
+        val preferredId = runCatching { AppStorage.preferences.glibcPreferredSource() }.getOrDefault("")
+        val candidates = candidateSources(kind, source, primaryArch(), custom, preferredId)
         val failures = mutableListOf<String>()
         candidates.forEachIndexed { index, cand ->
             if (cancelled) throw DownloadCancelled("已取消下载")
