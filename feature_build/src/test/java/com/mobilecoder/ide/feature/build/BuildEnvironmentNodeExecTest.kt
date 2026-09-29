@@ -125,7 +125,12 @@ class BuildEnvironmentNodeExecTest {
             BuildEnvironment.relinkBrokenSdkNode(files)
 
             assertTrue(Files.isSymbolicLink(sdkNode.toPath()))
-            assertEquals(working.canonicalPath, sdkNode.canonicalPath)
+            // 不用 sdkNode.canonicalPath 断言：部分 Windows / JDK 组合上
+            // File.getCanonicalPath() 并不解析符号链接，会把链接自身路径返回，
+            // 导致在 Android 上完全正确的实现被误判。isSameFile 走的是
+            // 解析后的真实文件身份，两平台语义一致。
+            assertEquals(working.toPath(), Files.readSymbolicLink(sdkNode.toPath()))
+            assertTrue(Files.isSameFile(sdkNode.toPath(), working.toPath()))
         } finally {
             files.deleteRecursively()
         }

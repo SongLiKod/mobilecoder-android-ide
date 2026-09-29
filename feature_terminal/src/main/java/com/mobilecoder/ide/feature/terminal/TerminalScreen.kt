@@ -23,9 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -49,7 +47,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -746,27 +743,23 @@ private fun TerminalViewport(
         }
     }
 
-    val selectionColors = TextSelectionColors(
-        backgroundColor = Color(0xFF000000 or palette.terminalSelection.rgb),
-        handleColor = MaterialTheme.colorScheme.primary,
-    )
-    CompositionLocalProvider(LocalTextSelectionColors provides selectionColors) {
-        SelectionContainer(
-            modifier = modifier.background(Color(0xFF000000 or palette.terminalBackground.rgb)),
+    // 选中高亮色由 MobileCoderTheme 全局提供（LocalTextSelectionColors），
+    // 这里不再局部覆盖，保证与 CLI 日志 / 输入框 / 编辑器是同一套颜色。
+    SelectionContainer(
+        modifier = modifier.background(Color(0xFF000000 or palette.terminalBackground.rgb)),
+    ) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
         ) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                items(total) { index ->
-                    val line = remember(version, index, palette) { emulator.lineAt(index) }
-                    TerminalLineText(
-                        line = line,
-                        isCursorLine = index == cursorLine,
-                        palette = palette,
-                        style = style,
-                    )
-                }
+            items(total) { index ->
+                val line = remember(version, index, palette) { emulator.lineAt(index) }
+                TerminalLineText(
+                    line = line,
+                    isCursorLine = index == cursorLine,
+                    palette = palette,
+                    style = style,
+                )
             }
         }
     }
@@ -812,10 +805,22 @@ private fun buildTerminalLine(
             bg = swap
         }
 
+        // 默认底色不画：容器已经铺了 terminalBackground，再画一遍只是遮挡。
+        // 更关键的是 Compose 的选中高亮画在文本节点**之下**（SelectionController.modifier
+        // 在 selectableTextModifier 之前进链），整行铺一层不透明 background 会把它
+        // 完全盖住 —— 表现为「选中了却没有高亮」。
+        // 显式底色（SGR / 反色 / 光标块）本来就该盖住高亮，照常画。
+        val spanBg =
+            if (run.bg == COLOR_DEFAULT && (run.attrs and Attr.INVERSE) == 0) {
+                Color.Transparent
+            } else {
+                bg
+            }
+
         addStyle(
             SpanStyle(
                 color = if (run.attrs and Attr.DIM != 0) fg.copy(alpha = 0.72f) else fg,
-                background = bg,
+                background = spanBg,
                 fontWeight = if (run.attrs and Attr.BOLD != 0) FontWeight.Bold else null,
                 fontStyle = if (run.attrs and Attr.ITALIC != 0) FontStyle.Italic else null,
                 textDecoration = when {

@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -209,21 +210,25 @@ private fun LogPane(
         )
         return
     }
-    LazyColumn(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        state = listState,
-        verticalArrangement = Arrangement.spacedBy(1.dp),
-    ) {
-        items(log.size) { index ->
-            val line = log[index]
-            Text(
-                text = line.text,
-                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                color = logColor(line.level, palette, MaterialTheme.colorScheme.onSurface),
-            )
+    // 日志要能长按选中复制。选区高亮色由 MobileCoderTheme 的
+    // LocalTextSelectionColors 全局提供，这里只负责让它可选。
+    SelectionContainer {
+        LazyColumn(
+            modifier = modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            state = listState,
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            items(log.size) { index ->
+                val line = log[index]
+                Text(
+                    text = line.text,
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = logColor(line.level, palette, MaterialTheme.colorScheme.onSurface),
+                )
+            }
         }
     }
 }
