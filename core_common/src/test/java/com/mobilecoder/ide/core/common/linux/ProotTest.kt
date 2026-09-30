@@ -114,7 +114,7 @@ class ProotTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun prootArgs_coreFlagsInOrder_commandAfterDoubleDash() {
+    fun prootArgs_coreFlagsInOrder_noDoubleDashSeparator() {
         val config = Proot.Config(
             proot = "/data/user/0/x/files/linux/bin/proot",
             rootfs = "/data/user/0/x/files/linux/rootfs",
@@ -132,16 +132,18 @@ class ProotTest {
                 "-w", "/data/user/0/x/files/project",
                 "-b", "/dev",
                 "-b", "/data/user/0/x",
-                "--",
             ),
             args,
         )
-        // 关键约定：被包裹的命令必须跟在 `--` 之后；长名 --root-id（apt/dpkg 写
-        // /var/lib/dpkg 的前提）与 --kill-on-exit（回收 guest 子进程）一个都不能少
-        assertEquals("--", args.last())
+        // 长名 --root-id（apt/dpkg 写 /var/lib/dpkg 的前提）与
+        // --kill-on-exit（回收 guest 子进程）一个都不能少
         assertTrue(args.contains("--root-id"))
         assertTrue(args.contains("--link2symlink"))
         assertTrue(args.contains("--kill-on-exit"))
+        // 防回归（真机踩坑）：proot 的参数表里没有 `--`，加了会直接
+        // `proot error: unknown option '--'` 拒绝启动——proot 以第一个
+        // 不以 `-` 开头的参数为命令起点，分界靠 argv[0] 是绝对路径保证
+        assertFalse("proot 不认识 `--` 分隔符", args.contains("--"))
     }
 
     // ------------------------------------------------------------------

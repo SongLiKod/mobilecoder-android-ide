@@ -167,6 +167,12 @@ object Proot {
      * - `--link2symlink`：硬链接落盘转成软链，dpkg 的文件硬链接在 app 目录可工作；
      * - `--kill-on-exit`：终端会话被杀时连带回收 guest 内进程，不留孤儿；
      * - `-w`：guest 内工作目录（与 host 同路径，见 [binds]）。
+     *
+     * **不加 `--` 分隔符**（真机实测报 `proot error: unknown option '--'`）：
+     * proot 的参数解析（`cli.c parse_config`）只在选项表里查匹配，任何以 `-`
+     * 开头却不在表里的参数都会报 unknown option，而 `--` 不在表中。proot 以
+     * **第一个不以 `-` 开头的参数**作为命令起点，因此被包裹命令的 argv[0]
+     * 必须是绝对路径（`/bin/sh` 等，天然不以 `-` 开头），选项与命令由此分界。
      */
     fun prootArgs(config: Config): Array<String> = buildList {
         add(config.proot)
@@ -181,7 +187,6 @@ object Proot {
             add("-b")
             add(b)
         }
-        add("--")
     }.toTypedArray()
 
     /** 当前上下文的 [Config]（[cwd] 不存在时回退 guest 根 `/`）。 */
