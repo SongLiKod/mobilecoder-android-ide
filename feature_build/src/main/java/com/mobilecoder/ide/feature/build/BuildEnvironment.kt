@@ -2,6 +2,7 @@ package com.mobilecoder.ide.feature.build
 
 import android.content.Context
 import android.net.Uri
+import com.mobilecoder.ide.core.common.linux.Proot
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
 import com.mobilecoder.ide.core.storage.AppStorage
 import java.io.File
@@ -22,6 +23,15 @@ enum class EnvKind(val title: String) {
     GRADLE("Gradle"),
     SDK("Android SDK"),
     NODE("Node.js"),
+
+    /**
+     * Linux 环境（Ubuntu 24.04 rootfs + proot，`files/linux`）。
+     * JDK / Gradle / node 全是 glibc ELF，Android 只有 bionic，内核 exec 时找不到
+     * `/lib/ld-linux-aarch64.so.1` → ENOENT(2)、退出码 127。装上它之后终端与构建
+     * 命令全部在 proot 内运行（见 `core_common/…/linux/Proot.kt`），同时终端变成
+     * 完整 Linux，`apt install` 可装任意软件包。
+     */
+    LINUX("Linux 环境"),
 }
 
 /** 单项环境检测结果。 */
@@ -124,7 +134,7 @@ object BuildEnvironment {
     /** 执行一次体检并缓存结果（[projectDir] 用于按项目类型动态过滤所需组件）。 */
     suspend fun refresh(context: Context, projectDir: File? = null): EnvStatus {
         val all = detect(context)
-        val required = requirementsFor(projectDir)
+        val required = withLinuxIfNeeded(requirementsFor(projectDir))
         val status = EnvStatus(items = all.filter { it.kind in required }, required = required)
         _status.value = status
         // JAVA_HOME 同步注入进程环境，供终端 / CLI 子进程继承（与项目类型无关）
@@ -133,6 +143,19 @@ object BuildEnvironment {
         }
         return status
     }
+
+    /**
+     * 把 **Linux 环境（LINUX）** 恒并入「所需组件」。
+     *
+     * 不再按「node/java 是不是 glibc ELF」逐一预判（旧方案要读 ELF 头，既漏判
+     * 又会把不该装的场景也判进去）：终端命令、`npm`、`sdkmanager`、构建里的
+     * `java`/`gradle` 全部统一从 proot 走，rootfs 因此是**所有项目的硬依赖**——
+     * 装一次，终端即完整 Linux（可 `apt install` 任意包）。
+     *
+     * @return 追加后的所需组件（已有则原样返回）
+     */
+    internal fun withLinuxIfNeeded(required: List<EnvKind>): List<EnvKind> =
+        if (EnvKind.LINUX in required) required else required + EnvKind.LINUX
 
     /**
      * 按当前项目类型推断**需要**哪些环境（「构建环境」页据此动态展示与检查）。
@@ -170,7 +193,7 @@ object BuildEnvironment {
     /** 体检：按 [projectDir] 所需组件返回路径与可用性。 */
     suspend fun status(context: Context, projectDir: File? = null): EnvStatus {
         val all = detect(context)
-        val required = requirementsFor(projectDir)
+        val required = withLinuxIfNeeded(requirementsFor(projectDir))
         return EnvStatus(items = all.filter { it.kind in required }, required = required)
     }
 
@@ -206,6 +229,14 @@ object BuildEnvironment {
                 ready = node != null,
                 hint = "未就绪：点「在线下载」安装 Node.js 20（含 npm，约 50MB），或导入 node-v*-linux-*.tar.gz",
             ),
+            EnvItem(
+                kind = EnvKind.LINUX,
+                path = Proot.rootfsDir(context).takeIf { it.isDirectory }?.absolutePath,
+                ready = Proot.isReady(context),
+                hint = "未就绪：点「在线下载」安装 Linux 环境（Ubuntu 24.04 rootfs + proot，约 35MB）。" +
+                    "装好后终端就是完整 Linux：`apt install` 可装任意软件包，JDK / Gradle / " +
+                    "node 等 glibc 程序也在其中原样运行；也可导入本地 ubuntu-base-*.tar.gz",
+            ),
         )
     }
 
@@ -230,6 +261,11 @@ object BuildEnvironment {
         kind: EnvKind,
         onProgress: (Float) -> Unit = {},
     ): String = withContext(Dispatchers.IO) {
+        // Linux 环境（ubuntu-base tar.gz）走专属管线：解压落位 rootfs 后还要补装
+        // proot 三件套并做首启配置，不能进下面的「落位 files/sdk」通用流程
+        if (kind == EnvKind.LINUX) {
+            return@withContext RootfsManager.installFromArchive(context, uri, onStage = {}, onProgress = onProgress)
+        }
         val sdk = sdkDir(context)
         if (!sdk.exists() && !sdk.mkdirs()) {
             throw IllegalStateException("无法创建目录：${sdk.absolutePath}")
@@ -268,6 +304,9 @@ object BuildEnvironment {
             EnvKind.JDK -> relocate(tmp, "bin/java", File(sdk, "jdk"))
             EnvKind.GRADLE -> relocate(tmp, "bin/gradle", File(sdk, "gradle"))
             EnvKind.NODE -> relocate(tmp, "bin/node", File(sdk, "node"))
+            // LINUX 的导入与下载都在入口分流给了 RootfsManager（rootfs + proot + 首启配置），
+            // 绝不能按「解压包塞进 files/sdk」处理
+            EnvKind.LINUX -> throw IllegalStateException("Linux 环境由 RootfsManager 负责落位")
             EnvKind.SDK -> mergeIntoSdk(tmp, sdk, requireReady)
         }
         // 修复可执行权限（gradlew / java / gradle / node 都是脚本或 ELF）
@@ -279,6 +318,7 @@ object BuildEnvironment {
             }
             EnvKind.GRADLE -> runCatching { AppStorage.preferences.setGradlePath(target) }
             EnvKind.NODE -> writeNodeShims(context, File(target))
+            EnvKind.LINUX -> Unit
             EnvKind.SDK -> Unit
         }
         refresh(context)
@@ -431,6 +471,10 @@ object BuildEnvironment {
         }
     }
 
+    // ------------------------------------------------------------------
+    // 执行位与探测
+    // ------------------------------------------------------------------
+
     /**
      * 关键命令入口的执行位状态（`apt doctor` / 环境体检展示）。
      * 例：`node=+x  npm=+x  npx=缺执行位`——出现「缺执行位 / 非普通文件」即可定位
@@ -462,13 +506,21 @@ object BuildEnvironment {
     fun execProbeLine(context: Context): String {
         val node = File(binDir(context), "node")
         if (!node.exists()) return "node=缺失"
-        return "node → ${probeExec(node)}"
+        return "node → ${probeExec(context, node)}"
     }
 
-    /** 跑一次 `file --version`，3 秒兜底超时，返回 `ok <输出>` / `exit=N <输出>` / `exec失败：<原因>`。 */
-    private fun probeExec(file: File): String = runCatching {
-        val process = ProcessBuilder(file.absolutePath, "--version")
+    /**
+     * 跑一次 `node --version`，3 秒兜底超时，返回 `ok <输出>` / `exit=N <输出>` / `exec失败：<原因>`。
+     *
+     * node 是 glibc ELF：Linux 环境就绪时命令被包进 proot（否则内核找不到
+     * `/lib/ld-linux-aarch64.so.1`，必 exit=127）；未就绪则原样直跑，
+     * 探测结果如实反映「缺 Linux 环境」这一现状。
+     */
+    private fun probeExec(context: Context, file: File): String = runCatching {
+        val argv = Proot.wrap(context, arrayOf(file.absolutePath, "--version"), cwd = null)
+        val process = ProcessBuilder(argv.toList())
             .redirectErrorStream(true)
+            .apply { environment().putAll(Proot.envMap(context)) }
             .start()
         runCatching { process.outputStream.close() }
         // 先限时等待、再读输出：反过来会在进程挂住时阻塞在读上
@@ -639,6 +691,18 @@ object BuildEnvironment {
             add("  Android SDK   ${mark(sdkItem)} ${sdk.absolutePath}")
             add("                结构检查 = ${if (sdkLooksReady(sdk)) "通过（platforms/build-tools）" else "缺失 platforms/build-tools"}")
             add("  Node.js       ${mark(node)} ${node?.path ?: "未安装"}")
+            add(
+                "  Linux 环境    ${mark(status?.item(EnvKind.LINUX))} " +
+                    "${Proot.rootfsDir(context).absolutePath}",
+            )
+            val prootBin = Proot.prootBin(context)
+            add(
+                "                proot = " + if (prootBin.isFile) {
+                    prootBin.absolutePath
+                } else {
+                    "缺失（终端/构建命令无法运行 glibc 程序，请在「构建环境」页安装 Linux 环境）"
+                },
+            )
             add("  ANDROID_HOME  ${sdk.absolutePath}")
             add("  GRADLE_USER_HOME ${gradleUserHome(context).absolutePath}")
             add("  TMPDIR        ${tmpDir(context).absolutePath}")

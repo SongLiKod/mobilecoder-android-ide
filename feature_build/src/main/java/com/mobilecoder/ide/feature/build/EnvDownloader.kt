@@ -2,10 +2,12 @@ package com.mobilecoder.ide.feature.build
 
 import android.content.Context
 import android.os.Build
+import com.mobilecoder.ide.core.common.linux.Proot
 import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.CompletableDeferred
@@ -17,8 +19,8 @@ import kotlinx.coroutines.withContext
 
 /** 在线下载源（「构建环境」页可切换并持久化）。 */
 enum class EnvSource(val title: String, val subtitle: String) {
-    OFFICIAL("官方源", "Temurin · Gradle · Node.js · Google 官方 CDN"),
-    MIRROR("国内镜像", "清华 TUNA · npmmirror · 腾讯云"),
+    OFFICIAL("官方源", "Temurin · Gradle · Node.js · Ubuntu 官方 · Google 官方 CDN"),
+    MIRROR("国内镜像", "清华 TUNA · npmmirror · 腾讯云 · Ubuntu 国内镜像"),
 }
 
 /** 用户取消了下载。 */
@@ -28,12 +30,19 @@ class DownloadCancelled(message: String) : Exception(message)
  * 构建环境在线下载器：下载 → 解压 → 静默落位 `files/sdk/`，完成即可用。
  *
  * - 每类组件给出**官方源 + 国内镜像**两个候选，按所选源排序、失败自动回退；
+ *   Linux 环境（rootfs）额外支持在「构建环境」页点选**首选源**、手动输入
+ *   **自定义源**（完整 tar.gz 地址，优先于全部内置源，见 [RootfsManager.ROOTFS_MIRRORS]）；
+ * - [EnvKind.LINUX] 由 [RootfsManager.install] 落地（rootfs + proot 三件套 + 首启配置），
+ *   其余组件走本类的「下载 → 解压 → [BuildEnvironment.placeExtracted]」通用管线；
  * - 进度按下载/解压字节回报，支持取消（[cancel]）。
  */
 object EnvDownloader {
 
     /** 一个候选下载源。 */
-    data class Source(val label: String, val url: String)
+    data class Source(
+        val label: String,
+        val url: String,
+    )
 
     @Volatile
     private var cancelled = false
@@ -49,8 +58,80 @@ object EnvDownloader {
         return if (abi.startsWith("arm64") || abi.startsWith("aarch64")) "aarch64" else "x64"
     }
 
-    /** 候选地址：所选源在前、另一源兜底（URL 相同则去重）。 */
-    fun candidateSources(kind: EnvKind, source: EnvSource, arch: String): List<Source> {
+    /**
+     * 候选地址（Linux rootfs 含首选源 / 自定义源）。
+     *
+     * 排序规则（[EnvKind.LINUX]）：自定义源 → 首选内置源 → 其余内置源（按 [EnvSource] 的
+     * 官方/国内偏好分组，组内保持 [RootfsManager.ROOTFS_MIRRORS] 顺序），按 URL 去重。
+     * 其余组件仍是「官方 + 国内镜像」两候选，只按 [EnvSource] 排序。
+     *
+     * @param custom 手动输入的自定义源（基址或完整 `.tar.gz/.zip` 地址；null/空忽略）
+     * @param preferredId 首选内置源 id（[RootfsManager.Mirror.id]；不匹配任何内置源时忽略）
+     */
+    fun candidateSources(
+        kind: EnvKind,
+        source: EnvSource,
+        arch: String,
+        custom: String?,
+        preferredId: String?,
+    ): List<Source> {
+        if (kind == EnvKind.LINUX) {
+            return linuxCandidates(source, arch, custom, preferredId)
+        }
+        return pairCandidateSources(kind, source, arch)
+    }
+
+    /**
+     * Linux rootfs 候选：自定义源 → 首选内置源 → 其余内置源（按 [EnvSource] 的官方/国内
+     * 偏好分组，组内保持 [RootfsManager.ROOTFS_MIRRORS] 顺序），最后按 URL 去重。
+     */
+    private fun linuxCandidates(
+        source: EnvSource,
+        arch: String,
+        custom: String?,
+        preferredId: String?,
+    ): List<Source> {
+        val file = RootfsManager.rootfsFileName(arch)
+        val list = mutableListOf<Source>()
+        custom?.takeIf { it.isNotBlank() }?.let { input ->
+            // 自定义源 = 自托管 ubuntu-base tar.gz，优先于全部内置源
+            list += Source("自定义源", resolveCustomUrl(input, file.removeSuffix(".tar.gz")))
+        }
+        val domesticFirst = source == EnvSource.MIRROR
+        val preferred = RootfsManager.ROOTFS_MIRRORS.firstOrNull { it.id == preferredId }
+        val rest = RootfsManager.ROOTFS_MIRRORS
+            .filter { it.id != preferredId }
+            .sortedBy { it.domestic != domesticFirst } // sortedBy 稳定：组内保原序
+        (listOfNotNull(preferred) + rest).forEach { mirror ->
+            list += Source(mirror.label, "${mirror.base}/releases/24.04/release/$file")
+        }
+        return list.distinctBy { it.url }
+    }
+
+    /**
+     * 自定义源解析：完整包地址（`.tar.gz` / `.zip` 结尾）原样用；
+     * 否则当作基址，补上 `/<包文件名>`（与内置源同一拼接规则）。
+     */
+    fun resolveCustomUrl(input: String, fileStem: String): String {
+        val trimmed = input.trim().trimEnd('/')
+        return if (trimmed.endsWith(".tar.gz") || trimmed.endsWith(".zip")) {
+            trimmed
+        } else {
+            "$trimmed/$fileStem.tar.gz"
+        }
+    }
+
+    /**
+     * 候选地址：所选源在前、另一源兜底（URL 相同则去重）。
+     *
+     * Linux 环境会给出**全部内置镜像**（多源自动回退），首选源 / 手动输入的自定义源
+     * 走 5 参重载；本方法等价于「不指定首选与自定义」的调用。
+     */
+    fun candidateSources(kind: EnvKind, source: EnvSource, arch: String): List<Source> =
+        candidateSources(kind, source, arch, custom = null, preferredId = null)
+
+    /** 「官方 + 国内镜像」两候选的排序（[EnvKind.LINUX] 已在入口分流，不走这里）。 */
+    private fun pairCandidateSources(kind: EnvKind, source: EnvSource, arch: String): List<Source> {
         val nodeArch = if (arch == "aarch64") "arm64" else "x64"
         val (official, mirror) = when (kind) {
             EnvKind.JDK -> {
@@ -68,6 +149,7 @@ object EnvDownloader {
                 val url = "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
                 Source("dl.google.com", url) to Source("dl.google.com", url)
             }
+            EnvKind.LINUX -> error("LINUX 已在 candidateSources 入口分流到 linuxCandidates")
         }
         val ordered = if (source == EnvSource.MIRROR) listOf(mirror, official) else listOf(official, mirror)
         return ordered.distinctBy { it.url }
@@ -75,6 +157,9 @@ object EnvDownloader {
 
     /**
      * 下载并安装 [kind] 组件（Android SDK 请用 [installSdk]），完成后即可用。
+     *
+     * 顺序：[EnvKind.LINUX] 转交 [RootfsManager.install]（rootfs + proot 三件套 +
+     * 首启配置，多镜像自动回退）；其余组件走在线两候选，逐个回退。
      *
      * @param onStage 阶段文案（下载源 / 解压 …）
      * @param onProgress 0..1；-1 表示不确定进度
@@ -88,11 +173,23 @@ object EnvDownloader {
         onProgress: (Float) -> Unit = {},
     ): String = withContext(Dispatchers.IO) {
         cancelled = false
-        val sdk = BuildEnvironment.sdkDir(context)
-        if (!sdk.isDirectory && !sdk.mkdirs()) throw IOException("无法创建目录：${sdk.absolutePath}")
+
+        // 1) Linux 环境（rootfs + proot + 首启配置）由 RootfsManager 专属管线安装，
+        //    不走下面通用的「下载单包 → 解压落位 sdk」流程
+        if (kind == EnvKind.LINUX) {
+            return@withContext RootfsManager.install(
+                context = context,
+                source = source,
+                onStage = onStage,
+                onProgress = onProgress,
+            )
+        }
+
         val cache = File(context.cacheDir, "envdl").apply { mkdirs() }
         val candidates = candidateSources(kind, source, primaryArch())
         val failures = mutableListOf<String>()
+
+        // 2) 在线镜像：按序逐个回退（每个候选都是单文件包）
         candidates.forEachIndexed { index, cand ->
             if (cancelled) throw DownloadCancelled("已取消下载")
             val suffix = if (cand.url.endsWith(".zip")) ".zip" else ".tar.gz"
@@ -105,22 +202,13 @@ object EnvDownloader {
                 if (cancelled) throw DownloadCancelled("已取消下载")
                 onStage("正在解压 ${kind.title} …")
                 onProgress(-1f)
-                val tmp = File(sdk, ".dl_${kind.name.lowercase()}_${System.nanoTime()}")
-                if (!tmp.mkdirs() && !tmp.isDirectory) throw IOException("无法创建临时目录：${tmp.absolutePath}")
-                try {
-                    archive.inputStream().use { input ->
-                        ArchiveExtractor.extract(input, tmp, archive.length()) { p ->
-                            onProgress((p * 0.9f + 0.05f).coerceIn(0f, 0.99f))
-                        }
-                    }
-                    onProgress(0.99f)
-                    // SDK 先只并入 cmdline-tools（此时结构尚不完整），由 installSdk 补齐平台组件
-                    val target = BuildEnvironment.placeExtracted(context, kind, tmp, requireReady = kind != EnvKind.SDK)
-                    onProgress(1f)
-                    return@withContext target
-                } finally {
-                    runCatching { tmp.deleteRecursively() }
-                }
+                return@withContext extractAndPlace(
+                    context,
+                    kind,
+                    archive.inputStream(),
+                    archive.length(),
+                    onProgress,
+                )
             } catch (c: DownloadCancelled) {
                 throw c
             } catch (t: Throwable) {
@@ -129,15 +217,49 @@ object EnvDownloader {
                 runCatching { archive.delete() }
             }
         }
-        throw IllegalStateException("下载失败（已尝试 ${candidates.size} 个源）：${failures.joinToString("；")}")
+        throw IllegalStateException("已尝试 ${failures.size} 个来源均失败：${failures.joinToString("；")}")
+    }
+
+    /**
+     * 解压 [input] 到临时目录并落位 `files/sdk/<kind>`（在线下载与 APK 内置包共用）。
+     *
+     * 临时目录无论成败都会清理；进度按 0.05..0.99 换算，落位完成置 1。
+     *
+     * @param totalBytes 压缩包字节数（内置包按流式读取传 0，进度只到条目粒度）
+     */
+    private suspend fun extractAndPlace(
+        context: Context,
+        kind: EnvKind,
+        input: InputStream,
+        totalBytes: Long,
+        onProgress: (Float) -> Unit,
+    ): String {
+        val sdk = BuildEnvironment.sdkDir(context)
+        if (!sdk.isDirectory && !sdk.mkdirs()) throw IOException("无法创建目录：${sdk.absolutePath}")
+        val tmp = File(sdk, ".dl_${kind.name.lowercase()}_${System.nanoTime()}")
+        if (!tmp.mkdirs() && !tmp.isDirectory) throw IOException("无法创建临时目录：${tmp.absolutePath}")
+        try {
+            input.use { stream ->
+                ArchiveExtractor.extract(stream, tmp, totalBytes) { p ->
+                    onProgress((p * 0.9f + 0.05f).coerceIn(0f, 0.99f))
+                }
+            }
+            onProgress(0.99f)
+            // SDK 先只并入 cmdline-tools（此时结构尚不完整），由 installSdk 补齐平台组件
+            val target = BuildEnvironment.placeExtracted(context, kind, tmp, requireReady = kind != EnvKind.SDK)
+            onProgress(1f)
+            return target
+        } finally {
+            runCatching { tmp.deleteRecursively() }
+        }
     }
 
     // ------------------------------------------------------------------
     // 下载
     // ------------------------------------------------------------------
 
-    /** 流式下载到 [dest]，按已收字节回调进度（≥120ms 节流）。 */
-    private fun download(url: String, dest: File, onBytes: (Long, Long) -> Unit) {
+    /** 流式下载到 [dest]，按已收字节回调进度（≥120ms 节流）。internal = 供 RootfsManager 复用。 */
+    internal fun download(url: String, dest: File, onBytes: (Long, Long) -> Unit) {
         var conn: HttpURLConnection? = null
         try {
             val connection = URL(url).openConnection() as HttpURLConnection
@@ -174,6 +296,11 @@ object EnvDownloader {
         }
     }
 
+    /** 用户点了「取消」（[RootfsManager] 的多段下载也靠它统一中断）。 */
+    internal fun throwIfCancelled() {
+        if (cancelled) throw DownloadCancelled("已取消下载")
+    }
+
     // ------------------------------------------------------------------
     // Android SDK 在线安装（cmdline-tools → sdkmanager 平台组件）
     // ------------------------------------------------------------------
@@ -203,14 +330,22 @@ object EnvDownloader {
             ?: throw IllegalStateException("未找到 sdkmanager（cmdline-tools 结构异常）")
         writeLicenses(File(sdk, "licenses"))
 
-        // 2) sdkmanager 在线安装平台组件；向 stdin 持续写 y 兜底交互确认
+        // 2) sdkmanager 是 glibc ELF + sh 脚本 → 必须在 proot 内跑：
+        //    Linux 环境未就绪先补装（rootfs + proot 三件套），就绪后命令包进 guest 的 /bin/sh
+        if (!Proot.isReady(context)) {
+            onStage("安装 Linux 环境（proot + Ubuntu rootfs，sdkmanager 依赖）…")
+            RootfsManager.install(context, source, onStage, onProgress)
+        }
+        if (cancelled) throw DownloadCancelled("已取消下载")
+
+        // 3) sdkmanager 在线安装平台组件；向 stdin 持续写 y 兜底交互确认
         onStage("正在安装 platform-tools / android-35 / build-tools …")
         onProgress(-1f)
         val pkgs = "\"platform-tools\" \"platforms;android-35\" \"build-tools;35.0.0\""
         val cmd = "chmod +x '${sdkmanager.absolutePath}' 2>/dev/null; " +
             "'${sdkmanager.absolutePath}' --sdk_root='${sdk.absolutePath}' $pkgs"
         val env = arrayOf(
-            "PATH=${BuildEnvironment.binDir(context).absolutePath}:/system/bin:/system/xbin:/vendor/bin",
+            "PATH=${Proot.pathFor(BuildEnvironment.binDir(context).absolutePath)}",
             "HOME=${context.filesDir.absolutePath}",
             "TMPDIR=${BuildEnvironment.tmpDir(context).absolutePath}",
             "JAVA_HOME=$jdk",
@@ -218,11 +353,12 @@ object EnvDownloader {
             "ANDROID_SDK_ROOT=${sdk.absolutePath}",
             "LANG=C.UTF-8",
             "SHELL=/system/bin/sh",
-        )
+        ) + Proot.envEntries(context)
         val exit = CompletableDeferred<Int>()
         val tail = StringBuilder()
         val percent = Regex("""(\d+)%""")
-        val pid = CliNative.exec(arrayOf("sh", "-c", cmd), sdk.absolutePath, env, object : CliCallback {
+        val argv = Proot.wrap(context, arrayOf("/bin/sh", "-c", cmd), sdk.absolutePath)
+        val pid = CliNative.exec(argv, sdk.absolutePath, env, object : CliCallback {
             override fun onOutput(pid: Int, stream: Int, data: ByteArray?) {
                 if (data == null) return
                 val text = String(data, Charsets.UTF_8)

@@ -11,3 +11,9 @@ captures/
 .externalNativeBuild/
 .cxx/
 .DS_Store
+# glibc 运行时打包产物与下载缓存（tools/glibc-runtime/build.sh 生成）
+tools/glibc-runtime/dist/
+tools/glibc-runtime/.cache/
+# glibc 运行时内置包（app/build.gradle.kts 的 copyGlibcAssets 从 dist/ 拷入，不提交二进制；
+# 要随仓库固定分发可 git add -f app/src/main/assets/glibc/）
+app/src/main/assets/glibc/

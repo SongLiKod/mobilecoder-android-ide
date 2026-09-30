@@ -96,6 +96,18 @@ class AppPreferences(
     suspend fun envDownloadSource(): String = get(KEY_ENV_SOURCE) ?: "official"
     suspend fun setEnvDownloadSource(value: String) = set(KEY_ENV_SOURCE, value)
 
+    /**
+     * Linux 环境 rootfs**自定义镜像源**（手动输入）：基址或完整 `.tar.gz` 地址。
+     * 非空时作为第 1 优先候选，失败自动回退内置默认源；空 = 只用内置源。
+     * 旧的 `glibc_*` 键作废（rootfs 与旧运行时布局不兼容，不迁移）。
+     */
+    suspend fun linuxCustomSource(): String = get(KEY_LINUX_CUSTOM_SOURCE) ?: ""
+    suspend fun setLinuxCustomSource(value: String) = set(KEY_LINUX_CUSTOM_SOURCE, value.trim())
+
+    /** Linux 环境 rootfs **首选内置源**（`RootfsManager.ROOTFS_MIRRORS` 的 id；空 = 按官方/国内镜像偏好排序）。 */
+    suspend fun linuxPreferredSource(): String = get(KEY_LINUX_PREFERRED_SOURCE) ?: ""
+    suspend fun setLinuxPreferredSource(value: String) = set(KEY_LINUX_PREFERRED_SOURCE, value)
+
     suspend fun jdkPath(): String = get(KEY_JDK_PATH) ?: ""
     suspend fun setJdkPath(value: String) = set(KEY_JDK_PATH, value)
 
@@ -159,6 +171,8 @@ class AppPreferences(
         private val KEY_BUILD_VARIANT = stringPreferencesKey("build_variant")
         private val KEY_BUILD_MEM = intPreferencesKey("build_memory_limit_mb")
         private val KEY_ENV_SOURCE = stringPreferencesKey("env_download_source")
+        private val KEY_LINUX_CUSTOM_SOURCE = stringPreferencesKey("linux_custom_source")
+        private val KEY_LINUX_PREFERRED_SOURCE = stringPreferencesKey("linux_preferred_source")
         private val KEY_JDK_PATH = stringPreferencesKey("jdk_path")
         private val KEY_GRADLE_PATH = stringPreferencesKey("gradle_path")
         private val KEY_AI_BASE_URL = stringPreferencesKey("ai_base_url")

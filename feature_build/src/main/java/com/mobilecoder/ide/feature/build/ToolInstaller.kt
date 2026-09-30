@@ -1,6 +1,7 @@
 package com.mobilecoder.ide.feature.build
 
 import android.content.Context
+import com.mobilecoder.ide.core.common.linux.Proot
 import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import java.io.File
@@ -19,6 +20,11 @@ import kotlinx.coroutines.withContext
  *  4. 修正 npm 生成脚本的 shebang（Android 无 `/bin/sh` 与 `/usr/bin/env`）并补执行位——
  *     所以装任意包都走这里，**不要**绕过本类裸用终端 `npm i -g`（装出来跑不起来）；
  *  5. 校验 `files/lib/node_modules/<包>` 落位，输出可用命令。
+ *
+ * 第 1 步之后还有一步 [ensureLinux]：node / npm / java 全是 glibc ELF，Android 内核
+ * exec 时找不到 `/lib/ld-linux-aarch64.so.1` → ENOENT(2)、退出码 127。这里补装
+ * **Linux 环境**（Ubuntu rootfs + proot，见 `RootfsManager`），后面每条命令都包进
+ * proot 执行，否则必然拿到一个看不出原因的 127。
  *
  * 其余子命令：[uninstall] / [update] / [search] / [listLines]，均以 npm 为后端。
  * 取消（Ctrl+C / 面板停止）通过 [CompletableDeferred] 取消挂起实现，并在 finally 中
@@ -170,16 +176,20 @@ object ToolInstaller {
             emit("Node.js 已就绪：${exec?.absolutePath ?: File(BuildEnvironment.sdkDir(context), "node").absolutePath}")
         }
 
-        // 1.5) 执行探测：上面只判断「文件在不在」，这里真跑一次，
-        //      否则 npm 跑到最后只给一个看不出原因的 127。
+        // 1.4) Linux 环境（Ubuntu rootfs + proot）：node / npm / java 全是 glibc ELF，
+        //      内核 exec 时找不到 /lib/ld-linux-aarch64.so.1 → ENOENT(2)、退出码 127。
+        //      必须先把命令通道补上，否则第 1.5 步探测必然 fail。
+        if (!ensureLinux(context, source, emit, onStage)) return@withContext 1
+
+        // 1.5) 执行探测：上面只判断「文件在不在」，这里真跑一次（Linux 环境就绪时
+        //      在 proot 内跑），否则 npm 跑到最后只给一个看不出原因的 127。
         //      ok = 继续；skip = 没探成（并发上限），不拦；fail = 真起不来
         val probe = probeNode(context)
         if (probe.startsWith("fail")) {
             emit("[ERROR] node 无法执行：${probe.removePrefix("fail ").trim()}")
-            emit("       文件存在 ≠ 能启动：官方 nodejs.org 构建链的是 glibc，Android 上没有")
-            emit("       /lib/ld-linux-aarch64.so.1，内核在 exec 阶段就失败；执行位/SELinux、")
-            emit("       架构不匹配也会是同一副症状。上面一行就是内核给出的具体原因。")
-            emit("       自查：终端里执行 \$HOME/sdk/node/bin/node -v")
+            emit("       Linux 环境（proot + Ubuntu rootfs）已装好仍起不来 → 执行位 / SELinux /")
+            emit("       架构不匹配也会是同一副症状。请先在「构建环境」页确认「Linux 环境」就绪，")
+            emit("       再自查：终端里执行 \$HOME/sdk/node/bin/node -v")
             return@withContext 1
         }
 
@@ -313,28 +323,82 @@ object ToolInstaller {
     /**
      * 子进程环境：`HOME` 指向 files，npm 因此自动读 `files/.npmrc`；
      * `PATH` 首位是 `files/bin`（node / npm / npx 入口都在这里）。
+     *
+     * 另附 [Proot.envEntries]（Linux 环境就绪时才非空）：`LD_LIBRARY_PATH`（proot
+     * 找 libtalloc）、`PROOT_LOADER` / `PROOT_LOADER_32`（Termux proot 启动必须）、
+     * `PROOT_TMP_DIR`（Android 无 /tmp）。它们只含 proot 专用 soname，与 bionic
+     * 的 soname 不同名，同一份 PATH 上的 bionic 程序不受影响。
      */
     private fun execEnv(context: Context): Array<String> {
         val files = context.filesDir
         return arrayOf(
             "HOME=${files.absolutePath}",
             "TMPDIR=${BuildEnvironment.tmpDir(context).absolutePath}",
-            "PATH=${BuildEnvironment.binDir(context).absolutePath}:/system/bin:/system/xbin:/vendor/bin",
+            "PATH=${Proot.pathFor(BuildEnvironment.binDir(context).absolutePath)}",
             "LANG=C.UTF-8",
             "SHELL=/system/bin/sh",
-        )
+        ) + Proot.envEntries(context)
     }
 
     /**
-     * 真跑一次 `node --version`，**与 npm 走完全相同的 exec 路径**，
-     * 返回：
+     * 确保 node 能被 exec：安装 **Linux 环境**（Ubuntu rootfs + proot）。
+     * node / npm / java 全是 glibc ELF，没有 proot 时内核 exec 阶段就
+     * ENOENT(2)、退出码 127；装好后命令统一包进 proot，由 guest rootfs 提供
+     * `/lib/ld-linux-aarch64.so.1`。
+     *
+     * @return true = 可以继续探测 node；false = 安装失败（错误信息已 emit）
+     */
+    private suspend fun ensureLinux(
+        context: Context,
+        source: EnvSource,
+        emit: (String) -> Unit,
+        onStage: (String) -> Unit,
+    ): Boolean {
+        if (Proot.isReady(context)) return true
+        emit("Linux 环境未就绪 → 安装（Ubuntu rootfs + proot；glibc 程序必须在其中运行）…")
+        val failure = runCatching {
+            EnvDownloader.install(context, EnvKind.LINUX, source, onStage = { onStage(it) })
+        }.exceptionOrNull()
+        if (failure is DownloadCancelled) throw failure
+        if (failure != null) {
+            emit("[ERROR] Linux 环境安装失败：${failure.message}")
+            emit("       rootfs 源：Ubuntu 官方 cdimage / 清华 TUNA（ubuntu-base 约 30MB）；")
+            emit("       proot 三件套：Termux 官方仓库（固定地址，约 140KB）。")
+            emit("       全部失败通常是网络不可达，可切换官方源/国内镜像重试。")
+            emit("       自救：「构建环境」→ Linux 环境 → 导入本地 ubuntu-base-*.tar.gz（官方 cdimage 可下载）。")
+            return false
+        }
+        emit("Linux 环境已安装：${Proot.rootfsDir(context).absolutePath}")
+        return true
+    }
+
+    /**
+     * 构建前置（BuildRunner 用）：确保 Linux 环境就绪 —— JDK（Temurin）/ Gradle /
+     * node 全是 glibc ELF，没有 proot 时 `java` 同样会在 exec 阶段 127。
+     *
+     * 与 `apt tools install` 同一条安装路径（[EnvDownloader.install] → [RootfsManager]），
+     * 不依赖 node 存在。
+     *
+     * @return true = 已就绪（或安装成功）
+     */
+    suspend fun ensureLinux(
+        context: Context,
+        source: EnvSource,
+        emit: (String) -> Unit,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (Proot.isReady(context)) return@withContext true
+        ensureLinux(context, source, emit, onStage = { emit(it) })
+    }
+
+    /**
+     * 真跑一次 `node --version`，**与 npm 走完全相同的 exec 路径**（Linux 环境就绪时
+     * 同样在 proot 内跑），返回：
      *  - `ok <版本>`          —— 能启动；
      *  - `fail <原因>`        —— 启动失败，原因取自 stderr（含内核 errno 文案）；
      *  - `skip <原因>`        —— 没探成（并发上限等），不代表 node 坏了。
      *
-     * 为什么必须单独探：[nodeReady] 只看 ELF / 文件存在性。官方 nodejs.org 的
-     * linux 构建链的是 glibc，同样「存在 + 有执行位」，但内核解析
-     * `/lib/ld-linux-aarch64.so.1` 时就 ENOENT。不先探一次，就得等
+     * 为什么必须单独探：[nodeReady] 只看 ELF / 文件存在性，探不出「proot 链路坏了」
+     * （缺 loader、缺 libtalloc、SELinux 拒执行位）。不先探一次，就得等
      * `npm i -g` 跑完才拿到一个孤零零的 127，看不出任何原因。
      */
     private suspend fun probeNode(context: Context): String {
@@ -343,8 +407,9 @@ object ToolInstaller {
             ?: return "fail 未找到可执行的 node（files/bin/node 与 files/sdk/node/bin/node 均不可用）"
         val first = AtomicReference<String>()
         val exit = CompletableDeferred<Int>()
+        val argv = Proot.wrap(context, arrayOf(node.absolutePath, "--version"), files.absolutePath)
         val pid = CliNative.exec(
-            arrayOf(node.absolutePath, "--version"),
+            argv,
             files.absolutePath,
             execEnv(context),
             object : CliCallback {
@@ -406,7 +471,7 @@ object ToolInstaller {
         val files = context.filesDir
         val node = BuildEnvironment.resolveNodeExec(files)
         val npmCli = BuildEnvironment.findNpmCli(files)
-        val argv = when {
+        val rawArgv = when {
             node != null && npmCli != null ->
                 arrayOf(node.absolutePath, npmCli.absolutePath) + args.toTypedArray()
             File(BuildEnvironment.binDir(context), "npm").exists() ->
@@ -417,6 +482,9 @@ object ToolInstaller {
             }
         }
         if (node != null) emit("node → ${node.absolutePath}")
+        // node 是 glibc ELF：Linux 环境就绪时整条命令包进 proot 跑（未就绪原样执行，
+        // 由上面的 ensureLinux 保证在到达这里之前已装好）
+        val argv = Proot.wrap(context, rawArgv, files.absolutePath)
         val exit = CompletableDeferred<Int>()
         val pid = CliNative.exec(argv, files.absolutePath, execEnv(context), object : CliCallback {
             override fun onOutput(pid: Int, stream: Int, data: ByteArray?) {
@@ -454,13 +522,17 @@ object ToolInstaller {
             val rc = File(context.filesDir, ".npmrc")
             val old = if (rc.exists()) rc.readText() else ""
             val managed = { line: String ->
-                line.startsWith("prefix=") || line.startsWith("fund=") || line.startsWith("audit=")
+                line.startsWith("prefix=") || line.startsWith("fund=") ||
+                    line.startsWith("audit=") || line.startsWith("script-shell=")
             }
             val kept = old.lines().filter { it.isNotBlank() && !managed(it) }
             val lines = kept + listOf(
                 "prefix=${context.filesDir.absolutePath}",
                 "fund=false",
                 "audit=false",
+                // npm 生命周期脚本默认用 /bin/sh，Android 上是 /system/bin/sh，
+                // 不写死的话 `npm i -g` 里跑 postinstall 直接 "No such file or directory"
+                "script-shell=/system/bin/sh",
             )
             rc.writeText(lines.joinToString("\n") + "\n")
         }

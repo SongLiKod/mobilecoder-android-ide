@@ -18,15 +18,18 @@ public final class TerminalNative {
     }
 
     /**
-     * 创建 PTY 会话并拉起 /system/bin/sh。
+     * 创建 PTY 会话并拉起 shell。
      *
      * @param cwd      工作目录（可为 null，表示继承）
      * @param cols     列数
      * @param rows     行数
      * @param callback 输出/退出回调
+     * @param argv     启动命令（`argv[0]` 必须是绝对路径，如 proot + guest bash）；
+     *                 null / 空数组 → 回退 `/system/bin/sh`（bionic 直启，
+     *                 Linux 环境未就绪时的降级路径）
      * @return 会话 id（>=1），失败返回 -1
      */
-    public static native int create(String cwd, int cols, int rows, TerminalCallback callback);
+    public static native int create(String cwd, int cols, int rows, TerminalCallback callback, String[] argv);
 
     /** 向终端写入数据（键盘输入），返回写入字节数，失败 -1。 */
     public static native int write(int id, byte[] data);

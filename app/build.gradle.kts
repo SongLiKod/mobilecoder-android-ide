@@ -58,6 +58,11 @@ android {
     }
 
     packaging {
+        // 保持 legacy 打包：.so 解压成 nativeLibraryDir 里的真实文件（历史打包形态，
+        // 不引入变量；proot 执行通道不依赖 .so 解压，这里仅维持现状）。
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
             excludes += "/META-INF/INDEX.LIST"
             excludes += "/META-INF/*.kotlin_module"

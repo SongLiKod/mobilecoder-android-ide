@@ -8,13 +8,16 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
+import org.tukaani.xz.XZInputStream
 
 /**
- * 通用归档解压（zip / tar.gz）：「本地导入」与「在线下载」共用。
+ * 通用归档解压（zip / tar.gz / .deb）：「本地导入」与「在线下载」共用。
  *
  * - **路径穿越防护**：每个条目 canonical 化后必须位于目标目录内（zip slip / tar slip）；
  * - **tar.gz 支持**：GNU 长文件名（'L'/'K'）、pax 扩展头（'x'）、目录/普通文件/软链接/硬链接、权限位；
- * - **格式嗅探**：按流首部识别（gzip = 0x1f8b，zip = 'PK'），与文件名无关。
+ * - **格式嗅探**：按流首部识别（gzip = 0x1f8b，zip = 'PK'），与文件名无关；
+ * - **.deb 支持**（[extractDeb]）：ar 归档 + `data.tar[.xz|.gz]` 成员，安装 proot 三件套
+ *   （Termux 官方仓库 .deb）时用。
  */
 internal object ArchiveExtractor {
 
@@ -53,6 +56,115 @@ internal object ArchiveExtractor {
             isZip -> extractZip(buffered, dest, total, onProgress)
             isGzip -> extractTar(GZIPInputStream(buffered), dest, total, onProgress)
             else -> throw IOException("无法识别的压缩格式（仅支持 zip / tar.gz）")
+        }
+    }
+
+    /**
+     * 解压 Debian 软件包（`.deb` = `ar` 归档）的 `data.tar[.xz|.gz]` 成员到 [dest]。
+     *
+     * 用于 Linux 环境在线安装：proot / libtalloc / libandroid-shmem 三个 Termux `.deb`
+     * 下载后用本方法解包，再由 `RootfsManager.placeProotFiles` 按归一化路径落位到 rootfs。
+     *
+     * @param totalBytes 进度换算用（.deb 大小，未知传 0）
+     * @return `data.tar*` 的解压结果
+     */
+    fun extractDeb(
+        input: InputStream,
+        dest: File,
+        totalBytes: Long = 0L,
+        onProgress: (Float) -> Unit = {},
+    ): Result {
+        if (!dest.isDirectory && !dest.mkdirs()) {
+            throw IOException("无法创建目录：${dest.absolutePath}")
+        }
+        val buffered = if (input.markSupported()) input else BufferedInputStream(input)
+        // 读掉 8 字节 ar 魔数（'!<arch>\n'），随后的成员头紧跟其后 —— 不可 reset 回 0
+        val magic = ByteArray(8)
+        var got = 0
+        while (got < magic.size) {
+            val n = buffered.read(magic, got, magic.size - got)
+            if (n < 0) break
+            got += n
+        }
+        if (got < 8 || !magic.contentEquals("!<arch>\n".toByteArray(Charsets.US_ASCII))) {
+            throw IOException("不是有效的 .deb（缺少 ar 魔数 '!<arch>'）")
+        }
+        val total = totalBytes.coerceAtLeast(1L)
+        // 逐个读 60 字节 ar 成员头，定位 data.tar*；其它成员（debian-binary / control.tar.*）跳过
+        val header = ByteArray(60)
+        var pos = 8L // 已过 ar 魔数
+        while (true) {
+            var read = 0
+            while (read < header.size) {
+                val n = buffered.read(header, read, header.size - read)
+                if (n < 0) break
+                read += n
+            }
+            if (read < header.size) throw IOException(".deb 里没有 data.tar* 成员（ar 头不完整：偏移 $pos 读到 $read 字节）")
+            pos += 60
+            val name = arField(header, 0, 16).trimEnd('/', ' ')
+            val size = arField(header, 48, 10).toLongOrNull()
+                ?: throw IOException("ar 成员头损坏（偏移 ${pos - 60}）：${String(header, Charsets.US_ASCII)}")
+            if (name.startsWith("data.tar")) {
+                val data = LimitedInputStream(buffered, size)
+                val stream = when {
+                    name.endsWith(".gz") -> GZIPInputStream(data)
+                    name.endsWith(".xz") -> XZInputStream(data)
+                    name.endsWith(".zst") || name.endsWith(".zstd") ->
+                        throw IOException("data.tar.zst 暂不支持（Debian 13 的 .deb 为 xz）：$name")
+                    else -> data
+                }
+                return extractTar(stream, dest, total, onProgress)
+            }
+            var skip = size
+            while (skip > 0) {
+                val n = buffered.skip(skip)
+                if (n <= 0) {
+                    if (buffered.read() < 0) {
+                        throw IOException(
+                            ".deb 里没有 data.tar* 成员（跳过成员 '$name' 数据时提前 EOF：" +
+                                "偏移 $pos 应再跳 $skip 字节）",
+                        )
+                    }
+                    skip--
+                } else {
+                    skip -= n
+                }
+            }
+            pos += size
+            if (size % 2 == 1L) {
+                if (buffered.read() < 0) {
+                    throw IOException(".deb 里没有 data.tar* 成员（成员 '$name' 奇数字节缺对齐补位：偏移 $pos）")
+                }
+                pos++
+            }
+        }
+    }
+
+    /** 取 ar 头中 [off] 起 [len] 字节的 ASCII 字段（NUL/空格填充后裁剪），转十进制。 */
+    private fun arField(header: ByteArray, off: Int, len: Int): String {
+        var end = off
+        val limit = off + len
+        while (end < limit && header[end].toInt() != 0 && header[end] != ' '.code.toByte()) end++
+        return String(header, off, end - off, Charsets.US_ASCII)
+    }
+
+    /** 只透传前 [remaining] 字节的 ar 成员视图；不关闭底层流（成员后可能还有数据）。 */
+    private class LimitedInputStream(private val src: InputStream, remaining: Long) : InputStream() {
+        private var remaining = remaining
+
+        override fun read(): Int {
+            if (remaining <= 0) return -1
+            val b = src.read()
+            if (b >= 0) remaining--
+            return b
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (remaining <= 0) return -1
+            val n = src.read(b, off, minOf(len.toLong(), remaining).toInt())
+            if (n > 0) remaining -= n
+            return n
         }
     }
 
@@ -151,12 +263,15 @@ internal object ArchiveExtractor {
                     continue
                 }
             }
-            val rawName = longName ?: paxPath ?: if (prefix.isNotEmpty()) "$prefix/$name" else name
+            val rawNameOrig = longName ?: paxPath ?: if (prefix.isNotEmpty()) "$prefix/$name" else name
             val rawLink = longLink ?: paxLink ?: linkName
             longName = null
             longLink = null
             paxPath = null
             paxLink = null
+            // Debian data.tar 的条目带 "./" 前缀（首条目常是根目录 "./"）：归一成相对路径，
+            // 根条目变空串 → 走下面的空名跳过分支（不进 safeResolve，否则会误报穿越）
+            val rawName = if (rawNameOrig == ".") "" else rawNameOrig.removePrefix("./")
             if (rawName.isEmpty()) {
                 if (size > 0) skipFully(gzip, size)
                 skipPadding(gzip, size)

@@ -120,6 +120,29 @@ object AptCli {
             .distinct()
     }
 
+    /**
+     * Enter 时判断这行是否交给**进程内** CLI 执行（终端拦截器的 `accept` 二次校验）。
+     *
+     * 与 [isCliLine]（前缀缓冲阶段：只要命中就先吃进本地回显）不同，这里做的是
+     * **最终分流**：
+     *  - `apt` + 已注册子命令，或裸 `apt`（用法输出）→ true，进程内执行；
+     *  - `apt install curl` 这类**未注册**子命令 → false，回滚本地回显、整行交回
+     *    shell —— Linux 环境就绪时由 rootfs 里的**真 apt** 接管（终端就是完整
+     *    Linux 的关键一步），未就绪时由 `TerminalSession` 弹安装引导；
+     *  - 其余目标（如 `git`）仍按注册表的 [CliCommand.terminalIntercept] 判定。
+     *
+     * 纯字符串逻辑，JVM 单测可直接调用。
+     */
+    @Synchronized
+    fun isInProcessLine(line: String): Boolean {
+        bootstrap()
+        val tokens = tokenize(line.trim())
+        val first = tokens.firstOrNull() ?: return false
+        if (first != PREFIX) return registry[first]?.terminalIntercept == true
+        val sub = tokens.getOrNull(1) ?: return true
+        return registry.containsKey(sub)
+    }
+
     /** 当前是否空闲。 */
     val isIdle: Boolean get() = _running.value == null
 

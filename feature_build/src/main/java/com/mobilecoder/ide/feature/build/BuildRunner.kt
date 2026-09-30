@@ -5,6 +5,7 @@ import android.content.Context
 import android.util.Log
 import com.mobilecoder.ide.core.common.cli.CliCommand
 import com.mobilecoder.ide.core.common.cli.AptCli
+import com.mobilecoder.ide.core.common.linux.Proot
 import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
@@ -503,6 +504,30 @@ object BuildRunner {
                 "构建环境未就绪：缺少 Gradle 发行版。请在「构建环境」中在线下载，或导入 gradle-x.x-bin.zip",
             )
         }
+        // Linux 环境（Ubuntu rootfs + proot）：JDK（Temurin）/ Gradle / node 全是 glibc
+        // ELF，Android 没有 /lib/ld-linux-aarch64.so.1 → 不先装，java 会在 exec 阶段 127。
+        // 与 apt 链同一条安装路径：在线下载 rootfs + proot，装不上给自救提示。
+        if (!Proot.isReady(appContext)) {
+            _phase.value = "安装 Linux 环境"
+            append("Linux 环境未就绪 → 安装（Ubuntu rootfs + proot，约 35MB）…", BuildLogLevel.INFO)
+            val source = runCatching {
+                if (AppStorage.preferences.envDownloadSource() == "mirror") {
+                    EnvSource.MIRROR
+                } else {
+                    EnvSource.OFFICIAL
+                }
+            }.getOrDefault(EnvSource.OFFICIAL)
+            val ok = ToolInstaller.ensureLinux(appContext, source) {
+                append(it, BuildLogLevel.INFO)
+            }
+            if (!ok) {
+                return fail(
+                    task, startedAt,
+                    "构建环境未就绪：Linux 环境缺失（proot + Ubuntu rootfs，JDK / Gradle 在其中运行）。" +
+                        "请在「构建环境」页在线下载，或导入 ubuntu-base-*.tar.gz 后重试",
+                )
+            }
+        }
         // 内存上限落地：写入项目 gradle.properties（org.gradle.jvmargs），返回 MB 值
         val heapMb = syncGradleHeap(request.projectDir)
 
@@ -531,10 +556,15 @@ object BuildRunner {
         BuildForegroundService.startBuild(appContext, "Gradle ${tasks.last()} · ${task.projectPath.substringAfterLast('/')}")
         baselineUsedMb = systemUsedMb(appContext)
 
-        // ---- 5) 启动子进程 ------------------------------------------------
+        // ---- 5) 启动子进程（Linux 环境就绪 → 整条命令在 proot 内执行）----
         val exit = CompletableDeferred<Int>()
+        val execArgv = Proot.wrap(
+            appContext,
+            arrayOf("/bin/sh", "-c", cmd),
+            request.projectDir.absolutePath,
+        )
         val pid = CliNative.exec(
-            arrayOf("sh", "-c", cmd),
+            execArgv,
             request.projectDir.absolutePath,
             envArray,
             buildCallback(exit),
@@ -630,7 +660,9 @@ object BuildRunner {
         return arrayOf(
             "HOME=${files.absolutePath}",
             "TMPDIR=${BuildEnvironment.tmpDir(appContext).absolutePath}",
-            "PATH=${BuildEnvironment.binDir(appContext).absolutePath}:/system/bin:/system/xbin:/vendor/bin",
+            // guest 标准路径（/usr/bin 等）排在 bionic 前：proot 内拿到 Linux 工具链，
+            // rootfs 未装时这些目录不存在、PATH 自动跳过 → 仍是 /system/bin 兜底
+            "PATH=${Proot.pathFor(BuildEnvironment.binDir(appContext).absolutePath)}",
             "LANG=C.UTF-8",
             "LC_ALL=C.UTF-8",
             "SHELL=/system/bin/sh",
@@ -642,7 +674,9 @@ object BuildRunner {
             "MOBILECODER_GRADLE_HOME=${gradleHome.orEmpty()}",
             "GRADLE_OPTS=-Xmx${heapMb}m -Dorg.gradle.daemon=false",
             "JAVA_OPTS=-Dfile.encoding=UTF-8",
-        )
+            // proot 执行通道所需变量（LD_LIBRARY_PATH / PROOT_LOADER / PROOT_TMP_DIR），
+            // Linux 环境未就绪时为空数组，构建流程不依赖任何额外机制
+        ) + Proot.envEntries(appContext)
     }
 
     /**

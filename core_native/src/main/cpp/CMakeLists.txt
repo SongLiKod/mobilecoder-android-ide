@@ -127,3 +127,7 @@ target_link_libraries(mobilecoder PRIVATE
     z
     ${LOG_LIB}
 )
+
+# （原 mcexechook LD_PRELOAD 钩子已随 glibc 兼容方案移除：glibc 程序统一在
+#  proot 内运行，解释器由 guest rootfs 提供，不再需要 exec 前改写 PT_INTERP。）
+# ------------------------------------------------------------------

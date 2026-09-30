@@ -57,8 +57,12 @@ object NativeRuntime {
         val bin = File(files, "bin")
         listOf(bin, sdk).forEach { if (!it.exists()) it.mkdirs() }
 
+        // PATH：files/bin（node / npm 入口）→ guest 标准路径（rootfs 的 /usr/bin 等，
+        // Linux 环境装好后由 proot 看见）→ bionic 的 /system/bin（rootfs 未装时兜底，
+        // 不存在的目录在 PATH 搜索中自动跳过）
         val path = buildString {
             append(bin.absolutePath)
+            append(":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
             append(":/system/bin:/system/xbin:/vendor/bin")
         }
         val result = runCatching {
