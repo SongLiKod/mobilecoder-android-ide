@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        feature_terminal 自身需要的权限与组件（与 app/AndroidManifest.xml 中的声明一致，
+        manifest 合并后不会产生冲突；单独声明可让本模块在被单独引用时也可用）：
+        终端会话保活前台服务——切后台不冻结、任务/开发服务器不中断。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application>
+        <!--
+            终端保活前台服务：只要存在终端会话就常驻（「N 个会话运行中」低优先级通知），
+            全部会话关闭后自动 stopForeground/stopSelf。生命周期见 TerminalForegroundService。
+        -->
+        <service
+            android:name="com.mobilecoder.ide.feature.terminal.TerminalForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>
