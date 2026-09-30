@@ -2,6 +2,7 @@ package com.mobilecoder.ide.feature.build
 
 import android.content.Context
 import android.net.Uri
+import com.mobilecoder.ide.core.common.linux.Proot
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
 import com.mobilecoder.ide.core.storage.AppStorage
 import java.io.File
@@ -24,11 +25,13 @@ enum class EnvKind(val title: String) {
     NODE("Node.js"),
 
     /**
-     * glibc 运行时（`files/sdk/glibc`）。
-     * nodejs.org / Adoptium / gradle 官方包都是 glibc 程序，Android 只有 bionic，
-     * 内核 exec 时找不到 `/lib/ld-linux-aarch64.so.1` → ENOENT(2)、退出码 127。
+     * Linux 环境（Ubuntu 24.04 rootfs + proot，`files/linux`）。
+     * JDK / Gradle / node 全是 glibc ELF，Android 只有 bionic，内核 exec 时找不到
+     * `/lib/ld-linux-aarch64.so.1` → ENOENT(2)、退出码 127。装上它之后终端与构建
+     * 命令全部在 proot 内运行（见 `core_common/…/linux/Proot.kt`），同时终端变成
+     * 完整 Linux，`apt install` 可装任意软件包。
      */
-    GLIBC("glibc 运行时"),
+    LINUX("Linux 环境"),
 }
 
 /** 单项环境检测结果。 */
@@ -64,9 +67,6 @@ object BuildEnvironment {
 
     private const val TAG = "BuildEnvironment"
 
-    /** glibc 版 LD_PRELOAD 钩子在运行时包里的文件名（与 loader 同目录）。 */
-    private const val GLIBC_HOOK_NAME = "mcexechook-glibc.so"
-
     /** 最近一次体检结果（UI 订阅）。 */
     private val _status = MutableStateFlow<EnvStatus?>(null)
     val status: StateFlow<EnvStatus?> = _status.asStateFlow()
@@ -86,105 +86,6 @@ object BuildEnvironment {
 
     /** `files/bin` —— PATH 首位。 */
     fun binDir(context: Context): File = File(context.filesDir, "bin")
-
-    /** `files/sdk/glibc` —— glibc 运行时根目录（loader 与 libc 都在这里）。 */
-    fun glibcDir(context: Context): File = File(sdkDir(context), "glibc")
-
-    /**
-     * 定位 glibc loader（`ld-linux-aarch64.so.1` / `ld-linux-x86-64.so.2`）。
-     *
-     * 不写死路径：Debian 包解出来是 `lib/<三元组>/ld-linux-*.so.1`，
-     * 自己打的包是 `lib/ld-linux-aarch64.so.1`，两种布局都要认。
-     * 符号链接会解析到真实 ELF 再判断（包里 loader 常是链接）。
-     *
-     * @return loader 的真实文件；运行时未安装返回 null
-     */
-    fun glibcLoader(root: File): File? {
-        if (!root.isDirectory) return null
-        val queue = ArrayDeque<Pair<File, Int>>()
-        queue.add(root to 0)
-        while (queue.isNotEmpty()) {
-            val (dir, depth) = queue.removeFirst()
-            dir.listFiles()?.forEach { child ->
-                if (child.isFile && child.name.startsWith("ld-linux")) {
-                    val real = runCatching { child.canonicalFile }.getOrDefault(child)
-                    if (isElfBinary(real)) return real
-                }
-                if (child.isDirectory && depth < 5) queue.add(child to depth + 1)
-            }
-        }
-        return null
-    }
-
-    /** glibc 运行时是否已安装（loader 找得到）。 */
-    fun glibcReady(root: File): Boolean = glibcLoader(root) != null
-
-    /**
-     * bionic 版 exec 钩子（APK 里打包的 `libmcexechook.so`，见 `mc_exec_hook.c`）。
-     *
-     * 钩子是**按 ABI 成对**的：bionic 进程只能 preloaded bionic 版，
-     * glibc 进程只能 preloaded 随运行时下发的 glibc 版，混用会被
-     * bionic linker 直接判 `CANNOT LINK EXECUTABLE`（glibc 侧则是
-     * `ld.so` 打一行 `cannot be preloaded` 到 stderr 并忽略）。
-     *
-     * 前提：app/build.gradle.kts 里 `packaging.jniLibs.useLegacyPackaging = true`，
-     * 否则 .so 不解压、[Context.applicationInfo.nativeLibraryDir] 为空目录。
-     *
-     * @return .so 的绝对路径；未打包（理论外）返回 null
-     */
-    fun bionicHook(context: Context): String? = runCatching {
-        File(context.applicationInfo.nativeLibraryDir, "libmcexechook.so")
-            .takeIf { it.exists() }
-            ?.absolutePath
-    }.getOrNull()
-
-    /**
-     * glibc 版 exec 钩子（`glibc-<版本>-<arch>.tar.gz` 解出来的，
-     * 与 loader 同目录，见 `tools/glibc-runtime/build.sh`）。
-     *
-     * @return .so 的绝对路径；运行时未装 / 旧包没有该文件返回 null
-     */
-    fun glibcHook(context: Context): String? =
-        glibcLoader(glibcDir(context))?.parentFile?.let { dir ->
-            File(dir, GLIBC_HOOK_NAME).takeIf { it.exists() }?.absolutePath
-        }
-
-    /**
-     * 直接目标 [target] 应该用的 `LD_PRELOAD`（未就绪 / 找不到对应钩子返回 null）。
-     *
-     * 阶段 2 的核心约定：**按目标 ABI 切换**。glibc 目标只认 glibc 版钩子，
-     * 其余（bionic ELF、shell 脚本 → `/system/bin/sh`、非 ELF）只认 bionic 版；
-     * 交叉的那一步由钩子自己在 exec 时改写，Kotlin 侧不猜子进程的子进程。
-     */
-    fun preloadFor(context: Context, target: File?): String? =
-        if (target != null && GlibcCompat.kind(target) == InterpKind.GLIBC) {
-            glibcHook(context)
-        } else {
-            bionicHook(context)
-        }
-
-    /**
-     * glibc 运行时的**子进程环境变量**（未就绪返回空数组）。
-     *
-     * Android 没有 `/lib`，glibc 程序靠 `LD_LIBRARY_PATH` 找 `libc.so.6`；
-     * 该目录下的 soname（`libc.so.6` / `libdl.so.2` …）与 bionic（`libc.so` / `libdl.so` …）
-     * 不同名，所以同一份 PATH 上的 bionic 程序不受影响。
-     *
-     * 其余变量供 LD_PRELOAD 钩子（`mc_exec_hook.c`）使用：
-     * `MOBILECODER_GLIBC` 定位运行时、`MOBILECODER_GLIBC_LIB` 直接给库目录、
-     * `MOBILECODER_*_HOOK` 是两套 ABI 的钩子路径（exec 时按子目标二选一）。
-     */
-    fun glibcEnv(context: Context): Array<String> {
-        val root = glibcDir(context)
-        val lib = glibcLoader(root)?.parentFile ?: return emptyArray()
-        return buildList {
-            add("MOBILECODER_GLIBC=${root.absolutePath}")
-            add("MOBILECODER_GLIBC_LIB=${lib.absolutePath}")
-            add("LD_LIBRARY_PATH=${lib.absolutePath}")
-            glibcHook(context)?.let { add("MOBILECODER_GLIBC_HOOK=$it") }
-            bionicHook(context)?.let { add("MOBILECODER_BIONIC_HOOK=$it") }
-        }.toTypedArray()
-    }
 
     private fun hasBin(dir: File?, executable: String): Boolean =
         dir != null && File(dir, "bin/$executable").exists()
@@ -233,56 +134,28 @@ object BuildEnvironment {
     /** 执行一次体检并缓存结果（[projectDir] 用于按项目类型动态过滤所需组件）。 */
     suspend fun refresh(context: Context, projectDir: File? = null): EnvStatus {
         val all = detect(context)
-        val required = withGlibcIfNeeded(context, requirementsFor(projectDir))
+        val required = withLinuxIfNeeded(requirementsFor(projectDir))
         val status = EnvStatus(items = all.filter { it.kind in required }, required = required)
         _status.value = status
         // JAVA_HOME 同步注入进程环境，供终端 / CLI 子进程继承（与项目类型无关）
         runCatching {
             NativeRuntime.setJavaHome(context, all.firstOrNull { it.kind == EnvKind.JDK }?.path)
         }
-        // glibc 运行时同理：终端 PTY 与 CLI 子进程都要能拿到 LD_LIBRARY_PATH 与钩子路径
-        runCatching {
-            NativeRuntime.setGlibcEnv(
-                context,
-                root = glibcDir(context).takeIf { glibcReady(it) }?.absolutePath,
-                lib = glibcLoader(glibcDir(context))?.parentFile?.absolutePath,
-                glibcHook = glibcHook(context),
-                bionicHook = bionicHook(context),
-            )
-        }
         return status
     }
 
     /**
-     * 把「需要 glibc 运行时」的组件并入「所需组件」：
+     * 把 **Linux 环境（LINUX）** 恒并入「所需组件」。
      *
-     * 1. **需要 NODE 且 node 是官方 glibc 构建** —— 不并入的后果是 node「文件在 +
-     *    有执行位」被体检判成就绪，真跑 `npm i -g` 才炸出 127，而「构建环境」页
-     *    什么都不缺、看不出该装什么；
-     * 2. **需要 JDK** —— Temurin / gradle daemon 同为 glibc ELF。纯安卓 / JVM 工程
-     *    没有 node，以前不并入 → `java` 照样 127，页面却只显示「缺 JDK」。
-     *    java 还没安装时按「将安装的是官方 glibc 构建」预判并入；已安装则按真实
-     *    ELF 判断（将来若有非 glibc 构建则不并入）。
+     * 不再按「node/java 是不是 glibc ELF」逐一预判（旧方案要读 ELF 头，既漏判
+     * 又会把不该装的场景也判进去）：终端命令、`npm`、`sdkmanager`、构建里的
+     * `java`/`gradle` 全部统一从 proot 走，rootfs 因此是**所有项目的硬依赖**——
+     * 装一次，终端即完整 Linux（可 `apt install` 任意包）。
      *
-     * @return 追加后的所需组件（无需追加则原样返回）
+     * @return 追加后的所需组件（已有则原样返回）
      */
-    internal suspend fun withGlibcIfNeeded(context: Context, required: List<EnvKind>): List<EnvKind> {
-        if (EnvKind.GLIBC in required) return required
-        // 1) node：官方 glibc 构建（解析不出 node 时交给下面的 JDK 分支判断）
-        if (EnvKind.NODE in required) {
-            val node = resolveNodeExec(context.filesDir)
-            if (node != null && GlibcCompat.kind(node) == InterpKind.GLIBC) return required + EnvKind.GLIBC
-        }
-        // 2) JDK：Temurin / gradle daemon 同为 glibc ELF。纯安卓 / JVM 工程没有 node，
-        //    以前不并入 → `java` 照样 127，页面却只显示「缺 JDK」。
-        if (EnvKind.JDK in required) {
-            val java = resolveJdk(context)?.let { File(it, "bin/java") }
-            if (java?.exists() != true || GlibcCompat.kind(java) == InterpKind.GLIBC) {
-                return required + EnvKind.GLIBC
-            }
-        }
-        return required
-    }
+    internal fun withLinuxIfNeeded(required: List<EnvKind>): List<EnvKind> =
+        if (EnvKind.LINUX in required) required else required + EnvKind.LINUX
 
     /**
      * 按当前项目类型推断**需要**哪些环境（「构建环境」页据此动态展示与检查）。
@@ -320,7 +193,7 @@ object BuildEnvironment {
     /** 体检：按 [projectDir] 所需组件返回路径与可用性。 */
     suspend fun status(context: Context, projectDir: File? = null): EnvStatus {
         val all = detect(context)
-        val required = withGlibcIfNeeded(context, requirementsFor(projectDir))
+        val required = withLinuxIfNeeded(requirementsFor(projectDir))
         return EnvStatus(items = all.filter { it.kind in required }, required = required)
     }
 
@@ -331,7 +204,6 @@ object BuildEnvironment {
         val node = resolveNode(context)
         val sdk = sdkDir(context)
         val sdkReady = sdkLooksReady(sdk)
-        val glibc = glibcDir(context)
         return listOf(
             EnvItem(
                 kind = EnvKind.JDK,
@@ -358,12 +230,12 @@ object BuildEnvironment {
                 hint = "未就绪：点「在线下载」安装 Node.js 20（含 npm，约 50MB），或导入 node-v*-linux-*.tar.gz",
             ),
             EnvItem(
-                kind = EnvKind.GLIBC,
-                path = if (glibc.isDirectory) glibc.absolutePath else null,
-                ready = glibcReady(glibc),
-                hint = "未就绪：官方 Node.js / JDK 链的是 glibc，Android 缺 /lib/ld-linux-aarch64.so.1，" +
-                    "exec 时直接 ENOENT（退出码 127）。点「在线下载」安装 glibc 运行时，" +
-                    "或导入 glibc-*-linux-*.tar.gz",
+                kind = EnvKind.LINUX,
+                path = Proot.rootfsDir(context).takeIf { it.isDirectory }?.absolutePath,
+                ready = Proot.isReady(context),
+                hint = "未就绪：点「在线下载」安装 Linux 环境（Ubuntu 24.04 rootfs + proot，约 35MB）。" +
+                    "装好后终端就是完整 Linux：`apt install` 可装任意软件包，JDK / Gradle / " +
+                    "node 等 glibc 程序也在其中原样运行；也可导入本地 ubuntu-base-*.tar.gz",
             ),
         )
     }
@@ -389,6 +261,11 @@ object BuildEnvironment {
         kind: EnvKind,
         onProgress: (Float) -> Unit = {},
     ): String = withContext(Dispatchers.IO) {
+        // Linux 环境（ubuntu-base tar.gz）走专属管线：解压落位 rootfs 后还要补装
+        // proot 三件套并做首启配置，不能进下面的「落位 files/sdk」通用流程
+        if (kind == EnvKind.LINUX) {
+            return@withContext RootfsManager.installFromArchive(context, uri, onStage = {}, onProgress = onProgress)
+        }
         val sdk = sdkDir(context)
         if (!sdk.exists() && !sdk.mkdirs()) {
             throw IllegalStateException("无法创建目录：${sdk.absolutePath}")
@@ -427,13 +304,13 @@ object BuildEnvironment {
             EnvKind.JDK -> relocate(tmp, "bin/java", File(sdk, "jdk"))
             EnvKind.GRADLE -> relocate(tmp, "bin/gradle", File(sdk, "gradle"))
             EnvKind.NODE -> relocate(tmp, "bin/node", File(sdk, "node"))
-            EnvKind.GLIBC -> relocateGlibc(tmp, File(sdk, "glibc"))
+            // LINUX 的导入与下载都在入口分流给了 RootfsManager（rootfs + proot + 首启配置），
+            // 绝不能按「解压包塞进 files/sdk」处理
+            EnvKind.LINUX -> throw IllegalStateException("Linux 环境由 RootfsManager 负责落位")
             EnvKind.SDK -> mergeIntoSdk(tmp, sdk, requireReady)
         }
         // 修复可执行权限（gradlew / java / gradle / node 都是脚本或 ELF）
         fixExecutable(File(target, "bin"))
-        // loader 由内核直接 open，缺执行位同样报 ENOENT，单独补一次
-        if (kind == EnvKind.GLIBC) glibcLoader(File(target))?.let { makeExecutable(it) }
         when (kind) {
             EnvKind.JDK -> {
                 runCatching { AppStorage.preferences.setJdkPath(target) }
@@ -441,11 +318,9 @@ object BuildEnvironment {
             }
             EnvKind.GRADLE -> runCatching { AppStorage.preferences.setGradlePath(target) }
             EnvKind.NODE -> writeNodeShims(context, File(target))
-            EnvKind.GLIBC -> Unit
+            EnvKind.LINUX -> Unit
             EnvKind.SDK -> Unit
         }
-        // 落位完成 → 把已有的官方 Linux 包解释器改写到本机 loader（幂等，未装运行时是空操作）
-        patchGlibcInterps(context)
         refresh(context)
         return target
     }
@@ -461,35 +336,6 @@ object BuildEnvironment {
             root.copyRecursively(dest, overwrite = true)
         }
         return dest.absolutePath
-    }
-
-    /**
-     * glibc 运行时包落位：按「哪里有 `ld-linux*`」认根目录，而不是固定 marker——
-     * Debian 的 `libc6_*_arm64.deb` 解出来是 `lib/aarch64-linux-gnu/ld-linux-aarch64.so.1`，
-     * 自己打的包是 `lib/ld-linux-aarch64.so.1`，两种都要能装。
-     */
-    private fun relocateGlibc(tmp: File, dest: File): String {
-        val root = findGlibcRoot(tmp, 5)
-            ?: throw IllegalStateException(
-                "压缩包结构不匹配：未找到 glibc loader（ld-linux*），请选择 glibc 运行时压缩包",
-            )
-        if (root.canonicalPath == dest.canonicalPath) return dest.absolutePath
-        if (dest.exists()) dest.deleteRecursively()
-        dest.parentFile?.mkdirs()
-        if (!root.renameTo(dest)) {
-            root.copyRecursively(dest, overwrite = true)
-        }
-        return dest.absolutePath
-    }
-
-    /** 深度优先查找含 glibc loader 的目录（depth ≤ [maxDepth]）。 */
-    private fun findGlibcRoot(dir: File, maxDepth: Int): File? {
-        if (maxDepth < 0) return null
-        if (glibcLoader(dir) != null) return dir
-        dir.listFiles()?.forEach { child ->
-            if (child.isDirectory) findGlibcRoot(child, maxDepth - 1)?.let { return it }
-        }
-        return null
     }
 
     /** SDK zip：把顶层内容合并进 `files/sdk`（兼容单层 `android-sdk/` 包裹目录）。 */
@@ -626,33 +472,8 @@ object BuildEnvironment {
     }
 
     // ------------------------------------------------------------------
-    // glibc 解释器改写
+    // 执行位与探测
     // ------------------------------------------------------------------
-
-    /**
-     * 把 `files` 下「官方 Linux 发行包」的 glibc ELF 解释器改写到本机 loader（幂等）。
-     *
-     * 覆盖 `sdk/node`（含 npm 装进 `lib/node_modules` 的原生二进制）、`files/bin`
-     * （npm 的命令入口与用户手放的 ELF）、`sdk/jdk`、`sdk/gradle`。
-     * glibc 运行时未安装时是空操作——先有 loader 才谈得上改写。
-     *
-     * 详见 [GlibcCompat]：内核只按 `p_offset + p_filesz` 读解释器，
-     * 所以把新路径**追加到文件末尾**再改两个字段即可，不移动任何已有段。
-     *
-     * @return 成功改写的文件数（0 = 无需改写 / 运行时未就绪）
-     */
-    fun patchGlibcInterps(context: Context): Int {
-        val loader = glibcLoader(glibcDir(context))?.absolutePath ?: return 0
-        val files = context.filesDir
-        val roots = listOf(
-            File(files, "sdk/node"),
-            File(files, "bin"),
-            File(files, "lib/node_modules"),
-            File(files, "sdk/jdk"),
-            File(files, "sdk/gradle"),
-        )
-        return roots.sumOf { root -> GlibcCompat.rewriteTree(root, loader) }
-    }
 
     /**
      * 关键命令入口的执行位状态（`apt doctor` / 环境体检展示）。
@@ -685,13 +506,21 @@ object BuildEnvironment {
     fun execProbeLine(context: Context): String {
         val node = File(binDir(context), "node")
         if (!node.exists()) return "node=缺失"
-        return "node → ${probeExec(node)}"
+        return "node → ${probeExec(context, node)}"
     }
 
-    /** 跑一次 `file --version`，3 秒兜底超时，返回 `ok <输出>` / `exit=N <输出>` / `exec失败：<原因>`。 */
-    private fun probeExec(file: File): String = runCatching {
-        val process = ProcessBuilder(file.absolutePath, "--version")
+    /**
+     * 跑一次 `node --version`，3 秒兜底超时，返回 `ok <输出>` / `exit=N <输出>` / `exec失败：<原因>`。
+     *
+     * node 是 glibc ELF：Linux 环境就绪时命令被包进 proot（否则内核找不到
+     * `/lib/ld-linux-aarch64.so.1`，必 exit=127）；未就绪则原样直跑，
+     * 探测结果如实反映「缺 Linux 环境」这一现状。
+     */
+    private fun probeExec(context: Context, file: File): String = runCatching {
+        val argv = Proot.wrap(context, arrayOf(file.absolutePath, "--version"), cwd = null)
+        val process = ProcessBuilder(argv.toList())
             .redirectErrorStream(true)
+            .apply { environment().putAll(Proot.envMap(context)) }
             .start()
         runCatching { process.outputStream.close() }
         // 先限时等待、再读输出：反过来会在进程挂住时阻塞在读上
@@ -862,12 +691,18 @@ object BuildEnvironment {
             add("  Android SDK   ${mark(sdkItem)} ${sdk.absolutePath}")
             add("                结构检查 = ${if (sdkLooksReady(sdk)) "通过（platforms/build-tools）" else "缺失 platforms/build-tools"}")
             add("  Node.js       ${mark(node)} ${node?.path ?: "未安装"}")
-            if (status?.required?.contains(EnvKind.GLIBC) == true) {
-                val groot = glibcDir(context)
-                val loader = glibcLoader(groot)
-                add("  glibc 运行时  ${mark(status?.item(EnvKind.GLIBC))} ${groot.absolutePath}")
-                add("                loader = ${loader?.absolutePath ?: "缺失（glibc 程序 exec 必 ENOENT）"}")
-            }
+            add(
+                "  Linux 环境    ${mark(status?.item(EnvKind.LINUX))} " +
+                    "${Proot.rootfsDir(context).absolutePath}",
+            )
+            val prootBin = Proot.prootBin(context)
+            add(
+                "                proot = " + if (prootBin.isFile) {
+                    prootBin.absolutePath
+                } else {
+                    "缺失（终端/构建命令无法运行 glibc 程序，请在「构建环境」页安装 Linux 环境）"
+                },
+            )
             add("  ANDROID_HOME  ${sdk.absolutePath}")
             add("  GRADLE_USER_HOME ${gradleUserHome(context).absolutePath}")
             add("  TMPDIR        ${tmpDir(context).absolutePath}")

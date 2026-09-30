@@ -80,4 +80,21 @@ class BuildEnvironmentRequirementsTest {
             BuildEnvironment.requirementsFor(root),
         )
     }
+
+    @Test
+    fun withLinuxIfNeeded_appendsLinuxExactlyOnce() {
+        // LINUX 不由 requirementsFor 决定，而是在体检/下载入口恒并入（终端、npm、
+        // sdkmanager、构建里的 java 全部从 proot 走 → 所有项目的硬依赖）
+        val base = BuildEnvironment.requirementsFor(null)
+        assertFalse(base.contains(EnvKind.LINUX))
+
+        val withLinux = BuildEnvironment.withLinuxIfNeeded(base)
+        assertEquals(EnvKind.LINUX, withLinux.last())
+        assertEquals(base, withLinux.dropLast(1))
+
+        // 幂等：已有 LINUX 时原样返回，不重复追加
+        assertEquals(withLinux, BuildEnvironment.withLinuxIfNeeded(withLinux))
+        // 只要 LINUX 的场景（纯终端）也不再追加第二份
+        assertEquals(listOf(EnvKind.LINUX), BuildEnvironment.withLinuxIfNeeded(listOf(EnvKind.LINUX)))
+    }
 }

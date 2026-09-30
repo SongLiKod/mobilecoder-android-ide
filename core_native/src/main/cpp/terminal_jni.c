@@ -155,11 +155,12 @@ exited:
 /*
  * Class:     com_mobilecoder_ide_core_nativebridge_TerminalNative
  * Method:    create
- * Signature: (Ljava/lang/String;IILcom/mobilecoder/ide/core/nativebridge/TerminalCallback;)I
+ * Signature: (Ljava/lang/String;IILcom/mobilecoder/ide/core/nativebridge/TerminalCallback;[Ljava/lang/String;)I
  */
 JNIEXPORT jint JNICALL
 Java_com_mobilecoder_ide_core_nativebridge_TerminalNative_create(
-        JNIEnv *env, jobject thiz, jstring cwd, jint cols, jint rows, jobject callback) {
+        JNIEnv *env, jobject thiz, jstring cwd, jint cols, jint rows, jobject callback,
+        jobjectArray argv) {
     (void) thiz;
     if (callback == NULL) {
         return -1;
@@ -194,6 +195,32 @@ Java_com_mobilecoder_ide_core_nativebridge_TerminalNative_create(
 
     char *workdir = mc_jstring_to_cstr(env, cwd);
 
+    /* 可选启动命令（Linux 环境就绪时 = proot + guest bash）：父线程构造，fork 后
+     * 子进程直接 execv；为空 / argv[0] 为空则回退 /system/bin/sh（bionic 直启，
+     * rootfs 未安装时的降级路径，保证装系统前终端仍可用）。 */
+    char **child_argv = NULL;
+    jsize child_argc = 0;
+    if (argv != NULL) {
+        jsize n = (*env)->GetArrayLength(env, argv);
+        if (n > 0) {
+            child_argv = (char **) calloc((size_t) n + 1, sizeof(char *));
+            if (child_argv != NULL) {
+                for (jsize i = 0; i < n; i++) {
+                    jstring item = (jstring) (*env)->GetObjectArrayElement(env, argv, i);
+                    child_argv[i] = mc_jstring_to_cstr(env, item);
+                    if (item != NULL) {
+                        (*env)->DeleteLocalRef(env, item);
+                    }
+                    if (child_argv[i] == NULL) {
+                        child_argv[i] = strdup("");
+                    }
+                    child_argc++;
+                }
+                child_argv[n] = NULL;
+            }
+        }
+    }
+
     struct winsize ws;
     memset(&ws, 0, sizeof(ws));
     ws.ws_row = (unsigned short) (rows > 0 ? rows : 24);
@@ -204,6 +231,8 @@ Java_com_mobilecoder_ide_core_nativebridge_TerminalNative_create(
     pid = forkpty(&master_fd, NULL, NULL, &ws);
     if (pid < 0) {
         MC_LOGE("forkpty 失败: %s", strerror(errno));
+        for (jsize i = 0; i < child_argc; i++) free(child_argv[i]);
+        free(child_argv);
         free(workdir);
         pthread_mutex_unlock(&g_terminal_lock);
         return -1;
@@ -220,15 +249,28 @@ Java_com_mobilecoder_ide_core_nativebridge_TerminalNative_create(
         setenv("COLORTERM", "truecolor", 1);
         setenv("LANG", "C.UTF-8", 1);
         setenv("TMPDIR", "/data/data/com.mobilecoder.ide/cache/tmp", 1);
-        /* 默认 HOME/PATH（overwrite=0：Kotlin 层 TerminalNative.setEnv 的值优先） */
+        /* 默认 HOME/PATH（overwrite=0：Kotlin 层 TerminalNative.setEnv 的值优先；
+         * PATH 含 guest 标准路径，Linux 环境装好后由 proot 内的 shell 使用） */
         setenv("HOME", "/data/data/com.mobilecoder.ide/files", 0);
-        setenv("PATH", "/data/data/com.mobilecoder.ide/files/bin:/system/bin:/system/xbin", 0);
+        setenv("PATH",
+               "/data/data/com.mobilecoder.ide/files/bin:/usr/local/sbin:/usr/local/bin"
+               ":/usr/sbin:/usr/bin:/sbin:/bin:/system/bin:/system/xbin",
+               0);
         free(workdir);
+        /* proot 启动失败（如执行位缺失）时给出一行原因，再回退 bionic sh */
+        if (child_argv != NULL && child_argc > 0 &&
+            child_argv[0] != NULL && child_argv[0][0] != '\0') {
+            execv(child_argv[0], child_argv);
+            fprintf(stderr, "sh: 启动 %s 失败: %s\r\n", child_argv[0], strerror(errno));
+        }
         execl("/system/bin/sh", "sh", (char *) NULL);
         execlp("sh", "sh", (char *) NULL);
         _exit(127);
     }
 
+    /* 父进程：释放 argv 的 C 拷贝（子进程持有 fork 出的独立副本） */
+    for (jsize i = 0; i < child_argc; i++) free(child_argv[i]);
+    free(child_argv);
     free(workdir);
 
     slot->state = MC_TERMINAL_ACTIVE;

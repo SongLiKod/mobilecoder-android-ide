@@ -57,8 +57,12 @@ object NativeRuntime {
         val bin = File(files, "bin")
         listOf(bin, sdk).forEach { if (!it.exists()) it.mkdirs() }
 
+        // PATH：files/bin（node / npm 入口）→ guest 标准路径（rootfs 的 /usr/bin 等，
+        // Linux 环境装好后由 proot 看见）→ bionic 的 /system/bin（rootfs 未装时兜底，
+        // 不存在的目录在 PATH 搜索中自动跳过）
         val path = buildString {
             append(bin.absolutePath)
+            append(":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
             append(":/system/bin:/system/xbin:/vendor/bin")
         }
         val result = runCatching {
@@ -81,34 +85,6 @@ object NativeRuntime {
             return
         }
         runCatching { TerminalNative.setEnv("JAVA_HOME", jdkDir) }
-    }
-
-    /**
-     * glibc 运行时（`MOBILECODER_GLIBC` + `LD_LIBRARY_PATH`）注入进程环境，
-     * 由终端 PTY 与 CLI 子进程继承；未安装时清空，避免残留一个不存在的目录。
-     *
-     * Android 没有 `/lib`，glibc 程序全靠 `LD_LIBRARY_PATH` 找到 `libc.so.6`。
-     *
-     * 两套 ABI 的钩子路径（[glibcHook] / [bionicHook]）也一起下发：
-     * `mc_exec_hook.c` 在 exec 前按**子目标**的 loader 二选一写进 `LD_PRELOAD`，
-     * 异架构的 .so 一旦被装载，`ld.so` 会报 `cannot be preloaded`。
-     * 这里**不**设 `LD_PRELOAD` 本身——只有直接目标是 glibc 的场景
-     * （工具安装 / 终端）才需要钩子，进程级注入会波及所有子进程。
-     */
-    fun setGlibcEnv(
-        context: Context,
-        root: String?,
-        lib: String?,
-        glibcHook: String?,
-        bionicHook: String?,
-    ) {
-        runCatching {
-            TerminalNative.setEnv("MOBILECODER_GLIBC", root.orEmpty())
-            TerminalNative.setEnv("MOBILECODER_GLIBC_LIB", lib.orEmpty())
-            TerminalNative.setEnv("MOBILECODER_GLIBC_HOOK", glibcHook.orEmpty())
-            TerminalNative.setEnv("MOBILECODER_BIONIC_HOOK", bionicHook.orEmpty())
-            TerminalNative.setEnv("LD_LIBRARY_PATH", lib.orEmpty())
-        }
     }
 
     /** assets/certs/cacert.pem → cache/certs/cacert.pem（返回 null 表示失败）。 */

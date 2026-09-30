@@ -4,19 +4,6 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// glibc 运行时「内置包」：tools/glibc-runtime/build.sh 产出的 glibc-*-*.tar.gz 自动拷进
-// assets/glibc/，打包进 APK 后 EnvDownloader 走「内置包优先 → 自定义源 → 在线镜像」三级兜底，
-// 断网 / 无托管也能完成 glibc 运行时就位（详见 tools/glibc-runtime/README.md）。
-// dist/ 目录不存在或为空时本任务拷不到任何文件（不报错），此时仍可在线下载 / 手动导入。
-val copyGlibcAssets by tasks.registering(Copy::class) {
-    from(rootProject.layout.projectDirectory.dir("tools/glibc-runtime/dist"))
-    include("glibc-*.tar.gz")
-    into(layout.projectDirectory.dir("src/main/assets/glibc"))
-}
-tasks.named("preBuild") {
-    dependsOn(copyGlibcAssets)
-}
-
 android {
     namespace = "com.mobilecoder.ide"
     compileSdk = 35
@@ -71,10 +58,8 @@ android {
     }
 
     packaging {
-        // LD_PRELOAD 需要 nativeLibraryDir 里有**真实文件**：minSdk ≥ 23 时 AGP 默认
-        // .so 不压缩不解压（extractNativeLibs=false），nativeLibraryDir 是空的，
-        // BuildEnvironment.bionicHook() 就会一直拿不到 libmcexechook.so，
-        // 阶段 2（子进程 exec 钩子）会静默失效。这里退回 legacy 打包保证解压。
+        // 保持 legacy 打包：.so 解压成 nativeLibraryDir 里的真实文件（历史打包形态，
+        // 不引入变量；proot 执行通道不依赖 .so 解压，这里仅维持现状）。
         jniLibs {
             useLegacyPackaging = true
         }

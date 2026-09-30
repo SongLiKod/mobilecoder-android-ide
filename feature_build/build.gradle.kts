@@ -37,7 +37,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.service)
     implementation(libs.kotlinx.coroutines.android)
-    // .deb（data.tar.xz）解码：glibc 运行时在线安装走真实 Debian 镜像（ArchiveExtractor.extractDeb）
+    // .deb（data.tar.xz）解码：proot / libtalloc / libandroid-shmem（Termux 仓库）在线安装
     implementation(libs.xz)
 
     implementation(platform(libs.androidx.compose.bom))

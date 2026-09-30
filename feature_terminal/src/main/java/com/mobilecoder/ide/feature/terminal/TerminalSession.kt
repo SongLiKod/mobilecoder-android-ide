@@ -77,13 +77,36 @@ class TerminalSession(
     private val _cliRunning = MutableStateFlow(false)
     val cliRunning: StateFlow<Boolean> = _cliRunning.asStateFlow()
 
-    /** 命令拦截器（前缀缓冲 + 本地回显 + 回滚；目标来自 CLI 注册表：apt / git）。 */
+    /**
+     * 命令拦截器（前缀缓冲 + 本地回显 + 回滚；目标来自 CLI 注册表：apt / git）。
+     *
+     * `accept` 做**二次分流**：只有进程内注册表里有的 `apt <子命令>`（裸 `apt` 用法
+     * 输出也算）与 `git …` 留给进程内 CLI；`apt install curl` 这类未注册子命令
+     * 回滚交回 shell —— Linux 环境就绪时由 rootfs 里的**真 apt** 接管
+     * （终端就是完整 Linux 的关键），未就绪时补一条安装引导提示。
+     */
     private val interceptor = AptInterceptor(
         targets = { AptCli.interceptTargets() },
+        accept = { line -> acceptIntercepted(line) },
         onWritePty = { bytes -> writeRaw(bytes) },
         onLocalEcho = { text -> onMain { emulator.feed(text) } },
         onRollback = { count -> onMain { emulator.erasePrinted(count) } },
     )
+
+    /** Enter 时的分流判定（[AptInterceptor] 的 accept 钩子）。 */
+    private fun acceptIntercepted(line: String): Boolean {
+        if (AptCli.isInProcessLine(line)) return true
+        // 未注册的 apt 子命令（apt install / apt update …）交回 shell：rootfs 就绪时
+        // 由 proot 内的真 apt 执行；未就绪时 bionic shell 会报 “apt: not found”，
+        // 这里同时弹一条引导，免得用户对着一行报错不知所措
+        if (!TerminalManager.isLinuxReady()) {
+            TerminalManager.showNotice(
+                "「${line.trim().takeIf { it.isNotBlank() } ?: "apt install"}」需要 Linux 环境" +
+                    "（Ubuntu rootfs + proot）。\n请在「构建环境」页安装「Linux 环境」后重试（约 35MB）。",
+            )
+        }
+        return false
+    }
 
     private val flushTask = Runnable { flushNow() }
 

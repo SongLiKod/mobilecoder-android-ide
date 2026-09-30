@@ -52,7 +52,7 @@ import kotlinx.coroutines.launch
  * 设备端没有系统 JDK / Gradle，因此这里提供：
  *  - 按当前项目**动态显示**所需组件（[BuildEnvironment.requirementsFor]）与就绪状态；
  *  - **在线下载**（官方源 / 国内镜像，静默落位 `files/sdk/`，完成即可用）与 SAF 本地压缩包导入；
- *  - **glibc 运行时镜像管理**（多内置源自动回退 + 点选首选 + 手动输入自定义源，持久化）；
+ *  - **Linux 环境 rootfs 镜像管理**（Ubuntu 官方 / 清华 TUNA 多内置源自动回退 + 点选首选 + 手动输入自定义源，持久化）；
  *  - buildVariant 与构建内存上限设置（同时作为 Gradle -Xmx 与看门狗阈值）；
  *  - 「环境体检」把路径与可用性打印到构建日志。
  */
@@ -77,8 +77,8 @@ fun BuildEnvDialog(
     var busyProgress by remember { mutableFloatStateOf(-1f) }
     var stageText by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
-    var glibcCustom by remember { mutableStateOf("") }
-    var glibcPreferred by remember { mutableStateOf("") }
+    var linuxCustom by remember { mutableStateOf("") }
+    var linuxPreferred by remember { mutableStateOf("") }
 
     LaunchedEffect(projectDir) {
         runCatching { BuildEnvironment.refresh(context, projectDir) }
@@ -91,8 +91,8 @@ fun BuildEnvDialog(
                 EnvSource.OFFICIAL
             }
         }
-        runCatching { glibcCustom = AppStorage.preferences.glibcCustomSource() }
-        runCatching { glibcPreferred = AppStorage.preferences.glibcPreferredSource() }
+        runCatching { linuxCustom = AppStorage.preferences.linuxCustomSource() }
+        runCatching { linuxPreferred = AppStorage.preferences.linuxPreferredSource() }
     }
 
     /** 在线下载：JDK/Gradle/Node 走 [EnvDownloader.install]，SDK 走 sdkmanager 链路。 */
@@ -194,12 +194,12 @@ fun BuildEnvDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
-                // ---- glibc 运行时镜像：多内置源自动回退 + 点选首选 + 手动输入自定义源 ----
-                Text("glibc 运行时镜像", style = MaterialTheme.typography.titleSmall)
+                // ---- Linux 环境 rootfs 镜像：多内置源自动回退 + 点选首选 + 手动输入自定义源 ----
+                Text("Linux 环境镜像（Ubuntu rootfs）", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    text = "内置 4 个 Debian 官方/国内镜像（真实可达），按顺序自动回退，" +
-                        "在线下载 .deb 自动组装运行时。点选设为首选（再点取消）；" +
-                        "自定义源填自托管完整 .tar.gz 的基址或完整地址（含 DNS 钩子），保存后优先于全部内置源。",
+                    text = "内置 Ubuntu 官方 cdimage 与清华 TUNA 两个镜像（约 30MB），按顺序自动回退；" +
+                        "点选设为首选（再点取消）。自定义源填自托管 ubuntu-base-*.tar.gz 的基址或完整地址，" +
+                        "保存后优先于全部内置源。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -207,15 +207,15 @@ fun BuildEnvDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    EnvDownloader.GLIBC_MIRRORS.forEach { mirror ->
+                    RootfsManager.ROOTFS_MIRRORS.forEach { mirror ->
                         FilterChip(
-                            selected = glibcPreferred == mirror.id,
+                            selected = linuxPreferred == mirror.id,
                             onClick = {
                                 // 再点已选中的 chip = 取消首选，回退到「官方/国内镜像」偏好排序
-                                glibcPreferred = if (glibcPreferred == mirror.id) "" else mirror.id
+                                linuxPreferred = if (linuxPreferred == mirror.id) "" else mirror.id
                                 scope.launch {
                                     runCatching {
-                                        AppStorage.preferences.setGlibcPreferredSource(glibcPreferred)
+                                        AppStorage.preferences.setLinuxPreferredSource(linuxPreferred)
                                     }
                                 }
                             },
@@ -226,12 +226,12 @@ fun BuildEnvDialog(
                     }
                 }
                 OutlinedTextField(
-                    value = glibcCustom,
-                    onValueChange = { glibcCustom = it },
+                    value = linuxCustom,
+                    onValueChange = { linuxCustom = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("自定义镜像源（可选，留空则只用内置源）") },
-                    placeholder = { Text("https://host/glibc") },
+                    placeholder = { Text("https://host/ubuntu-base") },
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -239,19 +239,19 @@ fun BuildEnvDialog(
                 ) {
                     OutlinedButton(
                         onClick = {
-                            val input = glibcCustom.trim()
+                            val input = linuxCustom.trim()
                             if (input.isNotEmpty() &&
                                 !input.startsWith("http://") && !input.startsWith("https://")
                             ) {
                                 message = "自定义源需以 http:// 或 https:// 开头"
                             } else {
-                                glibcCustom = input
+                                linuxCustom = input
                                 scope.launch {
                                     runCatching {
-                                        AppStorage.preferences.setGlibcCustomSource(input)
+                                        AppStorage.preferences.setLinuxCustomSource(input)
                                     }
                                     message = if (input.isEmpty()) {
-                                        "已清除自定义源，glibc 将只用内置镜像"
+                                        "已清除自定义源，rootfs 将只用内置镜像"
                                     } else {
                                         "已保存自定义源：$input"
                                     }

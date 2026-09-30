@@ -4,7 +4,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
-/** [EnvDownloader.candidateSources]：官方源 / 国内镜像的排序与回退候选。 */
+/**
+ * [EnvDownloader.candidateSources]：官方源 / 国内镜像的排序与回退候选。
+ *
+ * Linux 环境（[EnvKind.LINUX]）走 5 参入口：自定义源 → 首选内置源 → 其余内置源，
+ * 按 URL 去重；其余组件仍是「官方 + 国内镜像」两候选。
+ */
 class EnvDownloaderSourceTest {
 
     @Test
@@ -50,124 +55,118 @@ class EnvDownloaderSourceTest {
         assertTrue(jdkX64.first().url.contains("/x64/"))
     }
 
-    // ---- glibc：多内置镜像 + 首选源 + 手动输入自定义源 ----
+    // ---- Linux rootfs：多内置镜像 + 首选源 + 手动输入自定义源 ----
 
     @Test
-    fun glibc_builtinMirrors_areRealDebianRepos() {
-        // 内置 4 源全部为真实 Debian 仓库基址（DEB 格式 → 安装时按索引在线组装 .deb）；
-        // 下列地址 2026-09 实测「Packages.gz 索引 + 三个 .deb」均 HTTP 200，绝非占位域名。
-        val sources = EnvDownloader.candidateSources(EnvKind.GLIBC, EnvSource.OFFICIAL, "aarch64")
-        assertTrue(sources.size >= 4)
+    fun linux_builtinMirrors_areUbuntuBaseReleaseUrls() {
+        // 两个内置镜像包路径结构完全相同（仅域名不同），包名 = ubuntu-base-<版本>-base-<arch>.tar.gz；
+        // 下列地址 2026-09 实测「两个架构的包」均 HTTP 200，绝非占位域名。
+        val sources = EnvDownloader.candidateSources(EnvKind.LINUX, EnvSource.OFFICIAL, "aarch64")
+        assertEquals(RootfsManager.ROOTFS_MIRRORS.size, sources.size)
         assertEquals(sources.size, sources.map { it.url }.distinct().size)
-        assertTrue(sources.all { it.format == EnvDownloader.SourceFormat.DEB })
         assertEquals(
-            setOf(
-                "https://deb.debian.org/debian",
-                "https://mirrors.tuna.tsinghua.edu.cn/debian",
-                "https://mirrors.aliyun.com/debian",
-                "https://mirrors.cloud.tencent.com/debian",
-            ),
-            sources.map { it.url }.toSet(),
+            RootfsManager.ROOTFS_MIRRORS.map { it.label },
+            sources.map { it.label },
         )
-        assertTrue(sources.all { it.url.startsWith("https://") && it.url.contains("debian") })
+        sources.forEach { source ->
+            assertTrue(source.url.startsWith("https://"))
+            assertTrue(
+                source.url.endsWith("/releases/24.04/release/ubuntu-base-24.04.5-base-arm64.tar.gz"),
+            )
+        }
     }
 
     @Test
-    fun glibc_mirrorSource_putsDomesticMirrorsFirst() {
-        val sources = EnvDownloader.candidateSources(EnvKind.GLIBC, EnvSource.MIRROR, "aarch64")
-        val domestic = EnvDownloader.GLIBC_MIRRORS.filter { it.domestic }.map { it.label }
-        assertEquals(domestic, sources.take(domestic.size).map { it.label })
+    fun linux_mirrorSource_putsDomesticFirst() {
+        val mirror = EnvDownloader.candidateSources(EnvKind.LINUX, EnvSource.MIRROR, "aarch64")
+        assertEquals("清华 TUNA", mirror.first().label)
+
+        val official = EnvDownloader.candidateSources(EnvKind.LINUX, EnvSource.OFFICIAL, "aarch64")
+        assertEquals("Ubuntu 官方", official.first().label)
     }
 
     @Test
-    fun glibc_preferredSource_isTriedFirst_withoutDuplication() {
+    fun linux_preferredSource_isTriedFirst_withoutDuplication() {
         val sources = EnvDownloader.candidateSources(
-            kind = EnvKind.GLIBC,
+            kind = EnvKind.LINUX,
             source = EnvSource.OFFICIAL,
             arch = "aarch64",
             custom = null,
-            preferredId = "tencent",
+            preferredId = "tuna",
         )
-        assertEquals("腾讯云镜像", sources[0].label)
-        assertEquals(1, sources.count { it.label == "腾讯云镜像" })
+        assertEquals("清华 TUNA", sources[0].label)
+        assertEquals(1, sources.count { it.label == "清华 TUNA" })
+        assertEquals(sources.size, sources.map { it.url }.distinct().size)
     }
 
     @Test
-    fun glibc_customSource_isFirst_baseUrlGetsFileAppended() {
+    fun linux_preferredSource_unknownId_isIgnored() {
+        // 首选 id 不存在（旧值 / 手改偏好）→ 按所选源正常排序，不炸不丢候选
         val sources = EnvDownloader.candidateSources(
-            kind = EnvKind.GLIBC,
+            kind = EnvKind.LINUX,
             source = EnvSource.OFFICIAL,
             arch = "aarch64",
-            custom = "https://my.host/glibc/",
+            custom = null,
+            preferredId = "does-not-exist",
+        )
+        assertEquals("Ubuntu 官方", sources[0].label)
+        assertEquals(RootfsManager.ROOTFS_MIRRORS.size, sources.size)
+    }
+
+    @Test
+    fun linux_customSource_isFirst_baseUrlGetsFileAppended() {
+        val sources = EnvDownloader.candidateSources(
+            kind = EnvKind.LINUX,
+            source = EnvSource.OFFICIAL,
+            arch = "aarch64",
+            custom = "https://my.host/rootfs/",
             preferredId = null,
         )
         assertEquals("自定义源", sources[0].label)
-        assertEquals("https://my.host/glibc/glibc-2.41-aarch64.tar.gz", sources[0].url)
-        // 自定义源 = 单文件 tar.gz，内置 Debian 仓库源仍全部保留兜底
-        assertEquals(EnvDownloader.SourceFormat.TARBALL, sources[0].format)
-        assertTrue(sources.size >= 5)
+        assertEquals(
+            "https://my.host/rootfs/ubuntu-base-24.04.5-base-arm64.tar.gz",
+            sources[0].url,
+        )
+        // 自定义源 = 单文件 tar.gz，内置镜像仍全部保留兜底
+        assertTrue(sources.size >= RootfsManager.ROOTFS_MIRRORS.size + 1)
+        assertEquals(sources.size, sources.map { it.url }.distinct().size)
     }
 
     @Test
-    fun glibc_customSource_fullArchiveUrl_usedAsIs_thenPreferredFollows() {
+    fun linux_customSource_fullArchiveUrl_usedAsIs_thenPreferredFollows() {
         val sources = EnvDownloader.candidateSources(
-            kind = EnvKind.GLIBC,
+            kind = EnvKind.LINUX,
             source = EnvSource.MIRROR,
             arch = "x64",
-            custom = "https://my.host/pkg/glibc-2.39-x64.tar.gz",
+            custom = "https://my.host/pkg/ubuntu-base-24.04.5-base-amd64.tar.gz",
             preferredId = "official",
         )
-        assertEquals("https://my.host/pkg/glibc-2.39-x64.tar.gz", sources[0].url)
-        assertEquals("Debian 官方", sources[1].label)
+        assertEquals(
+            "https://my.host/pkg/ubuntu-base-24.04.5-base-amd64.tar.gz",
+            sources[0].url,
+        )
+        // 首选内置源其次；MIRROR 偏好下国内镜像整体靠前，但首选源优先级更高
+        assertEquals("Ubuntu 官方", sources[1].label)
+        assertEquals("清华 TUNA", sources[2].label)
     }
 
     @Test
-    fun glibc_customSourceDuplicateOfBuiltIn_deduplicated() {
-        val sources = EnvDownloader.candidateSources(
-            kind = EnvKind.GLIBC,
-            source = EnvSource.OFFICIAL,
-            arch = "aarch64",
-            custom = EnvDownloader.GLIBC_MIRRORS.first().base,
-            preferredId = null,
-        )
-        assertEquals(sources.size, sources.map { it.url }.distinct().size)
+    fun linux_archToken_x64GetsAmd64Package() {
+        val arm = EnvDownloader.candidateSources(EnvKind.LINUX, EnvSource.OFFICIAL, "aarch64")
+        val x64 = EnvDownloader.candidateSources(EnvKind.LINUX, EnvSource.OFFICIAL, "x64")
+        assertTrue(arm.all { it.url.endsWith("-arm64.tar.gz") })
+        assertTrue(x64.all { it.url.endsWith("-amd64.tar.gz") })
     }
 
     @Test
     fun resolveCustomUrl_baseVsFullArchive() {
         assertEquals(
-            "https://x/g/glibc-2.39-aarch64.tar.gz",
-            EnvDownloader.resolveCustomUrl("  https://x/g/  ", "glibc-2.39-aarch64"),
+            "https://x/g/ubuntu-base-24.04.5-base-arm64.tar.gz",
+            EnvDownloader.resolveCustomUrl("  https://x/g/  ", "ubuntu-base-24.04.5-base-arm64"),
         )
         assertEquals(
-            "https://x/f/glibc-2.39-x64.zip",
-            EnvDownloader.resolveCustomUrl("https://x/f/glibc-2.39-x64.zip", "glibc-2.39-x64"),
-        )
-    }
-
-    @Test
-    fun bundledGlibcAsset_prefersExactVersion_thenCompatibleMatch() {
-        val exact = "glibc-2.41-aarch64.tar.gz"
-        assertEquals(
-            exact,
-            EnvDownloader.bundledGlibcAsset(arrayOf("glibc-2.41-x64.tar.gz", exact), "aarch64"),
-        )
-        assertEquals(
-            "glibc-2.42-aarch64.tar.gz",
-            EnvDownloader.bundledGlibcAsset(arrayOf("glibc-2.42-aarch64.tar.gz"), "aarch64"),
-        )
-    }
-
-    @Test
-    fun bundledGlibcAsset_archMismatch_orMissing_returnsNull() {
-        // 架构不匹配 / 无内置包 / 非运行时文件 → null（回退在线镜像 / 手动导入）
-        assertTrue(
-            EnvDownloader.bundledGlibcAsset(arrayOf("glibc-2.41-x64.tar.gz"), "aarch64") == null,
-        )
-        assertTrue(EnvDownloader.bundledGlibcAsset(null, "aarch64") == null)
-        assertTrue(EnvDownloader.bundledGlibcAsset(emptyArray(), "x64") == null)
-        assertTrue(
-            EnvDownloader.bundledGlibcAsset(arrayOf("README.md", "mcexechook.so"), "aarch64") == null,
+            "https://x/f/custom-rootfs.zip",
+            EnvDownloader.resolveCustomUrl("https://x/f/custom-rootfs.zip", "custom-rootfs"),
         )
     }
 

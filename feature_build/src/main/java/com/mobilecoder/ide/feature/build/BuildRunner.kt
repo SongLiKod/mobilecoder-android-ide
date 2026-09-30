@@ -5,6 +5,7 @@ import android.content.Context
 import android.util.Log
 import com.mobilecoder.ide.core.common.cli.CliCommand
 import com.mobilecoder.ide.core.common.cli.AptCli
+import com.mobilecoder.ide.core.common.linux.Proot
 import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
@@ -503,14 +504,12 @@ object BuildRunner {
                 "构建环境未就绪：缺少 Gradle 发行版。请在「构建环境」中在线下载，或导入 gradle-x.x-bin.zip",
             )
         }
-        // glibc 运行时：JDK（Temurin）/ Gradle / node 全是 glibc ELF，Android 没有
-        // /lib/ld-linux-aarch64.so.1 → 不先补运行时，java 会在 exec 阶段 127。
-        // 与 apt 链同一条安装路径：APK 内置包优先，在线镜像兜底，装不上给自救提示。
-        if (status.required.contains(EnvKind.GLIBC) &&
-            !BuildEnvironment.glibcReady(BuildEnvironment.glibcDir(appContext))
-        ) {
-            _phase.value = "安装 glibc 运行时"
-            append("glibc 运行时未就绪 → 安装（APK 内置包优先，在线镜像兜底）…", BuildLogLevel.INFO)
+        // Linux 环境（Ubuntu rootfs + proot）：JDK（Temurin）/ Gradle / node 全是 glibc
+        // ELF，Android 没有 /lib/ld-linux-aarch64.so.1 → 不先装，java 会在 exec 阶段 127。
+        // 与 apt 链同一条安装路径：在线下载 rootfs + proot，装不上给自救提示。
+        if (!Proot.isReady(appContext)) {
+            _phase.value = "安装 Linux 环境"
+            append("Linux 环境未就绪 → 安装（Ubuntu rootfs + proot，约 35MB）…", BuildLogLevel.INFO)
             val source = runCatching {
                 if (AppStorage.preferences.envDownloadSource() == "mirror") {
                     EnvSource.MIRROR
@@ -518,14 +517,14 @@ object BuildRunner {
                     EnvSource.OFFICIAL
                 }
             }.getOrDefault(EnvSource.OFFICIAL)
-            val ok = ToolInstaller.ensureGlibcForBuild(appContext, source) {
+            val ok = ToolInstaller.ensureLinux(appContext, source) {
                 append(it, BuildLogLevel.INFO)
             }
             if (!ok) {
                 return fail(
                     task, startedAt,
-                    "构建环境未就绪：glibc 运行时缺失（JDK / Gradle 均为 glibc 构建）。" +
-                        "请在「构建环境」页导入 glibc-*.tar.gz，或填写自定义镜像源后重试",
+                    "构建环境未就绪：Linux 环境缺失（proot + Ubuntu rootfs，JDK / Gradle 在其中运行）。" +
+                        "请在「构建环境」页在线下载，或导入 ubuntu-base-*.tar.gz 后重试",
                 )
             }
         }
@@ -557,10 +556,15 @@ object BuildRunner {
         BuildForegroundService.startBuild(appContext, "Gradle ${tasks.last()} · ${task.projectPath.substringAfterLast('/')}")
         baselineUsedMb = systemUsedMb(appContext)
 
-        // ---- 5) 启动子进程 ------------------------------------------------
+        // ---- 5) 启动子进程（Linux 环境就绪 → 整条命令在 proot 内执行）----
         val exit = CompletableDeferred<Int>()
+        val execArgv = Proot.wrap(
+            appContext,
+            arrayOf("/bin/sh", "-c", cmd),
+            request.projectDir.absolutePath,
+        )
         val pid = CliNative.exec(
-            arrayOf("sh", "-c", cmd),
+            execArgv,
             request.projectDir.absolutePath,
             envArray,
             buildCallback(exit),
@@ -653,19 +657,12 @@ object BuildRunner {
     private fun buildEnvArray(jdk: String, gradleHome: String?, heapMb: Int): Array<String> {
         val files = appContext.filesDir
         val sdk = BuildEnvironment.sdkDir(appContext)
-        // 构建命令先经 `sh -c`（bionic），由钩子在 exec 时逐级换成对应 ABI 的那份；
-        // glibc 运行时没装时一个变量都不给，构建流程完全不依赖阶段 2
-        val glibc = BuildEnvironment.glibcEnv(appContext)
-        val glibcReady = glibc.any { it.startsWith("MOBILECODER_GLIBC=") }
-        val preload = if (glibcReady) {
-            BuildEnvironment.bionicHook(appContext)?.let { arrayOf("LD_PRELOAD=$it") } ?: emptyArray()
-        } else {
-            emptyArray()
-        }
         return arrayOf(
             "HOME=${files.absolutePath}",
             "TMPDIR=${BuildEnvironment.tmpDir(appContext).absolutePath}",
-            "PATH=${BuildEnvironment.binDir(appContext).absolutePath}:/system/bin:/system/xbin:/vendor/bin",
+            // guest 标准路径（/usr/bin 等）排在 bionic 前：proot 内拿到 Linux 工具链，
+            // rootfs 未装时这些目录不存在、PATH 自动跳过 → 仍是 /system/bin 兜底
+            "PATH=${Proot.pathFor(BuildEnvironment.binDir(appContext).absolutePath)}",
             "LANG=C.UTF-8",
             "LC_ALL=C.UTF-8",
             "SHELL=/system/bin/sh",
@@ -677,8 +674,9 @@ object BuildRunner {
             "MOBILECODER_GRADLE_HOME=${gradleHome.orEmpty()}",
             "GRADLE_OPTS=-Xmx${heapMb}m -Dorg.gradle.daemon=false",
             "JAVA_OPTS=-Dfile.encoding=UTF-8",
-            // Adoptium 的 java 同样是 glibc 程序：没有这两个变量它连 loader 都找不到 libc
-        ) + glibc + preload
+            // proot 执行通道所需变量（LD_LIBRARY_PATH / PROOT_LOADER / PROOT_TMP_DIR），
+            // Linux 环境未就绪时为空数组，构建流程不依赖任何额外机制
+        ) + Proot.envEntries(appContext)
     }
 
     /**

@@ -16,8 +16,8 @@ import org.tukaani.xz.XZInputStream
  * - **路径穿越防护**：每个条目 canonical 化后必须位于目标目录内（zip slip / tar slip）；
  * - **tar.gz 支持**：GNU 长文件名（'L'/'K'）、pax 扩展头（'x'）、目录/普通文件/软链接/硬链接、权限位；
  * - **格式嗅探**：按流首部识别（gzip = 0x1f8b，zip = 'PK'），与文件名无关；
- * - **.deb 支持**（[extractDeb]）：ar 归档 + `data.tar[.xz|.gz]` 成员，glibc 运行时
- *   走真实 Debian 镜像在线组装时用。
+ * - **.deb 支持**（[extractDeb]）：ar 归档 + `data.tar[.xz|.gz]` 成员，安装 proot 三件套
+ *   （Termux 官方仓库 .deb）时用。
  */
 internal object ArchiveExtractor {
 
@@ -62,9 +62,8 @@ internal object ArchiveExtractor {
     /**
      * 解压 Debian 软件包（`.deb` = `ar` 归档）的 `data.tar[.xz|.gz]` 成员到 [dest]。
      *
-     * 用于 glibc 运行时在线安装：内置镜像是真实 Debian 仓库（见 `EnvDownloader.GLIBC_MIRRORS`），
-     * 下载 `libc6` / `libgcc-s1` / `libstdc++6` 三个 .deb 后用本方法解包，再由
-     * `GlibcDebRuntime.flatten` 扁平化组装成 `lib/`——与 `tools/glibc-runtime/build.sh` 同流程。
+     * 用于 Linux 环境在线安装：proot / libtalloc / libandroid-shmem 三个 Termux `.deb`
+     * 下载后用本方法解包，再由 `RootfsManager.placeProotFiles` 按归一化路径落位到 rootfs。
      *
      * @param totalBytes 进度换算用（.deb 大小，未知传 0）
      * @return `data.tar*` 的解压结果
