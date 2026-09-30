@@ -145,6 +145,8 @@ object RootfsManager {
             domestic = source == EnvSource.MIRROR,
             ubuntuArch = ubuntuArch(EnvDownloader.primaryArch()),
         )
+        // 运行时 uid/补充组 → guest passwd/group（消除 groups 的按名解析告警）
+        Proot.syncAccounts(context)
         marker.writeText(expected)
         onStage("Linux 环境安装完成")
         onProgress(1f)
@@ -197,6 +199,8 @@ object RootfsManager {
             domestic = domestic,
             ubuntuArch = ubuntuArch(EnvDownloader.primaryArch()),
         )
+        // 运行时 uid/补充组 → guest passwd/group（消除 groups 的按名解析告警）
+        Proot.syncAccounts(context)
         Proot.markerFile(context).writeText(markerContent(EnvDownloader.primaryArch()))
         onStage("Linux 环境安装完成")
         onProgress(1f)

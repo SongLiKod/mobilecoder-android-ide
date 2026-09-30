@@ -1,10 +1,12 @@
 package com.mobilecoder.ide.core.common.linux
 
 import android.content.Context
+import android.os.Process
+import android.system.Os
 import java.io.File
 
 /**
- * proot 执行通道：目录约定、就绪判定、argv 组装、子进程环境变量。
+ * proot 执行通道：目录约定、就绪判定、argv 组装、子进程环境变量、guest 账号映射。
  *
  * **架构**：Ubuntu 24.04 rootfs（`files/linux/rootfs`）+ Termux proot 三件套
  * （`files/linux/bin/proot`、`bin/loader`、`lib` 下的运行库）。终端、构建、npm、sdkmanager
@@ -219,4 +221,123 @@ object Proot {
         if (!isReady(context)) return null
         return prootArgs(configFor(context, cwd)) + arrayOf("/bin/bash", "--login")
     }
+
+    // ------------------------------------------------------------------
+    // guest 账号映射（/etc/passwd、/etc/group）
+    // ------------------------------------------------------------------
+
+    /**
+     * 把运行时 uid / 主 gid / 补充组同步进 guest `/etc/passwd`、`/etc/group`
+     * （幂等；rootfs 未安装或失败时静默返回，不影响主流程）。
+     *
+     * **为什么必须同步**：Android 的 app uid/gid 是安装时动态分配的（3003、9997、
+     * 99909997 …），Ubuntu rootfs 镜像不可能预置这些条目；而 proot `--root-id` 的
+     * fake_id0 **只伪装 `getuid`/`getgid`（→ 0/root），不伪装 `getgroups`**——
+     * guest 内补充组仍是真实 Android gid。缺映射时 `groups` / `id` 等按名解析
+     * 会逐个报 `groups: cannot find name for group ID 3003`。
+     *
+     * 调用点：`RootfsManager.install` 首启配置之后、`TerminalManager.init`
+     * （覆盖已装环境——升级 APK 后无需重装即可消除告警；换 uid 重装同样自愈）。
+     */
+    fun syncAccounts(context: Context) {
+        val rootfs = rootfsDir(context)
+        if (!rootfs.isDirectory) return
+        runCatching {
+            // 首选 /proc/self/status：android.jar 没有 `Os.getgroups()`，而补充组
+            // 恰恰是本函数的主角——/proc 这里给出的就是 getgroups(2) 的真实结果
+            val proc = runCatching { File("/proc/self/status").readText() }
+                .getOrNull()
+                ?.let { parseProcStatus(it) }
+            val uid = proc?.uid ?: Process.myUid()
+            val gid = proc?.gid ?: Os.getegid()
+            val gids = ((proc?.gids ?: emptyList()) + gid).filter { it > 0 }.distinct().toIntArray()
+            applyAccounts(File(rootfs, "etc"), uid, gid, gids, context.filesDir.absolutePath)
+        }
+    }
+
+    /** [parseProcStatus] 的解析结果：真实 uid / 主 gid / 补充组。 */
+    internal data class ProcStatus(
+        val uid: Int,
+        val gid: Int,
+        val gids: List<Int>,
+    )
+
+    /**
+     * 解析 `/proc/self/status` 的 `Uid:` / `Gid:` / `Groups:` 三行（JVM 可测）。
+     *
+     * 格式（procfs 全平台一致，制表符分隔）：
+     * ```
+     * Uid:    10359   10359   10359   10359
+     * Gid:    10359   10359   10359   10359
+     * Groups: 3003 9997 20632 50632 99909997
+     * ```
+     * 取首列（real id）；`Groups:` 可缺省（无补充组时可能整行省略）。
+     * `Uid:` / `Gid:` 任一缺失或非数字 → 返回 null（交调用方回退 Android API）。
+     */
+    internal fun parseProcStatus(text: String): ProcStatus? {
+        var uid: Int? = null
+        var gid: Int? = null
+        var gids: List<Int> = emptyList()
+        for (raw in text.lineSequence()) {
+            val fields = raw.trim().split(Regex("\\s+"))
+            when {
+                fields.size >= 2 && fields[0] == "Uid:" -> uid = uid ?: fields[1].toIntOrNull()
+                fields.size >= 2 && fields[0] == "Gid:" -> gid = gid ?: fields[1].toIntOrNull()
+                fields.size >= 2 && fields[0] == "Groups:" ->
+                    gids = fields.drop(1).mapNotNull { it.toIntOrNull() }
+            }
+        }
+        if (uid == null || gid == null) return null
+        return ProcStatus(uid = uid, gid = gid, gids = gids)
+    }
+
+    /**
+     * [syncAccounts] 的纯文件实现（JVM 可测）：
+     *
+     * - `passwd`：`mobilecoder` 行按 **uid 或用户名命中**即替换（覆盖重装换 uid），
+     *   其余行（root / nobody …）原样保留；
+     * - `group`：每个补充组一行 `android<gid>:x:<gid>:`；同 gid 已有条目（如
+     *   `dialout:x:3003:`）保留原名不重复；`0`/负数不写（root 已存在）。
+     *
+     * 重复执行不产生重复行。
+     *
+     * @param etc  guest 的 `etc` 目录（不存在则创建）
+     * @param uid  运行时 uid（`/proc/self/status` 的 `Uid:` 首列，回退 `Process.myUid()`）
+     * @param gid  运行时主 gid（`Gid:` 首列，回退 `Os.getegid()`）
+     * @param gids 补充组 ∪ 主 gid（`Groups:` 行；>0、已去重）
+     * @param home guest 内 HOME（与 host 同路径 bind）
+     */
+    internal fun applyAccounts(
+        etc: File,
+        uid: Int,
+        gid: Int,
+        gids: IntArray,
+        home: String,
+    ) {
+        if (!etc.isDirectory && !etc.mkdirs()) {
+            throw java.io.IOException("无法创建目录：${etc.absolutePath}")
+        }
+
+        val passwd = File(etc, "passwd")
+        val passwdLines = runCatching { passwd.readLines() }.getOrDefault(emptyList())
+        val entry = "$ACCOUNT_NAME:x:$uid:$gid:MobileCoder app:$home:/bin/bash"
+        val kept = passwdLines.filter { line ->
+            val f = line.split(':')
+            f.size < 3 || (f[0] != ACCOUNT_NAME && f[2].toIntOrNull() != uid)
+        }
+        passwd.writeText((kept + entry).joinToString("\n") + "\n")
+
+        val group = File(etc, "group")
+        val groupLines = runCatching { group.readLines() }.getOrDefault(emptyList())
+        val existing = groupLines
+            .mapNotNull { it.split(':').getOrNull(2)?.toIntOrNull() }
+            .toSet()
+        val additions = gids.filter { it > 0 && it !in existing }.map { "android$it:x:$it:" }
+        if (additions.isNotEmpty()) {
+            group.writeText((groupLines + additions).joinToString("\n") + "\n")
+        }
+    }
+
+    /** guest 账号名（与 `etc/hostname` 的 mobilecoder 保持一致）。 */
+    private const val ACCOUNT_NAME = "mobilecoder"
 }

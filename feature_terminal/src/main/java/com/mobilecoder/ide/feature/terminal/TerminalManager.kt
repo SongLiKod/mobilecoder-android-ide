@@ -90,7 +90,10 @@ object TerminalManager {
                 runCatching { File(app.filesDir, "logs").mkdirs() }
                 // 4) shell 启动配置：.mkshrc 与 .profile（内容相同，双保险）
                 runCatching { writeShellConfig(app) }
-                // 5) 探测原生库是否可加载（失败只降级提示，绝不崩溃）
+                // 5) guest 账号映射：Android 动态 uid/补充组写进 rootfs 的 passwd/group
+                //    （幂等；已装环境升级 APK 后此处一次即可消除 groups 告警，无需重装）
+                runCatching { Proot.syncAccounts(app) }
+                // 6) 探测原生库是否可加载（失败只降级提示，绝不崩溃）
                 try {
                     TerminalNative.setEnv("MOBILECODER_TERMINAL", "1")
                     nativeOk = true
