@@ -237,7 +237,26 @@ object TerminalManager {
         session.id = id
         _sessions.value = _sessions.value + session
         _activeId.value = id
+        syncKeepAlive()
         return session
+    }
+
+    /**
+     * 会话数量变化 → 同步终端保活前台服务（[TerminalForegroundService]）。
+     *
+     * 有会话：拉起/刷新常驻通知，退后台后进程**不再是 cached 状态**——不会被
+     * Android 12+ 的缓存应用冻结器 SIGSTOP，也不会轻易被 LMK 回收，任务与
+     * 监听端口持续可用（「切到后台也可以访问」的关键）。
+     * 全部关闭：停服务、撤通知。
+     */
+    private fun syncKeepAlive() {
+        val ctx = appContext ?: return
+        val count = _sessions.value.size
+        if (count > 0) {
+            runCatching { TerminalForegroundService.keepAlive(ctx, count) }
+        } else {
+            runCatching { TerminalForegroundService.stop(ctx) }
+        }
     }
 
     /** 关闭单个会话（销毁底层 PTY 并移出列表）。 */
@@ -247,6 +266,7 @@ object TerminalManager {
         val rest = _sessions.value.filterNot { it.id == id }
         _sessions.value = rest
         if (_activeId.value == id) _activeId.value = rest.lastOrNull()?.id ?: 0
+        syncKeepAlive()
     }
 
     /** 关闭全部会话。 */
@@ -255,6 +275,7 @@ object TerminalManager {
         _sessions.value = emptyList()
         _activeId.value = 0
         list.forEach { it.destroy() }
+        syncKeepAlive()
     }
 
     /** 重启已退出的会话（同一 cwd / 尺寸，标签位置由 UI 决定）。 */
