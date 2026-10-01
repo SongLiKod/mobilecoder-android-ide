@@ -159,22 +159,11 @@ object TerminalManager {
 
     /**
      * `files/bin/<name>` 是否存在（npm 全局安装的外部 CLI，如 opencode-ai 的 `opencode`）。
-     * 内建前缀已改为 `apt`，外部 `opencode` 不再与内建命令冲突：输入 `opencode …`
-     * 会直通 shell 直接运行该二进制。
+     * 这些外部命令不参与进程内拦截：输入 `opencode …` 直通 shell 直接运行该二进制。
      */
     fun externalBinExists(name: String): Boolean = runCatching {
         val ctx = appContext ?: return false
         File(ctx.filesDir, "bin/$name").exists()
-    }.getOrDefault(false)
-
-    /**
-     * Linux 环境（Ubuntu rootfs + proot）是否就绪：
-     * 决定终端 shell 形态（guest bash vs bionic mksh），以及真 `apt` 是否可用
-     * （见 `TerminalSession.acceptIntercepted`）。
-     */
-    fun isLinuxReady(): Boolean = runCatching {
-        val ctx = appContext ?: return false
-        Proot.isReady(ctx)
     }.getOrDefault(false)
 
     // ------------------------------------------------------------------

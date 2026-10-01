@@ -3,13 +3,12 @@ package com.mobilecoder.ide.feature.build
 import android.app.ActivityManager
 import android.content.Context
 import android.util.Log
-import com.mobilecoder.ide.core.common.cli.CliCommand
-import com.mobilecoder.ide.core.common.cli.AptCli
 import com.mobilecoder.ide.core.common.linux.Proot
 import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.core.storage.HistoryStore
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
@@ -35,11 +34,9 @@ import org.json.JSONObject
  *  2. 实时日志 [logs]（按行切分、`\r` 进度刷新处理、级别着色）与错误定位 [errors]；
  *  3. `CliNative.exec("sh -c …")` 执行 Gradle，注入 JAVA_HOME / ANDROID_HOME / GRADLE_USER_HOME 等环境；
  *  4. 内存监控 [memory]：超限或系统已用 >90% 自动 kill，避免 OOM 崩溃；
- *  5. 前台服务保活 + 完成通知（[BuildForegroundService]）；
- *  6. 向 AptCli 注册 `build` / `package`（group="构建"）。
+ *  5. 前台服务保活 + 完成通知（[BuildForegroundService]）。
  *
- * **防自锁**：UI 按钮与 CLI 命令都只走 [start]（进程级单入口），
- * 不会再调用 `AptCli.run`，因此不会与引擎自身的 Mutex 队列互相等待。
+ * **单入口**：构建统一走 [start]（进程级单入口），同一时刻只会有一个任务。
  *
  * 线程模型：JNI 回调发生在子进程读线程，只更新 StateFlow（快照不可变），
  * Compose 在主线程收集 —— UI 更新天然回到主线程。
@@ -144,7 +141,6 @@ object BuildRunner {
                 appContext = context.applicationContext
                 AppStorage.init(appContext)
                 NativeRuntime.ensureProcessEnvironment(appContext)
-                registerCliCommands()
                 initialized = true
                 scope.launch {
                     runCatching {
@@ -159,187 +155,16 @@ object BuildRunner {
     }
 
     // ------------------------------------------------------------------
-    // CLI 命令注册（apt build / apt package）
-    // ------------------------------------------------------------------
-
-    private fun registerCliCommands() {
-        AptCli.register(
-            CliCommand(
-                name = "build",
-                summary = "项目编译（Gradle assembleDebug/assembleRelease）",
-                usage = "apt build [--release] [clean]",
-                group = "构建",
-            ) { args, cwd, emit ->
-                val variant = if (args.any { it.equals("--release", true) || it.equals("release", true) }) {
-                    "release"
-                } else {
-                    "debug"
-                }
-                val clean = args.any { it.equals("clean", true) || it.equals("--clean", true) }
-                val extra = args.filter { isSafeTaskName(it) }
-                awaitBuild(BuildRequest(cwd, variant, clean, extra), emit)
-            },
-        )
-        AptCli.register(
-            CliCommand(
-                name = "package",
-                summary = "打包 APK（等价 assemble 并列出产物）",
-                usage = "apt package [--debug]",
-                group = "构建",
-            ) { args, cwd, emit ->
-                val variant = if (args.any { it.equals("--debug", true) || it.equals("debug", true) }) {
-                    "debug"
-                } else {
-                    "release"
-                }
-                val extra = args.filter { isSafeTaskName(it) }
-                awaitBuild(BuildRequest(cwd, variant, false, extra), emit)
-            },
-        )
-        AptCli.register(
-            CliCommand(
-                name = "tools",
-                summary = "软件安装（Node.js / AI CLI / npm 源里的任意软件）",
-                usage = "apt tools [install|uninstall|update|list|search] [<软件名>…]",
-                group = "系统",
-            ) { args, _, emit ->
-                val source = runCatching {
-                    if (AppStorage.preferences.envDownloadSource() == "mirror") {
-                        EnvSource.MIRROR
-                    } else {
-                        EnvSource.OFFICIAL
-                    }
-                }.getOrDefault(EnvSource.OFFICIAL)
-                val sub = args.firstOrNull()?.lowercase()
-                val rest = args.drop(1)
-                val invalid = rest.filter { ToolInstaller.resolvePackage(it) == null }
-                when (sub) {
-                    null -> {
-                        ToolInstaller.statusLines(appContext).forEach(emit)
-                        0
-                    }
-
-                    "list", "ls" -> {
-                        ToolInstaller.listLines(appContext).forEach(emit)
-                        0
-                    }
-
-                    "search", "find" -> {
-                        if (rest.isEmpty() || rest.any { !ToolInstaller.validToken(it) }) {
-                            emit("用法：apt tools search <关键字>…")
-                            1
-                        } else {
-                            ToolInstaller.search(appContext, source, emit, rest)
-                        }
-                    }
-
-                    "install" -> when {
-                        invalid.isNotEmpty() -> {
-                            emit("error: 非法软件名：" + invalid.joinToString(" "))
-                            1
-                        }
-
-                        else -> ToolInstaller.install(
-                            appContext,
-                            source,
-                            emit,
-                            packages = rest.map { ToolInstaller.resolvePackage(it)!! },
-                        )
-                    }
-
-                    "uninstall", "rm", "remove" -> when {
-                        invalid.isNotEmpty() -> {
-                            emit("error: 非法软件名：" + invalid.joinToString(" "))
-                            1
-                        }
-
-                        rest.isEmpty() -> {
-                            emit("用法：apt tools uninstall <软件名>…")
-                            1
-                        }
-
-                        else -> ToolInstaller.uninstall(
-                            appContext,
-                            source,
-                            emit,
-                            rest.map { ToolInstaller.resolvePackage(it)!! },
-                        )
-                    }
-
-                    "update", "up" -> when {
-                        invalid.isNotEmpty() -> {
-                            emit("error: 非法软件名：" + invalid.joinToString(" "))
-                            1
-                        }
-
-                        else -> ToolInstaller.update(
-                            appContext,
-                            source,
-                            emit,
-                            rest.map { ToolInstaller.resolvePackage(it)!! },
-                        )
-                    }
-
-                    "help", "-h", "--help" -> {
-                        ToolInstaller.usageLines().forEach(emit)
-                        0
-                    }
-
-                    else -> {
-                        emit("error: unknown command `$sub'")
-                        ToolInstaller.usageLines().forEach(emit)
-                        1
-                    }
-                }
-            },
-        )
-    }
-
-    /** CLI 侧：同步等待真实构建结束，逐行转发日志，返回 0/1。 */
-    private suspend fun awaitBuild(request: BuildRequest, emit: (String) -> Unit): Int {
-        val exit = start(request)
-        if (exit == null) {
-            emit("已有构建任务正在进行，请等待完成或先在「构建」页取消")
-            return 1
-        }
-        var forwarded = 0
-        val forwarder = scope.launch {
-            logs.collect { list ->
-                if (list.size > forwarded) {
-                    list.subList(forwarded, list.size).forEach { line ->
-                        emit("${prefixOf(line.level)}${line.text}")
-                    }
-                    forwarded = list.size
-                }
-            }
-        }
-        val code = try {
-            exit.await()
-        } finally {
-            forwarder.cancel()
-        }
-        emit(if (code == 0) "构建成功" else "构建失败（退出码 $code）")
-        return code
-    }
-
-    private fun prefixOf(level: BuildLogLevel): String = when (level) {
-        BuildLogLevel.ERROR -> "[ERROR] "
-        BuildLogLevel.WARN -> "[WARN] "
-        BuildLogLevel.INPUT -> "> "
-        else -> ""
-    }
-
-    // ------------------------------------------------------------------
     // 构建入口
     // ------------------------------------------------------------------
 
-    /** 是否为可构建的 Gradle 工程（缺骨架时给出 `apt init` 引导）。 */
+    /** 是否为可构建的 Gradle 工程。 */
     fun isGradleProject(dir: File): Boolean =
         listOf("settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts", "gradlew")
             .any { File(dir, it).exists() }
 
     /**
-     * 启动一次构建（UI 按钮与 CLI 共用）。
+     * 启动一次构建（构建页唯一入口）。
      *
      * @return 退出码的 [CompletableDeferred]；已有构建在跑或未初始化时返回 null
      */
@@ -474,7 +299,7 @@ object BuildRunner {
             return fail(
                 task, startedAt,
                 "未检测到 Gradle 工程（缺少 settings.gradle / build.gradle / gradlew）。" +
-                    "可在 CLI 面板执行 `apt init` 生成安卓项目骨架后重试",
+                    "可在「项目」页新建「安卓应用」项目生成骨架后重试",
             )
         }
 
@@ -1050,6 +875,20 @@ object BuildRunner {
             runCatching {
                 withContext(Dispatchers.IO) { writeHistory(next) }
             }
+            // 同步写入「记录」页：构建属于命令之外的「其它操作」流水
+            runCatching {
+                val taskName = if (task.variant == "release") "assembleRelease" else "assembleDebug"
+                val extras = buildString {
+                    if (task.clean) append(" clean")
+                    task.extraTasks.forEach { append(" ").append(it) }
+                }
+                val projectName = File(task.projectPath).name
+                val status = if (success) "成功" else "失败"
+                HistoryStore.add(
+                    text = "$taskName$extras · $projectName · $status（${durationMs / 1000}s）",
+                    source = HistoryStore.SOURCE_BUILD,
+                )
+            }
         }
     }
 
@@ -1121,7 +960,6 @@ object BuildRunner {
     /** 附加 Gradle 任务名校验（默认无附加任务，只有用户显式输入时才生效）。 */
     private fun isSafeTaskName(value: String): Boolean {
         if (value.isBlank() || value.startsWith("-")) return false
-        if (value.startsWith("apt")) return false
         return value.matches(Regex("""^[A-Za-z0-9_.:\-]+$"""))
     }
 

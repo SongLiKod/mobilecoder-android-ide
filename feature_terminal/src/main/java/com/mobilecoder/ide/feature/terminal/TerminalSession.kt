@@ -3,7 +3,7 @@ package com.mobilecoder.ide.feature.terminal
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import com.mobilecoder.ide.core.common.cli.AptCli
+import com.mobilecoder.ide.core.common.cli.CliEngine
 import com.mobilecoder.ide.core.nativebridge.TerminalCallback
 import com.mobilecoder.ide.core.nativebridge.TerminalNative
 import java.io.ByteArrayOutputStream
@@ -27,7 +27,7 @@ enum class TerminalSpecialKey { ESC, TAB, UP, DOWN, LEFT, RIGHT, HOME, END }
  * 一个独立的终端会话（PRD 2.3「多终端窗口并行」）。
  *
  * 每个会话持有：独立 PTY（native 层 sessionId）、独立屏幕缓冲 [emulator]、
- * 独立的 apt 拦截器与滚动日志；切换标签即切换视图，进程级单例持有故
+ * 独立的命令拦截器与滚动日志；切换标签即切换视图，进程级单例持有故
  * 切走底部导航再回来仍在运行（后台长时间任务不中断）。
  *
  * 线程约定：
@@ -78,35 +78,19 @@ class TerminalSession(
     val cliRunning: StateFlow<Boolean> = _cliRunning.asStateFlow()
 
     /**
-     * 命令拦截器（前缀缓冲 + 本地回显 + 回滚；目标来自 CLI 注册表：apt / git）。
+     * 命令拦截器（前缀缓冲 + 本地回显 + 回滚；目标来自 CliEngine 注册表：当前为 `git`）。
      *
-     * `accept` 做**二次分流**：只有进程内注册表里有的 `apt <子命令>`（裸 `apt` 用法
-     * 输出也算）与 `git …` 留给进程内 CLI；`apt install curl` 这类未注册子命令
-     * 回滚交回 shell —— Linux 环境就绪时由 rootfs 里的**真 apt** 接管
-     * （终端就是完整 Linux 的关键），未就绪时补一条安装引导提示。
+     * `accept` 做**二次分流**：只有进程内注册表里有的 `git …` 留给进程内引擎；
+     * 其余行（含 `apt …` —— apt CLI 已移除）回滚交回 shell，Linux 环境就绪时
+     * 由 rootfs 里的真实命令（真 apt / apt-get 等）接管。
      */
-    private val interceptor = AptInterceptor(
-        targets = { AptCli.interceptTargets() },
-        accept = { line -> acceptIntercepted(line) },
+    private val interceptor = CommandInterceptor(
+        targets = { CliEngine.interceptTargets() },
+        accept = { line -> CliEngine.isInProcessLine(line) },
         onWritePty = { bytes -> writeRaw(bytes) },
         onLocalEcho = { text -> onMain { emulator.feed(text) } },
         onRollback = { count -> onMain { emulator.erasePrinted(count) } },
     )
-
-    /** Enter 时的分流判定（[AptInterceptor] 的 accept 钩子）。 */
-    private fun acceptIntercepted(line: String): Boolean {
-        if (AptCli.isInProcessLine(line)) return true
-        // 未注册的 apt 子命令（apt install / apt update …）交回 shell：rootfs 就绪时
-        // 由 proot 内的真 apt 执行；未就绪时 bionic shell 会报 “apt: not found”，
-        // 这里同时弹一条引导，免得用户对着一行报错不知所措
-        if (!TerminalManager.isLinuxReady()) {
-            TerminalManager.showNotice(
-                "「${line.trim().takeIf { it.isNotBlank() } ?: "apt install"}」需要 Linux 环境" +
-                    "（Ubuntu rootfs + proot）。\n请在「构建环境」页安装「Linux 环境」后重试（约 35MB）。",
-            )
-        }
-        return false
-    }
 
     private val flushTask = Runnable { flushNow() }
 
@@ -172,8 +156,8 @@ class TerminalSession(
         val value = code.coerceIn(0, 31)
         if (value == 3) {
             interceptor.interrupt()
-            // 进程内 CLI 正在执行（命令没交给 PTY，shell 那边无事可中断）→ 取消它
-            if (_cliRunning.value && runCatching { AptCli.cancelCurrent() }.getOrDefault(false)) {
+            // 进程内命令正在执行（命令没交给 PTY，shell 那边无事可中断）→ 取消它
+            if (_cliRunning.value && runCatching { CliEngine.cancelCurrent() }.getOrDefault(false)) {
                 postEmit("^C")
                 return
             }
@@ -185,20 +169,20 @@ class TerminalSession(
     fun sendBackspace() = interceptor.backspace()
 
     // ------------------------------------------------------------------
-    // 进程内 CLI（PRD 2.4：终端手动输入）
+    // 进程内命令（终端手动输入 `git …`）
     // ------------------------------------------------------------------
 
     /**
-     * CLI 执行（PRD 2.4：终端手动输入）。
+     * 进程内命令执行（终端手动输入）。
      *
-     * 拦截器保证命令首词是 `apt` 或已注册的进程内命令（如 `git`），
-     * 统一交给 AptCli 按首词分发。
+     * 拦截器保证命令首词是已注册的进程内命令（当前为 `git`），
+     * 统一交给 CliEngine 按首词分发。
      */
     private fun runCli(commandLine: String) {
         // 命令本身已本地回显：换行开始输出
         onMain { emulator.feed("\r\n") }
 
-        if (!AptCli.isIdle) {
+        if (!CliEngine.isIdle) {
             onMain { emulator.feed("已有命令在执行中，请稍候再试\r\n") }
             writeRaw(BYTE_CR) // 让 shell 重新打印提示符
             return
@@ -208,7 +192,7 @@ class TerminalSession(
         _cliRunning.value = true
         scope.launch(Dispatchers.IO) {
             try {
-                AptCli.run(commandLine, cwdFile) { line -> postEmit(line) }
+                CliEngine.run(commandLine, cwdFile) { line -> postEmit(line) }
             } catch (e: CancellationException) {
                 // Ctrl+C 取消：引擎已回显「命令已取消」，这里不重复报错
                 throw e

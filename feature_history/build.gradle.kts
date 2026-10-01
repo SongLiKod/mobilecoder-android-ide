@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.mobilecoder.ide.feature.cli"
+    namespace = "com.mobilecoder.ide.feature.history"
     compileSdk = 35
 
     defaultConfig {
@@ -29,12 +29,9 @@ android {
 dependencies {
     implementation(project(":core_common"))
     implementation(project(":core_storage"))
-    implementation(project(":core_native"))
-    implementation(project(":feature_terminal"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(platform(libs.androidx.compose.bom))

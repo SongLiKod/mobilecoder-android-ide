@@ -193,7 +193,7 @@ class ProjectRepository(
 
     /**
      * 生成项目骨架文件，返回写入成功的文件数。
-     * CLI 的 `apt init` 与新建项目对话框共用此方法。
+     * 新建项目对话框（选择「安卓应用」模板）走这里。
      */
     fun scaffold(root: File, template: ProjectTemplate): Int {
         root.mkdirs()

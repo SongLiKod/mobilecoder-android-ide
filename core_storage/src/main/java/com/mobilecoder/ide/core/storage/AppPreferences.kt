@@ -9,9 +9,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
+import org.json.JSONObject
 
 /**
- * 全局配置（编辑器/终端/Git/CLI/构建等模块的用户设置）。
+ * 全局配置（编辑器/终端/Git/历史记录/构建等模块的用户设置）。
  * 所有方法均为 suspend，读写走同一个 DataStore 单例，天然原子。
  */
 class AppPreferences(
@@ -63,24 +64,48 @@ class AppPreferences(
     suspend fun terminalFontSize(): Int = getInt(KEY_TERM_FONT, 13)
     suspend fun setTerminalFontSize(value: Int) = setInt(KEY_TERM_FONT, value.coerceIn(9, 24))
 
+    /** 旧版终端命令历史（仅用于迁移进 [HistoryStore]，新写入已停用）。 */
     suspend fun terminalHistory(): List<String> = jsonArray(KEY_TERM_HISTORY)
-    suspend fun addTerminalHistory(command: String, limit: Int = 200) {
-        if (command.isBlank()) return
-        val current = jsonArray(KEY_TERM_HISTORY).toMutableList()
-        current.remove(command)
-        current.add(0, command)
-        set(KEY_TERM_HISTORY, JSONArray(current.take(limit)).toString())
+
+    suspend fun clearTerminalHistory() = set(KEY_TERM_HISTORY, "[]")
+
+    // ---------------- 历史记录（「记录」页） ----------------
+
+    /** 全部历史记录（JSON 对象数组，按时间倒序持久化）。 */
+    suspend fun historyRecords(): List<HistoryRecord> {
+        val raw = get(KEY_HISTORY) ?: return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList {
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    add(
+                        HistoryRecord(
+                            id = obj.optString("id"),
+                            text = obj.optString("text"),
+                            source = obj.optString("source"),
+                            time = obj.optLong("time"),
+                            favorite = obj.optBoolean("favorite"),
+                        ),
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
     }
 
-    // ---------------- CLI ----------------
-
-    suspend fun cliHistory(): List<String> = jsonArray(KEY_CLI_HISTORY)
-    suspend fun addCliHistory(line: String, limit: Int = 100) {
-        if (line.isBlank()) return
-        val current = jsonArray(KEY_CLI_HISTORY).toMutableList()
-        current.remove(line)
-        current.add(0, line)
-        set(KEY_CLI_HISTORY, JSONArray(current.take(limit)).toString())
+    suspend fun setHistoryRecords(records: List<HistoryRecord>) {
+        val array = JSONArray()
+        records.forEach { record ->
+            array.put(
+                JSONObject()
+                    .put("id", record.id)
+                    .put("text", record.text)
+                    .put("source", record.source)
+                    .put("time", record.time)
+                    .put("favorite", record.favorite),
+            )
+        }
+        set(KEY_HISTORY, array.toString())
     }
 
     // ---------------- 构建 ----------------
@@ -167,7 +192,7 @@ class AppPreferences(
         private val KEY_EDITOR_AUTOSAVE = stringPreferencesKey("editor_autosave")
         private val KEY_TERM_FONT = intPreferencesKey("terminal_font_size")
         private val KEY_TERM_HISTORY = stringPreferencesKey("terminal_history")
-        private val KEY_CLI_HISTORY = stringPreferencesKey("cli_history")
+        private val KEY_HISTORY = stringPreferencesKey("history_records")
         private val KEY_BUILD_VARIANT = stringPreferencesKey("build_variant")
         private val KEY_BUILD_MEM = intPreferencesKey("build_memory_limit_mb")
         private val KEY_ENV_SOURCE = stringPreferencesKey("env_download_source")

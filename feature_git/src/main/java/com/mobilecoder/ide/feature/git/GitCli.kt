@@ -1,7 +1,7 @@
 package com.mobilecoder.ide.feature.git
 
 import com.mobilecoder.ide.core.common.cli.CliCommand
-import com.mobilecoder.ide.core.common.cli.AptCli
+import com.mobilecoder.ide.core.common.cli.CliEngine
 import com.mobilecoder.ide.core.nativebridge.GitNative
 import java.io.File
 import java.text.SimpleDateFormat
@@ -62,21 +62,18 @@ object GitCli {
     )
 
     /**
-     * 注册进 CLI 引擎（`terminalIntercept = true`：终端输入 `git …` 由拦截器接管，
-     * CLI 面板也会出现「版本控制」分组的 git 命令）。由 `GitController.init` 调用。
+     * 注册进命令引擎（`terminalIntercept = true`：终端输入 `git …` 由拦截器接管，
+     * 因为 Android 设备上没有 git 可执行文件）。由 `GitController.init` 调用。
      */
     fun register() {
-        AptCli.register(
+        CliEngine.register(
             CliCommand(
                 name = "git",
-                summary = "Git 子命令（进程内 libgit2，Android 无 git 二进制）",
-                usage = "git <status|log|add|commit|...>",
-                group = "版本控制",
                 terminalIntercept = true,
             ) { args, cwd, emit -> execute(args, cwd, emit) },
         )
-        // 用户点「停止」/ Ctrl+C 时，同时中止可能阻塞在 native 里的 fetch / push
-        AptCli.onCancel = { GitNative.cancelNetwork() }
+        // 用户 Ctrl+C 时，同时中止可能阻塞在 native 里的 fetch / push
+        CliEngine.onCancel = { GitNative.cancelNetwork() }
     }
 
     // ------------------------------------------------------------------
