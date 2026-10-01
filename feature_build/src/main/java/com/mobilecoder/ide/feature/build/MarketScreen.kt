@@ -187,7 +187,7 @@ private fun MarketCard(
                             color = MaterialTheme.colorScheme.secondaryContainer,
                         ) {
                             Text(
-                                text = "v${item.version}",
+                                text = MarketInstaller.versionLabel(item.version),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
@@ -229,6 +229,14 @@ private fun MarketCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            if (item.id == "opencode" && "nodejs" !in state.installed) {
+                Text(
+                    text = "依赖 Node.js：请先安装上方的 Node.js，完成后再安装 opencode。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = warnColor,
+                )
+            }
 
             if (nodeShimmed && item.id == "nodejs") {
                 Text(

@@ -4,6 +4,11 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// 应用版本唯一来源 = gradle.properties 的 VERSION_NAME（3.0.0）。
+// 此处只读取与推导，勿再另写版本号字面量。
+val appVersion = property("VERSION_NAME") as String
+val versionParts = appVersion.split(".")
+
 android {
     namespace = "com.mobilecoder.ide"
     compileSdk = 35
@@ -17,8 +22,12 @@ android {
         // ——即使执行位齐全也照样失败，终端 / Gradle 构建 / npm 全都跑不起来。
         // Termux 至今仍用 28 就是同一个原因。不上 Google Play，故不受 target API 要求限制。
         targetSdk = 28
-        versionCode = 1
-        versionName = "1.0.0"
+        // versionCode 由 VERSION_NAME 推导（主版本×1e6 + 次版本×1e3 + 修订号），
+        // 与 versionName 同源：改 gradle.properties 一行即可，3.0.0 → 3000000
+        versionCode = versionParts[0].toInt() * 1_000_000 +
+            (versionParts.getOrNull(1)?.toIntOrNull() ?: 0) * 1_000 +
+            (versionParts.getOrNull(2)?.toIntOrNull() ?: 0)
+        versionName = appVersion
         vectorDrawables { useSupportLibrary = true }
     }
 
