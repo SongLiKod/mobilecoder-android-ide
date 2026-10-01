@@ -7,6 +7,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -70,6 +73,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -99,7 +103,11 @@ import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.core.storage.HistoryStore
 import com.mobilecoder.ide.feature.git.GitController
+import kotlin.math.abs
 import kotlinx.coroutines.launch
+
+/** 手势长按阈值（ms，Android/Compose 默认值）：超过即视为选区拖动而非滚轮。 */
+private const val LONG_PRESS_TIMEOUT_MS = 500L
 
 /**
  * PRD 2.3「内置终端」页面。
@@ -111,6 +119,8 @@ import kotlinx.coroutines.launch
  *  - 自动绑定项目路径：进入页面即把会话 cwd 建到 projectPath；
  *  - 终端配色全部来自 [LocalAppPalette] 的 terminal* 字段 / MaterialTheme（深浅色自动切换）；
  *  - 长按选中复制（SelectionContainer）、scrollback 竖向滚动 + 自动贴底；
+ *  - 鼠标报告模式（TUI 开 `?1000/1002/1006`）下触摸转滚轮/点击发给程序，
+ *    双指竖滑仍滚本地历史；未开启时手势行为不变；
  *  - 溢出菜单：新建 / 重命名 / 清屏 / 导出日志 / 关闭全部 / 字号调节。
  */
 @Composable
@@ -448,6 +458,14 @@ fun TerminalScreen(
                         active?.sendSpecial(TerminalSpecialKey.END, ctrlOn)
                         ctrlOn = false
                     }
+                    KeyButton("PgUp") {
+                        active?.sendSpecial(TerminalSpecialKey.PAGE_UP, ctrlOn)
+                        ctrlOn = false
+                    }
+                    KeyButton("PgDn") {
+                        active?.sendSpecial(TerminalSpecialKey.PAGE_DOWN, ctrlOn)
+                        ctrlOn = false
+                    }
                     KeyButton("⌫") { active?.sendBackspace() }
                 }
                 // 键盘图标：键盘可见时收起；不可见时先聚焦输入框再拉起 ——
@@ -770,6 +788,9 @@ private fun TerminalViewport(
     val cursorLine = emulator.cursorLineIndex()
     val listState = rememberLazyListState()
 
+    // 鼠标报告模式：单指滑动改为发滚轮给 TUI，本地滚动（userScrollEnabled）停用
+    val mouseOn = emulator.mouseMode.collectAsStateWithLifecycle().value.tracking
+
     // 贴底跟随：仅当用户本就在底部时自动滚到最新
     val followBottom = remember {
         androidx.compose.runtime.derivedStateOf {
@@ -791,6 +812,11 @@ private fun TerminalViewport(
         }
     }
 
+    // 进入鼠标报告模式先对齐屏底：触点 → 字符格的换算才与屏幕行一一对应
+    LaunchedEffect(mouseOn) {
+        if (mouseOn) listState.scrollToItem(emulator.lineCount() - 1)
+    }
+
     // 选中高亮色由 MobileCoderTheme 全局提供（LocalTextSelectionColors），
     // 这里不再局部覆盖，保证与 CLI 日志 / 输入框 / 编辑器是同一套颜色。
     SelectionContainer(
@@ -798,7 +824,10 @@ private fun TerminalViewport(
     ) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .terminalMouseGestures(session, mouseOn, listState, availableWidthPx),
+            userScrollEnabled = !mouseOn,
         ) {
             items(total) { index ->
                 val line = remember(version, index, palette) { emulator.lineAt(index) }
@@ -810,6 +839,118 @@ private fun TerminalViewport(
                     availableWidthPx = availableWidthPx,
                 )
             }
+        }
+    }
+}
+
+/**
+ * 鼠标报告模式（DECSET `?1000/1002/1003` 开启时）下的触摸手势。
+ *
+ * 手机上竖向滑动只有这一个手势，按桌面终端的约定分流：
+ *  - 单指竖滑 → 滚轮事件发给 TUI（每滑过一行发一次），opencode / lazygit
+ *    这类程序收到后自己滚动面板；
+ *  - 双指竖滑 → 照旧滚本地 scrollback（TUI 运行期间回看 shell 历史的通道）；
+ *  - 短按不移 → 左键点击（SGR 模式补发 release）。
+ *
+ * 全程不消费事件：长按选中复制（SelectionContainer）不受影响；
+ * 起手静止超过长按阈值即判定为选区拖动，本手势不再发滚轮。
+ */
+private fun Modifier.terminalMouseGestures(
+    session: TerminalSession,
+    enabled: Boolean,
+    listState: LazyListState,
+    viewportWidthPx: Int,
+): Modifier = this.pointerInput(enabled, session, listState, viewportWidthPx) {
+    if (!enabled) return@pointerInput
+    val emulator = session.emulator
+
+    /** 行高（px）：相邻两个可视行的 offset 差；不足两行时返回 0。 */
+    fun measuredRowHeight(): Int {
+        val items = listState.layoutInfo.visibleItemsInfo
+        return if (items.size >= 2) items[1].offset - items[0].offset else 0
+    }
+
+    /** 触点 → 1 基字符格（行索引 = firstVisible + 行内偏移，行高按可视行实测）。 */
+    fun cellAt(x: Float, y: Float): Pair<Int, Int> {
+        val rowH = measuredRowHeight()
+        val index = if (rowH > 0) {
+            listState.firstVisibleItemIndex +
+                ((y + listState.firstVisibleItemScrollOffset) / rowH).toInt()
+        } else {
+            listState.firstVisibleItemIndex
+        }
+        val row = (index - emulator.scrollbackSize() + 1).coerceIn(1, emulator.rows)
+        val col = if (viewportWidthPx > 0) {
+            (x * emulator.cols / viewportWidthPx).toInt().coerceIn(0, emulator.cols - 1) + 1
+        } else {
+            1
+        }
+        return col to row
+    }
+
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val start = down.position
+        val startUptime = down.uptimeMillis
+        var endPos = start
+        var endUptime = startUptime
+        var maxDist = 0f
+        var multi = false
+        var selectMode = false
+        var prevAvgY = start.y
+        var converted = 0f // 已换算成滚轮的位移（向下为正）
+
+        while (true) {
+            val event = awaitPointerEvent()
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            endPos = change.position
+            endUptime = change.uptimeMillis
+            maxDist = maxOf(maxDist, abs(endPos.x - start.x), abs(endPos.y - start.y))
+            if (!change.pressed) break
+
+            // 起手静止超过长按阈值（Android 默认 500ms）= 长按选中已触发：
+            // 本手势是选区拖动，不再发滚轮
+            if (!selectMode && maxDist < viewConfiguration.touchSlop &&
+                endUptime - startUptime >= LONG_PRESS_TIMEOUT_MS
+            ) {
+                selectMode = true
+            }
+
+            val pressed = event.changes.filter { it.pressed }
+            if (pressed.size >= 2) {
+                // 双指：滚本地 scrollback（手指上滑 → 内容上移 → delta 为正）
+                val avgY = pressed.map { it.position.y }.average().toFloat()
+                if (multi) listState.dispatchRawDelta(prevAvgY - avgY)
+                multi = true
+                prevAvgY = avgY
+                continue
+            }
+            if (multi || selectMode) continue
+
+            val rowH = measuredRowHeight().toFloat()
+            if (rowH <= 0f) continue
+            val dy = endPos.y - start.y
+            var batch = 0
+            while (dy - converted >= rowH && batch < 8) {
+                val (col, row) = cellAt(endPos.x, endPos.y)
+                session.sendMouseButton(TerminalMouse.WHEEL_DOWN, col, row)
+                converted += rowH
+                batch++
+            }
+            while (dy - converted <= -rowH && batch < 8) {
+                val (col, row) = cellAt(endPos.x, endPos.y)
+                session.sendMouseButton(TerminalMouse.WHEEL_UP, col, row)
+                converted -= rowH
+                batch++
+            }
+        }
+
+        // 短按不移 → 左键点击（长按是选中复制，走不到这里）
+        if (!multi && !selectMode && maxDist < viewConfiguration.touchSlop &&
+            endUptime - startUptime < 300
+        ) {
+            val (col, row) = cellAt(start.x, start.y)
+            session.sendMouseClick(col, row)
         }
     }
 }
