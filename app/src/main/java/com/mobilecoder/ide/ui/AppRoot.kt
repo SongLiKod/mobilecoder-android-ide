@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
@@ -125,6 +126,9 @@ enum class AppDestination(
     val route: String,
     val label: String,
     val icon: ImageVector,
+
+    /** 是否占底部导航位（关于页从「项目」页底部入口进入，不新增第 9 个 tab）。 */
+    val inBottomBar: Boolean = true,
 ) {
     HOME("home", "项目", Icons.Default.Folder),
     EDITOR("editor", "编辑", Icons.Default.Edit),
@@ -134,10 +138,12 @@ enum class AppDestination(
     SSH("ssh", "SSH", Icons.Default.Lock),
     AI("ai", "AI", Icons.Default.SmartToy),
     BUILD("build", "构建", Icons.Default.Build),
+    ABOUT("about", "关于", Icons.Default.Info, inBottomBar = false),
     ;
 
     /** 是否需要「当前项目」上下文。 */
-    val needsProject: Boolean get() = this != HOME && this != SSH && this != HISTORY
+    val needsProject: Boolean
+        get() = this != HOME && this != SSH && this != HISTORY && this != ABOUT
 
     companion object {
         fun of(route: String?): AppDestination? =
@@ -237,14 +243,16 @@ fun AppRoot(
                 exit = shrinkVertically(shrinkTowards = Alignment.Bottom) + fadeOut(),
             ) {
                 NavigationBar {
-                    AppDestination.entries.forEach { destination ->
-                        NavigationBarItem(
-                            selected = currentRoute == destination.route,
-                            onClick = { navController.navigateTo(destination.route) },
-                            icon = { Icon(destination.icon, contentDescription = destination.label) },
-                            label = { Text(destination.label) },
-                        )
-                    }
+                    AppDestination.entries
+                        .filter { it.inBottomBar }
+                        .forEach { destination ->
+                            NavigationBarItem(
+                                selected = currentRoute == destination.route,
+                                onClick = { navController.navigateTo(destination.route) },
+                                icon = { Icon(destination.icon, contentDescription = destination.label) },
+                                label = { Text(destination.label) },
+                            )
+                        }
                 }
             }
         },
@@ -267,6 +275,7 @@ fun AppRoot(
                         themeManager = themeManager,
                         onOpenProject = { navController.navigateTo(AppDestination.EDITOR.route) },
                         onOpenSsh = { navController.navigateTo(AppDestination.SSH.route) },
+                        onOpenAbout = { navController.navigateTo(AppDestination.ABOUT.route) },
                     )
                 }
                 composable(AppDestination.EDITOR.route) {
@@ -289,6 +298,9 @@ fun AppRoot(
                 }
                 composable(AppDestination.BUILD.route) {
                     ProjectGuard { path -> BuildScreen(projectPath = path) }
+                }
+                composable(AppDestination.ABOUT.route) {
+                    AboutScreen(onBack = { navController.popBackStack() })
                 }
             }
 
@@ -419,6 +431,7 @@ private fun HomeScreen(
     themeManager: ThemeManager,
     onOpenProject: () -> Unit,
     onOpenSsh: () -> Unit,
+    onOpenAbout: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
@@ -516,6 +529,33 @@ private fun HomeScreen(
                     )
                     Text(
                         text = "生成 / 加密存储 / 一键测试连通性",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenAbout)
+                    .padding(top = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text(
+                        text = "关于移动码匠",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    Text(
+                        text = "版本信息 / 检查更新 / 使用声明",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
