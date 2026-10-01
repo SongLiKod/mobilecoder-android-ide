@@ -1,5 +1,10 @@
 package com.mobilecoder.ide.feature.terminal
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -30,6 +35,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.MoreVert
@@ -86,6 +92,7 @@ import com.mobilecoder.ide.core.common.theme.AppPalette
 import com.mobilecoder.ide.core.common.theme.LocalAppPalette
 import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
+import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.feature.git.GitController
 import kotlinx.coroutines.launch
@@ -182,6 +189,13 @@ fun TerminalScreen(
     var ctrlOn by remember { mutableStateOf(false) }
     var historyIndex by remember { mutableIntStateOf(-1) }
     val focusRequester = remember { FocusRequester() }
+
+    // 软键盘可见性：驱动按键行自动收起（④）+ 键盘图标方向
+    val imeVisible = isImeVisible()
+    // 按键行显隐：默认跟随键盘（弹出即收起，把终端渲染区让出来）；溢出菜单可手动固定，
+    // 手动值在本次会话内一直有效。
+    var keysForced by remember { mutableStateOf<Boolean?>(null) }
+    val showKeys = keysForced ?: !imeVisible
 
     fun submitLine() {
         val session = active ?: return
@@ -335,6 +349,10 @@ fun TerminalScreen(
                 )
                 HorizontalDivider()
                 DropdownMenuItem(
+                    text = { Text(if (showKeys) "隐藏按键行" else "显示按键行") },
+                    onClick = { keysForced = !showKeys },
+                )
+                DropdownMenuItem(
                     text = { Text("字号（当前 ${fontSize}sp，−）") },
                     onClick = { changeFontSize(-1) },
                 )
@@ -371,61 +389,84 @@ fun TerminalScreen(
         }
 
         // ---------------- 底部按键行 ----------------
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(horizontal = 6.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        // ④ 键盘弹出时自动收起（终端渲染区立刻多出整行），溢出菜单可手动固定显隐
+        AnimatedVisibility(
+            visible = showKeys,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
         ) {
             Row(
                 modifier = Modifier
-                    .weight(1f)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                KeyButton("Esc") {
-                    active?.sendSpecial(TerminalSpecialKey.ESC, ctrlOn)
-                    ctrlOn = false
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    KeyButton("Esc") {
+                        active?.sendSpecial(TerminalSpecialKey.ESC, ctrlOn)
+                        ctrlOn = false
+                    }
+                    KeyButton("Tab") {
+                        active?.sendSpecial(TerminalSpecialKey.TAB, ctrlOn)
+                        ctrlOn = false
+                    }
+                    KeyButton("Ctrl", selected = ctrlOn) { ctrlOn = !ctrlOn }
+                    KeyButton("←") {
+                        active?.sendSpecial(TerminalSpecialKey.LEFT, ctrlOn)
+                        ctrlOn = false
+                    }
+                    KeyButton("↑") {
+                        active?.sendSpecial(TerminalSpecialKey.UP, ctrlOn)
+                        ctrlOn = false
+                    }
+                    KeyButton("→") {
+                        active?.sendSpecial(TerminalSpecialKey.RIGHT, ctrlOn)
+                        ctrlOn = false
+                    }
+                    KeyButton("↓") {
+                        active?.sendSpecial(TerminalSpecialKey.DOWN, ctrlOn)
+                        ctrlOn = false
+                    }
+                    KeyButton("Home") {
+                        active?.sendSpecial(TerminalSpecialKey.HOME, ctrlOn)
+                        ctrlOn = false
+                    }
+                    KeyButton("End") {
+                        active?.sendSpecial(TerminalSpecialKey.END, ctrlOn)
+                        ctrlOn = false
+                    }
+                    KeyButton("⌫") { active?.sendBackspace() }
                 }
-                KeyButton("Tab") {
-                    active?.sendSpecial(TerminalSpecialKey.TAB, ctrlOn)
-                    ctrlOn = false
+                // 键盘图标：键盘可见时收起；不可见时先聚焦输入框再拉起 ——
+                // 没有焦点时 LocalSoftwareKeyboardController.show() 是空操作，
+                // 所以必须先 focusRequester.requestFocus()，否则点了没反应。
+                IconButton(
+                    onClick = {
+                        if (imeVisible) {
+                            keyboard?.hide()
+                        } else {
+                            focusRequester.requestFocus()
+                            keyboard?.show()
+                        }
+                    },
+                ) {
+                    Icon(
+                        imageVector = if (imeVisible) {
+                            Icons.Default.KeyboardHide
+                        } else {
+                            Icons.Default.Keyboard
+                        },
+                        contentDescription = if (imeVisible) "隐藏键盘" else "显示键盘",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                KeyButton("Ctrl", selected = ctrlOn) { ctrlOn = !ctrlOn }
-                KeyButton("←") {
-                    active?.sendSpecial(TerminalSpecialKey.LEFT, ctrlOn)
-                    ctrlOn = false
-                }
-                KeyButton("↑") {
-                    active?.sendSpecial(TerminalSpecialKey.UP, ctrlOn)
-                    ctrlOn = false
-                }
-                KeyButton("→") {
-                    active?.sendSpecial(TerminalSpecialKey.RIGHT, ctrlOn)
-                    ctrlOn = false
-                }
-                KeyButton("↓") {
-                    active?.sendSpecial(TerminalSpecialKey.DOWN, ctrlOn)
-                    ctrlOn = false
-                }
-                KeyButton("Home") {
-                    active?.sendSpecial(TerminalSpecialKey.HOME, ctrlOn)
-                    ctrlOn = false
-                }
-                KeyButton("End") {
-                    active?.sendSpecial(TerminalSpecialKey.END, ctrlOn)
-                    ctrlOn = false
-                }
-                KeyButton("⌫") { active?.sendBackspace() }
-            }
-            IconButton(onClick = { keyboard?.hide() }) {
-                Icon(
-                    imageVector = Icons.Default.KeyboardHide,
-                    contentDescription = "隐藏键盘",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         }
 
