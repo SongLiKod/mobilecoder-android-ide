@@ -139,6 +139,7 @@ class MarketInstallerTest {
     @Test
     fun stageProgress_knownStages_mappedToAscentBasis() {
         assertEquals(0.30f, MarketInstaller.stageProgress("准备目录"), EPS)
+        assertEquals(0.15f, MarketInstaller.stageProgress("更新软件源"), EPS)
         assertEquals(0.10f, MarketInstaller.stageProgress("检查 Node.js 运行环境"), EPS)
         assertEquals(-1f, MarketInstaller.stageProgress("安装依赖（apt）"), EPS)
         assertEquals(-1f, MarketInstaller.stageProgress("安装 @opencode/cli（npm install -g）"), EPS)
@@ -250,8 +251,11 @@ class MarketInstallerTest {
     }
 
     @Test
-    fun catalog_firstBatch_nodeAndOpencode() {
-        assertEquals(listOf("nodejs", "opencode"), MarketInstaller.items.map { it.id })
+    fun catalog_nodeOpencodeAndNineAptTools() {
+        assertEquals(
+            listOf("nodejs", "opencode", "git", "python", "buildtools", "tmux", "ripgrep", "fzf", "jq", "vim", "fd"),
+            MarketInstaller.items.map { it.id },
+        )
         val node = MarketInstaller.items.first { it.id == "nodejs" }
         assertEquals("22.2.0", node.version)
         assertTrue(node.name.contains("Node"))
@@ -261,6 +265,68 @@ class MarketInstallerTest {
         assertEquals("latest", opencode.version)
         assertEquals("usr/local/bin/opencode", opencode.probe)
         assertEquals("latest", MarketInstaller.versionLabel(opencode.version))
+
+        // 探测点均为 rootfs 下真实路径约定；文案非空；apt 条目徽标显示 apt（版本随源）
+        MarketInstaller.items.forEach { item ->
+            assertTrue("${item.id} probe=${item.probe}", item.probe.startsWith("usr/"))
+            assertTrue(item.id, item.summary.isNotBlank() && item.detail.isNotBlank())
+        }
+        assertEquals("apt", MarketInstaller.versionLabel("apt"))
+    }
+
+    @Test
+    fun installTitle_rendersPerVersionToken() {
+        val node = MarketInstaller.items.first { it.id == "nodejs" }
+        assertEquals("Node.js v22.2.0", MarketInstaller.installTitle(node))
+        val opencode = MarketInstaller.items.first { it.id == "opencode" }
+        assertEquals("opencode latest", MarketInstaller.installTitle(opencode))
+        val git = MarketInstaller.items.first { it.id == "git" }
+        assertEquals("Git", MarketInstaller.installTitle(git))
+    }
+
+    // ---- apt 类：规格表 + 脚本 ----
+
+    @Test
+    fun aptSpecs_matchCatalog_andEveryAptItemHasSpec() {
+        // 无孤儿规格
+        MarketInstaller.aptSpecs.keys.forEach { id ->
+            assertTrue("orphan apt spec: $id", MarketInstaller.items.any { it.id == id })
+        }
+        // 除 nodejs/opencode 外全部走 apt 路由（不会误落到 node 下载脚本）
+        MarketInstaller.items
+            .filter { it.id != "nodejs" && it.id != "opencode" }
+            .forEach { item ->
+                val spec = MarketInstaller.aptSpecs[item.id] ?: error("missing apt spec: ${item.id}")
+                val script = MarketInstaller.scriptFor(item, "/d/tmp", "/d/work", "arm64")
+                assertTrue(item.id, script.startsWith("set -e"))
+                assertTrue(item.id, script.contains("apt update"))
+                assertTrue(
+                    item.id,
+                    script.contains("apt install -y ${spec.packages.joinToString(" ")}"),
+                )
+                spec.verify.forEach { assertTrue("${item.id} missing $it", script.contains(it)) }
+                assertFalse(item.id, script.contains("nodejs.org"))
+                assertFalse(item.id, script.contains("@opencode/cli"))
+            }
+    }
+
+    @Test
+    fun aptScript_stageMarkers_mapToProgress() {
+        val script = MarketInstaller.aptScript(
+            MarketInstaller.AptSpec(listOf("git"), listOf("git --version")),
+        )
+        assertTrue(script.contains("apt install -y git"))
+        val markers = script.lines()
+            .filter { it.startsWith("echo '") }
+            .map { it.removePrefix("echo '").removeSuffix("'").removePrefix(MarketInstaller.STAGE_PREFIX) }
+        assertEquals(listOf("更新软件源", "安装 git", "校验安装", "完成"), markers)
+        assertEquals(listOf(0.15f, -1f, 0.96f, 1f), markers.map { MarketInstaller.stageProgress(it) })
+        // 校验命令夹在校验标记之后
+        val lines = script.lines()
+        assertTrue(
+            lines.indexOf("git --version") >
+                lines.indexOf("echo '${MarketInstaller.STAGE_PREFIX}校验安装'"),
+        )
     }
 
     // ---- opencode：npm 全局安装脚本 ----

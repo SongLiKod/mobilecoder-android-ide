@@ -22,7 +22,7 @@ import kotlinx.coroutines.launch
  *
  * @param id      稳定标识（状态集合、日志归属用）
  * @param name    展示名（Node.js …）
- * @param version 语义化版本号，不带 v 前缀（"22.2.0"）；跟随最新的条目用 "latest"
+ * @param version 语义化版本号，不带 v 前缀（"22.2.0"）；跟随最新的条目用 "latest"；随 apt 源的条目用 "apt"
  * @param summary 一句话说明（列表副标题）
  * @param detail  补充信息（来源 / 安装位置提示）
  * @param probe   安装完成探测点：相对 rootfs 的可执行文件路径
@@ -111,6 +111,78 @@ object MarketInstaller {
             summary = "AI 编程 Agent 命令行：会话式编程、多模型协作，在终端里直接对话改代码",
             detail = "npm install -g · registry.npmjs.org（失败回退 npmmirror）· 依赖 Node.js · 装到 /usr/local",
             probe = "usr/local/bin/opencode",
+        ),
+        MarketItem(
+            id = "git",
+            name = "Git",
+            version = "apt",
+            summary = "分布式版本控制：提交、分支、合并，配合应用内 Git 页使用",
+            detail = "apt · Ubuntu 24.04（noble）源 · 安装到 guest 的 /usr/bin",
+            probe = "usr/bin/git",
+        ),
+        MarketItem(
+            id = "python",
+            name = "Python 3",
+            version = "apt",
+            summary = "解释器 + pip 包管理 + venv 虚拟环境：脚本、爬虫、后端与数据处理",
+            detail = "apt（python3 · python3-pip · python3-venv）· pip 全局安装受 PEP 668 限制，建议配合 venv",
+            probe = "usr/bin/python3",
+        ),
+        MarketItem(
+            id = "buildtools",
+            name = "C/C++ 工具链",
+            version = "apt",
+            summary = "gcc / g++ / make：编译 C、C++ 与原生 Node 模块（node-gyp）",
+            detail = "apt（build-essential）· Ubuntu 24.04（noble）源",
+            probe = "usr/bin/gcc",
+        ),
+        MarketItem(
+            id = "tmux",
+            name = "tmux",
+            version = "apt",
+            summary = "终端复用器：会话保持与分屏，断线不丢后台任务",
+            detail = "apt · Ubuntu 24.04（noble）源",
+            probe = "usr/bin/tmux",
+        ),
+        MarketItem(
+            id = "ripgrep",
+            name = "ripgrep",
+            version = "apt",
+            summary = "极速代码搜索（命令 rg）：递归查文件内容，默认尊重 .gitignore",
+            detail = "apt · Ubuntu 24.04（noble）源 · 命令为 rg",
+            probe = "usr/bin/rg",
+        ),
+        MarketItem(
+            id = "fzf",
+            name = "fzf",
+            version = "apt",
+            summary = "命令行模糊查找：文件、历史、内容一键跳转，支持 shell 快捷键集成",
+            detail = "apt · Ubuntu 24.04（noble）源",
+            probe = "usr/bin/fzf",
+        ),
+        MarketItem(
+            id = "jq",
+            name = "jq",
+            version = "apt",
+            summary = "JSON 命令行处理器：解析、过滤、格式化接口返回数据",
+            detail = "apt · Ubuntu 24.04（noble）源",
+            probe = "usr/bin/jq",
+        ),
+        MarketItem(
+            id = "vim",
+            name = "vim",
+            version = "apt",
+            summary = "经典终端编辑器：模态编辑与插件生态，适合纯键盘操作",
+            detail = "apt · Ubuntu 24.04（noble）源",
+            probe = "usr/bin/vim",
+        ),
+        MarketItem(
+            id = "fd",
+            name = "fd",
+            version = "apt",
+            summary = "现代文件查找器（命令 fdfind）：语法友好、默认跳过 .gitignore 忽略项",
+            detail = "apt（fd-find）· Ubuntu 24.04（noble）源 · 命令为 fdfind",
+            probe = "usr/bin/fdfind",
         ),
     )
 
@@ -250,12 +322,12 @@ object MarketInstaller {
                     stage = "安装完成",
                     progress = 1f,
                     success = true,
-                    message = "安装完成 · ${item.name} ${versionLabel(item.version)} 已可用",
+                    message = "安装完成 · ${installTitle(item)} 已可用",
                 )
             }
             runCatching {
                 HistoryStore.add(
-                    "# ${item.name} ${versionLabel(item.version)}（软件市场）\n$scriptForHistory",
+                    "# ${installTitle(item)}（软件市场）\n$scriptForHistory",
                     HistoryStore.SOURCE_MARKET,
                 )
             }
@@ -336,16 +408,20 @@ object MarketInstaller {
 
     /**
      * 按条目路由安装脚本（市场目录 → 脚本，JVM 单测覆盖）：
-     * nodejs 走 tarball 落位 /usr/local；opencode 走 npm 全局安装。
+     * apt 类条目走 [aptScript]（[aptSpecs] 规格表）；opencode 走 npm；
+     * nodejs 走 tarball 落位 /usr/local。
      */
     internal fun scriptFor(
         item: MarketItem,
         tmpDir: String,
         workDir: String,
         arch: String,
-    ): String = when (item.id) {
-        "opencode" -> opencodeScript()
-        else -> nodeScript(tmpDir, workDir, item.version, arch)
+    ): String {
+        aptSpecs[item.id]?.let { return aptScript(it) }
+        return when (item.id) {
+            "opencode" -> opencodeScript()
+            else -> nodeScript(tmpDir, workDir, item.version, arch)
+        }
     }
 
     /**
@@ -375,9 +451,60 @@ object MarketInstaller {
         "",
     ).joinToString("\n")
 
-    /** 版本展示标签：`latest` 原样（npm 跟随最新），其余加 v 前缀。 */
-    internal fun versionLabel(version: String): String =
-        if (version.equals("latest", ignoreCase = true)) "latest" else "v$version"
+    /**
+     * apt 安装规格（包名 → 装完后的校验命令）。
+     *
+     * 所有包名均在 Ubuntu 24.04（noble）官方包站逐个核实存在且含 arm64
+     * （packages.ubuntu.com），校验命令必须全部退出 0 才算安装成功。
+     */
+    internal data class AptSpec(val packages: List<String>, val verify: List<String>)
+
+    internal val aptSpecs: Map<String, AptSpec> = mapOf(
+        "git" to AptSpec(listOf("git"), listOf("git --version")),
+        "python" to AptSpec(
+            listOf("python3", "python3-pip", "python3-venv"),
+            listOf("python3 --version", "python3 -m pip --version"),
+        ),
+        "buildtools" to AptSpec(
+            listOf("build-essential"),
+            listOf("gcc --version", "g++ --version", "make --version"),
+        ),
+        "tmux" to AptSpec(listOf("tmux"), listOf("tmux -V")),
+        "ripgrep" to AptSpec(listOf("ripgrep"), listOf("rg --version")),
+        "fzf" to AptSpec(listOf("fzf"), listOf("fzf --version")),
+        "jq" to AptSpec(listOf("jq"), listOf("jq --version")),
+        "vim" to AptSpec(listOf("vim"), listOf("vim --version")),
+        "fd" to AptSpec(listOf("fd-find"), listOf("fdfind --version")),
+    )
+
+    /** apt 安装脚本：更新软件源 → 安装 → 逐条校验（`set -e`，任一失败即中止）。 */
+    internal fun aptScript(spec: AptSpec): String = buildString {
+        appendLine("set -e")
+        appendLine("echo '${STAGE_PREFIX}更新软件源'")
+        appendLine("apt update")
+        appendLine("echo '${STAGE_PREFIX}安装 ${spec.packages.joinToString(" ")}'")
+        appendLine("apt install -y ${spec.packages.joinToString(" ")}")
+        appendLine("echo '${STAGE_PREFIX}校验安装'")
+        spec.verify.forEach { appendLine(it) }
+        appendLine("echo '${STAGE_PREFIX}完成'")
+    }
+
+    /**
+     * 版本展示标签（卡片徽标）：`latest` 原样（npm 跟随最新）；`apt` 原样
+     * （版本随 apt 源变动，不在卡片写死）；其余加 v 前缀。
+     */
+    internal fun versionLabel(version: String): String = when {
+        version.equals("latest", ignoreCase = true) -> "latest"
+        version == "apt" -> "apt"
+        else -> "v$version"
+    }
+
+    /** 成功消息 / 历史头里的软件标识（apt 条目不带版本尾巴）。 */
+    internal fun installTitle(item: MarketItem): String = when {
+        item.version.equals("latest", ignoreCase = true) -> "${item.name} latest"
+        item.version == "apt" -> item.name
+        else -> "${item.name} v${item.version}"
+    }
 
     /**
      * 生成 Node.js 安装脚本（自包含单文件，guest 内直接执行）：
@@ -431,6 +558,7 @@ object MarketInstaller {
     /** 阶段 → 基准进度（-1 = 不确定进度）。 */
     internal fun stageProgress(stage: String): Float = when {
         stage.startsWith("准备") -> 0.30f
+        stage.startsWith("更新") -> 0.15f
         stage.startsWith("检查") -> 0.10f
         stage.startsWith("安装") -> -1f
         stage.startsWith("下载") -> 0.35f
