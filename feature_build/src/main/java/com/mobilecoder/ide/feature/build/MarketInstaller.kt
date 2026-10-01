@@ -22,7 +22,7 @@ import kotlinx.coroutines.launch
  *
  * @param id      稳定标识（状态集合、日志归属用）
  * @param name    展示名（Node.js …）
- * @param version 语义化版本号，不带 v 前缀（"22.2.0"）
+ * @param version 语义化版本号，不带 v 前缀（"22.2.0"）；跟随最新的条目用 "latest"
  * @param summary 一句话说明（列表副标题）
  * @param detail  补充信息（来源 / 安装位置提示）
  * @param probe   安装完成探测点：相对 rootfs 的可执行文件路径
@@ -65,8 +65,9 @@ data class MarketState(
 }
 
 /**
- * 软件市场执行器：一条自包含的 guest bash 脚本（apt → curl 下载 → tar 解压
- * → 落位 /usr/local → 校验），经 [Proot.wrap] + [CliNative.exec] 后台静默执行。
+ * 软件市场执行器：每个条目一条自包含的 guest bash 脚本（node：apt → curl 下载 →
+ * tar 解压 → 落位 /usr/local → 校验；opencode：npm install -g → 校验），
+ * 经 [Proot.wrap] + [CliNative.exec] 后台静默执行，脚本由 [scriptFor] 按条目路由。
  *
  * 设计要点：
  *  - **单例作用域**：安装在 [scope] 里跑，切走页面不中断，回页面继续看日志；
@@ -93,7 +94,7 @@ object MarketInstaller {
     /** chmod 1777（十进制 1023）：与终端 TMPDIR 约定一致的粘滞位全开。 */
     private const val MODE_1777 = 1023
 
-    /** 首批上架软件（后续按此结构扩展即可，无需改执行链路）。 */
+    /** 首批上架软件（后续按此结构扩展即可，脚本由 [scriptFor] 按条目路由）。 */
     val items: List<MarketItem> = listOf(
         MarketItem(
             id = "nodejs",
@@ -102,6 +103,14 @@ object MarketInstaller {
             summary = "JavaScript 运行时：npm 包管理、前端构建、opencode 等 AI CLI 的运行基础",
             detail = "npmmirror 加速（失败自动回退 nodejs.org 官方源）· 安装到 guest 的 /usr/local",
             probe = "usr/local/bin/node",
+        ),
+        MarketItem(
+            id = "opencode",
+            name = "opencode",
+            version = "latest",
+            summary = "AI 编程 Agent 命令行：会话式编程、多模型协作，在终端里直接对话改代码",
+            detail = "npm install -g · registry.npmjs.org（失败回退 npmmirror）· 依赖 Node.js · 装到 /usr/local",
+            probe = "usr/local/bin/opencode",
         ),
     )
 
@@ -185,14 +194,13 @@ object MarketInstaller {
             runCatching { Os.chmod(tmpDir.absolutePath, MODE_1777) }
             val workDir = File(context.cacheDir, "marketdl").apply { mkdirs() }
 
-            // 3) 组装并执行脚本
-            val script = nodeScript(
+            // 3) 组装并执行脚本（node → tarball 脚本；opencode → npm 脚本）
+            val script = scriptFor(
+                item = item,
                 tmpDir = tmpDir.absolutePath,
                 workDir = workDir.absolutePath,
-                version = item.version,
                 arch = nodeArch(EnvDownloader.primaryArch()),
             )
-            publish { it.copy(stage = "准备目录", progress = stageProgress("准备目录")) }
 
             val exit = CompletableDeferred<Int>()
             val assembler = LineAssembler()
@@ -242,12 +250,12 @@ object MarketInstaller {
                     stage = "安装完成",
                     progress = 1f,
                     success = true,
-                    message = "安装完成 · ${item.name} v${item.version} 已可用",
+                    message = "安装完成 · ${item.name} ${versionLabel(item.version)} 已可用",
                 )
             }
             runCatching {
                 HistoryStore.add(
-                    "# ${item.name} v${item.version}（软件市场）\n$scriptForHistory",
+                    "# ${item.name} ${versionLabel(item.version)}（软件市场）\n$scriptForHistory",
                     HistoryStore.SOURCE_MARKET,
                 )
             }
@@ -327,6 +335,51 @@ object MarketInstaller {
     internal fun nodeArch(abi: String): String = if (abi == "aarch64") "arm64" else "x64"
 
     /**
+     * 按条目路由安装脚本（市场目录 → 脚本，JVM 单测覆盖）：
+     * nodejs 走 tarball 落位 /usr/local；opencode 走 npm 全局安装。
+     */
+    internal fun scriptFor(
+        item: MarketItem,
+        tmpDir: String,
+        workDir: String,
+        arch: String,
+    ): String = when (item.id) {
+        "opencode" -> opencodeScript()
+        else -> nodeScript(tmpDir, workDir, item.version, arch)
+    }
+
+    /**
+     * opencode 安装脚本（自包含，guest 内直接执行）：
+     *  1. 检查 npm：优先 `/usr/local/bin/npm`（市场 Node.js 的 npm，全局前缀即
+     *     /usr/local）避免被构建环境的 node shim 抢占 PATH 装错位置；
+     *     完全没有 npm 则给出明确提示后失败（引导先装 Node.js）
+     *  2. `npm install -g @opencode/cli`（官方源，失败回退 npmmirror）
+     *  3. 校验 `/usr/local/bin/opencode --version`
+     */
+    internal fun opencodeScript(): String = listOf(
+        "set -e",
+        "echo '${STAGE_PREFIX}检查 Node.js 运行环境'",
+        "if [ ! -x /usr/local/bin/npm ] && ! command -v npm >/dev/null; then",
+        "    echo '未找到 npm：请先在软件市场安装 Node.js'",
+        "    exit 3",
+        "fi",
+        "echo '${STAGE_PREFIX}安装 @opencode/cli（npm install -g）'",
+        "if [ -x /usr/local/bin/npm ]; then",
+        "    /usr/local/bin/npm install -g @opencode/cli || /usr/local/bin/npm install -g @opencode/cli --registry=https://registry.npmmirror.com",
+        "else",
+        "    npm install -g @opencode/cli || npm install -g @opencode/cli --registry=https://registry.npmmirror.com",
+        "fi",
+        "echo '${STAGE_PREFIX}校验安装'",
+        "/usr/local/bin/opencode --version",
+        "echo '${STAGE_PREFIX}完成'",
+        "",
+    ).joinToString("\n")
+
+    /** 版本展示标签：`latest` 原样（npm 跟随最新），其余加 v 前缀。 */
+    internal fun versionLabel(version: String): String =
+        if (version.equals("latest", ignoreCase = true)) "latest" else "v$version"
+
+    /**
      * 生成 Node.js 安装脚本（自包含单文件，guest 内直接执行）：
      *  1. 准备目录（PROOT_TMP_DIR 粘滞位 01777，与终端约定一致）
      *  2. apt 装 ca-certificates / curl
@@ -378,7 +431,8 @@ object MarketInstaller {
     /** 阶段 → 基准进度（-1 = 不确定进度）。 */
     internal fun stageProgress(stage: String): Float = when {
         stage.startsWith("准备") -> 0.30f
-        stage.startsWith("安装依赖") -> -1f
+        stage.startsWith("检查") -> 0.10f
+        stage.startsWith("安装") -> -1f
         stage.startsWith("下载") -> 0.35f
         stage.startsWith("解压") -> 0.92f
         stage.startsWith("校验") -> 0.96f
