@@ -88,7 +88,7 @@ import com.mobilecoder.ide.core.common.theme.AppPalette
 import com.mobilecoder.ide.core.common.theme.LocalAppPalette
 import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
-import com.mobilecoder.ide.core.common.ui.rememberImeVisible
+import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.feature.git.GitController
 import kotlinx.coroutines.launch
@@ -116,7 +116,7 @@ fun TerminalScreen(
     val focusManager = LocalFocusManager.current
 
     // 软键盘可见状态：终端里键盘图标据此决定是"收起"还是"唤起"（AppRoot 据此隐藏底部导航）
-    val imeVisible by rememberImeVisible()
+    val imeVisible = isImeVisible()
     // requestFocus() 异步生效，等焦点就位后再唤起软键盘才可靠
     var pendingShowKeyboard by remember { mutableStateOf(false) }
     LaunchedEffect(pendingShowKeyboard) {

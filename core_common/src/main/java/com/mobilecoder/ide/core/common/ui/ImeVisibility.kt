@@ -1,51 +1,23 @@
 package com.mobilecoder.ide.core.common.ui
 
-import android.view.View
-import android.view.ViewTreeObserver
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.State
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalView
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
+import androidx.compose.ui.unit.LocalDensity
 
 /**
- * 软键盘（IME）可见状态：正在输入为 true，收起键盘后回到 false。
+ * 软键盘（IME）是否可见：正在输入为 true，收起键盘后回到 false。
  *
  * 用法：
  *  - 底部导航在键盘弹出时整条隐藏、收起键盘后恢复（AppRoot），
  *    避免「导航栏 + 输入区」吃掉近半屏；
  *  - 终端的键盘图标据此做「收起 / 唤起」双向切换（TerminalScreen）。
  *
- * 为什么不直接用 `WindowInsets.ime`：它只是被动读取的普通值，读它不会引起重组，
- * 拿不到"状态"；这里改用根 View 的全局布局监听——键盘弹出/收起必然改变窗口
- * insets 并触发一次 layout，因此状态及时且与输入框焦点无关。
+ * 实现说明：只读 Compose 自带的 [WindowInsets.ime]。它底层的 `insets` 字段是
+ * `mutableStateOf` 快照状态，**在组合期读取即完成订阅**，键盘弹出/收起会自动触发
+ * 本组件重组；且这套 insets 监听由 Compose 自己在 ComposeView 上注册（`imePadding()`
+ * 已在用），本方法**不注册任何 View 监听、不碰 AndroidX insets API，全程零副作用**：
+ * 最坏情况只是取不到最新值（功能不生效），不可能拖垮启动。
  */
 @Composable
-fun rememberImeVisible(): State<Boolean> {
-    val view = LocalView.current
-    val state = remember(view) { mutableStateOf(view.isImeVisible()) }
-    DisposableEffect(view) {
-        val listener = ViewTreeObserver.OnGlobalLayoutListener {
-            val visible = view.isImeVisible()
-            if (state.value != visible) state.value = visible
-        }
-        view.viewTreeObserver.addOnGlobalLayoutListener(listener)
-        onDispose {
-            // detach 后旧 observer 可能已失效，重新取当前的再移除
-            val observer = view.viewTreeObserver
-            if (observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
-        }
-    }
-    return state
-}
-
-/** 软键盘当前是否可见：IME 占用的底部像素 > 0（未显示 / 尚未分发 insets 时为 false）。 */
-private fun View.isImeVisible(): Boolean {
-    val imeBottom = ViewCompat.getRootWindowInsets(this)
-        ?.getInsets(WindowInsetsCompat.Type.ime())
-        ?.bottom ?: 0
-    return imeBottom > 0
-}
+fun isImeVisible(): Boolean = WindowInsets.ime.getBottom(LocalDensity.current) > 0
