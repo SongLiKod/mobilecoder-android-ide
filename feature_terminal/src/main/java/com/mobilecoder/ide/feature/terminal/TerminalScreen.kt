@@ -558,13 +558,18 @@ fun TerminalScreen(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                         )
                     } else {
-                        LazyColumn(
+                        // ⚠ 这里不能用 LazyColumn：DropdownMenu 打开时会按 IntrinsicSize 对菜单
+                        // 内容做内在测量（intrinsic），LazyColumn 是 SubcomposeLayout 不支持
+                        // intrinsic，一展开就抛 IllegalStateException（"Asking for intrinsic
+                        // measurements of SubcomposeLayout layouts is not supported"）闪退。
+                        // 换成普通 Column 自己滚（上限 280dp，与原 UX 一致）。
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 280.dp),
+                                .heightIn(max = 280.dp)
+                                .verticalScroll(rememberScrollState()),
                         ) {
-                            items(historyItems.size) { index ->
-                                val command = historyItems[index]
+                            historyItems.forEach { command ->
                                 DropdownMenuItem(
                                     text = {
                                         Text(
