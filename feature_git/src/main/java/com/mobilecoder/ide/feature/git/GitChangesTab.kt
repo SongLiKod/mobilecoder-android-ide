@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -58,7 +59,8 @@ private data class RestoreRequest(
  *
  * 分组：已暂存 / 未暂存 / 未跟踪 / 冲突 / 已忽略；
  * 行点击展开 Diff 查看器；顶部为提交区与工作区统计。
- * 「还原」需二次确认：未暂存组只丢弃工作区改动，已暂存组连同暂存一并回到 HEAD。
+ * 「还原」需二次确认：未暂存组只丢弃工作区改动，已暂存组连同暂存一并回到 HEAD；
+ * 未跟踪组提供「删除」（物理删除，同样二次确认——新增文件不在版本库中，无法还原）。
  */
 @Composable
 fun ChangesTab(
@@ -73,6 +75,7 @@ fun ChangesTab(
     var commitMessage by rememberSaveable { mutableStateOf("") }
     var expandedKey by rememberSaveable { mutableStateOf("") }
     var pendingRestore by remember { mutableStateOf<RestoreRequest?>(null) }
+    var pendingDelete by remember { mutableStateOf<GitStatusEntry?>(null) }
 
     val staged = remember(status) { status.filter { it.inGroup(GitChangeGroup.STAGED) } }
     val unstaged = remember(status) { status.filter { it.inGroup(GitChangeGroup.UNSTAGED) } }
@@ -199,6 +202,7 @@ fun ChangesTab(
                 onPrimaryAction = { entry ->
                     scope.launch { runCatching { GitController.stage(entry.path) } }
                 },
+                onDelete = { entry -> pendingDelete = entry },
             )
 
             changeGroup(
@@ -252,6 +256,25 @@ fun ChangesTab(
             onDismiss = { pendingRestore = null },
         )
     }
+
+    // ---------------- 删除确认（未跟踪文件：物理删除，不可恢复） ----------------
+    pendingDelete?.let { entry ->
+        AppAlertDialog(
+            title = "删除「${entry.path}」",
+            message = if (entry.path.endsWith("/")) {
+                "将从工作区永久删除该目录及其全部内容。新增目录未纳入版本库，删除后无法恢复。"
+            } else {
+                "将从工作区永久删除该文件。新增文件未纳入版本库，删除后无法恢复。"
+            },
+            confirmLabel = "删除",
+            destructive = true,
+            onConfirm = {
+                pendingDelete = null
+                scope.launch { runCatching { GitController.deleteUntracked(entry.path) } }
+            },
+            onDismiss = { pendingDelete = null },
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +290,7 @@ private fun LazyListScope.changeGroup(
     onToggle: (String) -> Unit,
     onPrimaryAction: ((GitStatusEntry) -> Unit)?,
     onRestore: ((GitStatusEntry) -> Unit)? = null,
+    onDelete: ((GitStatusEntry) -> Unit)? = null,
 ) {
     if (entries.isEmpty()) return
 
@@ -296,6 +320,7 @@ private fun LazyListScope.changeGroup(
             onToggle = { onToggle("${group.name}#${entry.path}") },
             onPrimaryAction = onPrimaryAction,
             onRestore = onRestore,
+            onDelete = onDelete,
         )
     }
 }
@@ -312,6 +337,7 @@ private fun StatusRow(
     onToggle: () -> Unit,
     onPrimaryAction: ((GitStatusEntry) -> Unit)?,
     onRestore: ((GitStatusEntry) -> Unit)? = null,
+    onDelete: ((GitStatusEntry) -> Unit)? = null,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -353,6 +379,15 @@ private fun StatusRow(
                     Icon(
                         imageVector = Icons.Default.Restore,
                         contentDescription = "还原",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (onDelete != null) {
+                IconButton(onClick = { onDelete(entry) }) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "删除",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
