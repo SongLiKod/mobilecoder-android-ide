@@ -1,14 +1,15 @@
 package com.mobilecoder.ide.feature.terminal
 
 /**
- * 终端命令拦截器（PRD 2.4：终端手动输入 `apt` / `git` 等进程内命令）。
+ * 终端命令拦截器：让进程内实现的命令（当前只有 `git`）在终端里可用。
  *
- * Android 设备上没有 `git` 可执行文件（也没有 `apt`），这些命令由进程内实现接管；
- * 其余命令一律直通给 mksh。策略：**前缀缓冲 + 本地回显 + 回滚**，既能在终端里执行
+ * Android 设备上没有 `git` 可执行文件，该命令由进程内实现（libgit2）接管；
+ * 其余命令一律直通给 shell。策略：**前缀缓冲 + 本地回显 + 回滚**，既能在终端里执行
  * 目标命令，又不破坏普通交互程序（vim、密码输入、方向键等）的直通输入。
  *
- * 目标集合由 [targets] 动态提供（来自 AptCli 的注册表），当前为
- * `apt` 与 `git`。
+ * 目标集合由 [targets] 动态提供（来自 CliEngine 的注册表），当前为 `git`。
+ * 注意：`apt …` **不在**目标内 —— apt CLI 已移除，Linux 环境就绪时由 rootfs 里的
+ * 真 apt / apt-get 接管。
  *
  * 状态机：
  *  - [Mode.IDLE]      pending 为空，等待下一行的首个字符；
@@ -19,12 +20,12 @@ package com.mobilecoder.ide.feature.terminal
  * 所有回调都在主线程调用（由 [TerminalSession] 保证），因此本地回显与回滚
  * 与屏幕缓冲严格同步。
  */
-class AptInterceptor(
-    /** 当前可拦截的命令前缀（如 `apt`、`git`），每次判断时动态求值。 */
-    private val targets: () -> List<String> = { listOf("apt") },
+class CommandInterceptor(
+    /** 当前可拦截的命令前缀（如 `git`），每次判断时动态求值。 */
+    private val targets: () -> List<String>,
     /**
-     * Enter 时二次校验：命中目标前缀的行是否仍交给进程内 CLI。
-     * 返回 false → 回滚回显、整行交回 shell（当前目标 `apt`/`git` 均为全量进程内实现，恒 true）。
+     * Enter 时二次校验：命中目标前缀的行是否仍交给进程内引擎。
+     * 返回 false → 回滚回显、整行交回 shell（如 `git` 注册失败时回退为 shell 命令）。
      */
     private val accept: (String) -> Boolean = { true },
     /** 写给 PTY（shell / 交互程序）的字节。 */
@@ -149,7 +150,7 @@ class AptInterceptor(
     /**
      * 处理回车。
      *
-     * @return 拦截到的完整命令行（如 `git status`，由调用方交给 CLI 引擎执行）；
+     * @return 拦截到的完整命令行（如 `git status`，由调用方交给命令引擎执行）；
      *         直通模式下返回 null 且已向 PTY 写入 `"\r"`。
      */
     fun enter(): String? {

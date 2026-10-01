@@ -294,7 +294,7 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
         bump()
     }
 
-    /** 光标回退并擦除最近打印的 n 个字符（apt 拦截回滚用，含自动换行场景）。 */
+    /** 光标回退并擦除最近打印的 n 个字符（命令拦截回滚用，含自动换行场景）。 */
     fun erasePrinted(n: Int) {
         var left = n
         while (left > 0) {

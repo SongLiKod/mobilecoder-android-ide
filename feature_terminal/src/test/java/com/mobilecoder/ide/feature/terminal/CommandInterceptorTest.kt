@@ -7,23 +7,23 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * 终端命令拦截器状态机测试：`git` / `apt` 被进程内接管，其余命令直通 shell。
+ * 终端命令拦截器状态机测试：目标命令（`git` / `npm`）被进程内接管，其余命令直通 shell。
  */
-class AptInterceptorTest {
+class CommandInterceptorTest {
 
     private val pty = StringBuilder()
     private val echo = StringBuilder()
     private var rollbacks = 0
 
-    private lateinit var interceptor: AptInterceptor
+    private lateinit var interceptor: CommandInterceptor
 
     @Before
     fun setUp() {
         pty.setLength(0)
         echo.setLength(0)
         rollbacks = 0
-        interceptor = AptInterceptor(
-            targets = { listOf("apt", "git") },
+        interceptor = CommandInterceptor(
+            targets = { listOf("npm", "git") },
             onWritePty = { bytes -> pty.append(String(bytes, Charsets.UTF_8)) },
             onLocalEcho = { text -> echo.append(text) },
             onRollback = { count -> rollbacks += count },
@@ -47,8 +47,8 @@ class AptInterceptorTest {
     }
 
     @Test
-    fun `apt 命令仍被拦截`() {
-        val line = "apt help"
+    fun `npm 命令仍被拦截`() {
+        val line = "npm install"
         interceptor.feed(line)
         assertEquals(line, interceptor.enter())
         assertEquals("", pty.toString())
@@ -68,6 +68,14 @@ class AptInterceptorTest {
     fun `非目标命令首个字符即直通`() {
         interceptor.feed("ls -la")
         assertEquals("ls -la", pty.toString())
+        assertEquals(0, rollbacks)
+        assertNull(interceptor.enter())
+    }
+
+    @Test
+    fun `apt 命令直通 shell——apt CLI 已移除`() {
+        interceptor.feed("apt install curl")
+        assertEquals("apt install curl", pty.toString())
         assertEquals(0, rollbacks)
         assertNull(interceptor.enter())
     }
@@ -117,15 +125,15 @@ class AptInterceptorTest {
 
     @Test
     fun `accept 拒绝时回滚回显并整行交回 shell`() {
-        // 模拟：`apt <子命令>` 未注册且外部 apt CLI 已安装 → 交回 shell 执行
-        val outer = AptInterceptor(
-            targets = { listOf("apt", "git") },
-            accept = { line -> !line.startsWith("apt external") },
+        // 模拟：`npm <子命令>` 不在进程内注册表 → 交回 shell 执行
+        val outer = CommandInterceptor(
+            targets = { listOf("npm", "git") },
+            accept = { line -> !line.startsWith("npm external") },
             onWritePty = { bytes -> pty.append(String(bytes, Charsets.UTF_8)) },
             onLocalEcho = { text -> echo.append(text) },
             onRollback = { count -> rollbacks += count },
         )
-        val line = "apt external run"
+        val line = "npm external run"
         outer.feed(line)
 
         assertNull(outer.enter())
@@ -135,14 +143,14 @@ class AptInterceptorTest {
 
     @Test
     fun `accept 放行时照常拦截`() {
-        val strict = AptInterceptor(
-            targets = { listOf("apt", "git") },
-            accept = { line -> line.startsWith("apt help") },
+        val strict = CommandInterceptor(
+            targets = { listOf("npm", "git") },
+            accept = { line -> line.startsWith("npm install") },
             onWritePty = { bytes -> pty.append(String(bytes, Charsets.UTF_8)) },
             onLocalEcho = { text -> echo.append(text) },
             onRollback = { count -> rollbacks += count },
         )
-        val line = "apt help"
+        val line = "npm install"
         strict.feed(line)
 
         assertEquals(line, strict.enter())

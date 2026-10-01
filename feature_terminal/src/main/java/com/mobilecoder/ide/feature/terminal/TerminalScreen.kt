@@ -97,6 +97,7 @@ import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.core.storage.HistoryStore
 import com.mobilecoder.ide.feature.git.GitController
 import kotlinx.coroutines.launch
 
@@ -232,14 +233,15 @@ fun TerminalScreen(
         }
         if (text.isNotBlank()) {
             val line = text
-            scope.launch { runCatching { AppStorage.preferences.addTerminalHistory(line) } }
+            scope.launch { runCatching { HistoryStore.add(line, HistoryStore.SOURCE_TERMINAL) } }
         }
         session.submitLine(text)
     }
 
     fun pickHistory() {
         scope.launch {
-            val history = runCatching { AppStorage.preferences.terminalHistory() }.getOrDefault(emptyList())
+            runCatching { HistoryStore.ensureLoaded() }
+            val history = HistoryStore.terminalCommands()
             if (history.isEmpty()) return@launch
             val next = historyIndex + 1
             if (next >= history.size) return@launch

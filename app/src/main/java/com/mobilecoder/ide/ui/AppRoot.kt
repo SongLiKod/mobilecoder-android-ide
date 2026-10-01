@@ -32,7 +32,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Delete
@@ -42,6 +41,7 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
@@ -110,7 +110,7 @@ import com.mobilecoder.ide.core.storage.ProjectMeta
 import com.mobilecoder.ide.core.storage.ProjectTemplate
 import com.mobilecoder.ide.feature.ai.AiScreen
 import com.mobilecoder.ide.feature.build.BuildScreen
-import com.mobilecoder.ide.feature.cli.CliScreen
+import com.mobilecoder.ide.feature.history.HistoryScreen
 import com.mobilecoder.ide.feature.editor.EditorScreen
 import com.mobilecoder.ide.feature.git.GitController
 import com.mobilecoder.ide.feature.git.GitProgress
@@ -129,7 +129,7 @@ enum class AppDestination(
     HOME("home", "项目", Icons.Default.Folder),
     EDITOR("editor", "编辑", Icons.Default.Edit),
     TERMINAL("terminal", "终端", Icons.Default.Terminal),
-    CLI("cli", "CLI", Icons.AutoMirrored.Filled.List),
+    HISTORY("history", "记录", Icons.Default.History),
     GIT("git", "Git", Icons.Default.AccountTree),
     SSH("ssh", "SSH", Icons.Default.Lock),
     AI("ai", "AI", Icons.Default.SmartToy),
@@ -137,7 +137,7 @@ enum class AppDestination(
     ;
 
     /** 是否需要「当前项目」上下文。 */
-    val needsProject: Boolean get() = this != HOME && this != SSH
+    val needsProject: Boolean get() = this != HOME && this != SSH && this != HISTORY
 
     companion object {
         fun of(route: String?): AppDestination? =
@@ -275,8 +275,8 @@ fun AppRoot(
                 composable(AppDestination.TERMINAL.route) {
                     ProjectGuard { path -> TerminalScreen(projectPath = path) }
                 }
-                composable(AppDestination.CLI.route) {
-                    ProjectGuard { path -> CliScreen(projectPath = path) }
+                composable(AppDestination.HISTORY.route) {
+                    HistoryScreen()
                 }
                 composable(AppDestination.GIT.route) {
                     ProjectGuard { path -> GitScreen(projectPath = path) }

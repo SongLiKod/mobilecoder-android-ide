@@ -77,7 +77,7 @@ dependencies {
     implementation(project(":core_storage"))
     implementation(project(":feature_editor"))
     implementation(project(":feature_terminal"))
-    implementation(project(":feature_cli"))
+    implementation(project(":feature_history"))
     implementation(project(":feature_git"))
     implementation(project(":feature_ssh"))
     implementation(project(":feature_build"))

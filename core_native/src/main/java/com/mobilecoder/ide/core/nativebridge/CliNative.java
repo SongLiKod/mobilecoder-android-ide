@@ -3,7 +3,7 @@ package com.mobilecoder.ide.core.nativebridge;
 /**
  * CLI / 外部进程执行引擎 JNI 绑定（实现见 core_native/src/main/cpp/cli_jni.c）。
  *
- * 用于 feature_cli（apt 命令）与 feature_build（Gradle 编译）的子进程执行，
+ * 用于 feature_build（Gradle 编译）等模块的子进程执行，
  * stdout/stderr 实时回调，最多 8 个并发进程（MC_MAX_PROCESSES）。
  */
 public final class CliNative {

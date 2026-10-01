@@ -5,9 +5,9 @@ import com.mobilecoder.ide.core.common.theme.AppThemeMode
 import com.mobilecoder.ide.core.common.theme.ThemeManager
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.core.storage.HistoryStore
 import com.mobilecoder.ide.feature.ai.AiController
 import com.mobilecoder.ide.feature.build.BuildRunner
-import com.mobilecoder.ide.feature.cli.CliController
 import com.mobilecoder.ide.feature.git.GitController
 import com.mobilecoder.ide.feature.ssh.SshController
 import com.mobilecoder.ide.feature.terminal.TerminalManager
@@ -75,8 +75,8 @@ class MobileCoderApplication : Application() {
         //      `sh: …/files/bin/node: Permission denied`，启动时统一补一次（幂等、毫秒级）
         runCatching { com.mobilecoder.ide.feature.build.BuildEnvironment.repairExecutable(this) }
 
-        // 4) feature 进程级服务
-        runCatching { CliController.init(this) }
+        // 4) feature 进程级服务 + 历史记录加载（含旧终端历史迁移）
+        runCatching { scope.launch { runCatching { HistoryStore.ensureLoaded() } } }
         runCatching { TerminalManager.init(this) }
         runCatching { GitController.init(this) }
         runCatching { SshController.init(this) }

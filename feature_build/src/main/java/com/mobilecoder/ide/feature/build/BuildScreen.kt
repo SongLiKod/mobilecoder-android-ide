@@ -217,7 +217,7 @@ fun BuildScreen(
                         text = if (isNodeProject) {
                             "Node 工程无需 Gradle 构建：请点右上角「构建环境」在线下载 Node.js，再在「终端」执行 npm install / npm run build。"
                         } else {
-                            "缺少 settings.gradle / build.gradle。请在「CLI」面板执行 `apt init` 生成安卓项目骨架后再构建。"
+                            "缺少 settings.gradle / build.gradle。请在「项目」页新建「安卓应用」项目生成骨架后再构建。"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer,
