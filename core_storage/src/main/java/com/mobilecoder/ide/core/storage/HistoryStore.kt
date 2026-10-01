@@ -35,6 +35,7 @@ object HistoryStore {
     const val SOURCE_TERMINAL = "终端"
     const val SOURCE_BUILD = "构建"
     const val SOURCE_MANUAL = "手动"
+    const val SOURCE_MARKET = "市场"
 
     /** 最多保留的记录条数（超出后丢弃最旧的普通项，收藏项优先保留）。 */
     private const val LIMIT = 500

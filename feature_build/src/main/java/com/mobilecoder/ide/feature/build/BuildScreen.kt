@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -120,6 +121,7 @@ fun BuildScreen(
     var showAdvanced by rememberSaveable { mutableStateOf(false) }
     var extraTasksText by rememberSaveable { mutableStateOf("") }
     var showEnv by rememberSaveable { mutableStateOf(false) }
+    var showMarket by rememberSaveable { mutableStateOf(false) }
     var hint by remember { mutableStateOf("") }
     var selectedError by remember { mutableStateOf<BuildError?>(null) }
     var elapsedMs by remember { mutableStateOf(0L) }
@@ -154,6 +156,12 @@ fun BuildScreen(
         BuildEnvDialog(onDismiss = { showEnv = false }, projectDir = projectDir)
     }
 
+    // 软件市场：整页接管本 Tab（安装在 MarketInstaller 单例里静默跑，返回不中断）
+    if (showMarket) {
+        MarketScreen(onBack = { showMarket = false }, modifier = modifier)
+        return
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
 
         // ---------------- 顶部：工程信息 + 环境徽标 + 入口 ----------------
@@ -166,6 +174,9 @@ fun BuildScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     EnvBadge(ready = envStatus?.ready == true)
+                    IconButton(onClick = { showMarket = true }) {
+                        Icon(Icons.Default.Store, contentDescription = "软件市场")
+                    }
                     IconButton(onClick = { showEnv = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "构建环境")
                     }

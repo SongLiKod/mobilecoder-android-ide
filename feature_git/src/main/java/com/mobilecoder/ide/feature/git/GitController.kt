@@ -320,6 +320,19 @@ object GitController {
         }
     }
 
+    /**
+     * 解析待删除的未跟踪路径（纯函数，JVM 单测覆盖）：
+     * 以 [workdir] 为根拼接 [path] 并 canonical 化，越出仓库根
+     * （`..` 逃逸 / 空路径 / 指向根自身）一律返回 null。
+     */
+    internal fun deleteTarget(workdir: String, path: String): File? {
+        if (workdir.isBlank() || path.isBlank()) return null
+        val root = runCatching { File(workdir).canonicalFile }.getOrNull() ?: return null
+        val target = runCatching { File(root, path).canonicalFile }.getOrNull() ?: return null
+        // 必须严格位于根之下（前缀比较天然排除根自身）
+        return if (target.path.startsWith(root.path + File.separator)) target else null
+    }
+
     private suspend fun bindLocked(projectPath: String) {
         _loading.value = true
         try {
@@ -608,6 +621,35 @@ object GitController {
             postInfo("已还原到最近一次提交：" + path)
         } else {
             postError("还原失败：" + nativeError("尚无首次提交，无法还原"))
+        }
+        ok
+    }
+
+    /**
+     * 删除未跟踪文件（变更页「未跟踪」组的删除操作）：新增文件不在索引与
+     * 对象库中，直接从工作区物理移除即可，无需任何 git 写操作；目录整棵递归删除。
+     *
+     * 路径经 [deleteTarget] 规范化并校验必须位于工作区内（防 `..` 逃逸），
+     * 越界 / 不存在 / 删除失败都会转成中文提示，不抛异常。
+     */
+    suspend fun deleteUntracked(path: String): Boolean = withRepo(false) {
+        if (!ensureOpen()) return@withRepo false
+        val workdir = runCatching { GitNative.workdirPath() }.getOrDefault("")
+        val target = deleteTarget(workdir, path)
+        if (target == null) {
+            postError("删除失败：路径不在仓库工作区内")
+            return@withRepo false
+        }
+        if (!target.exists()) {
+            postError("文件不存在：" + path)
+            return@withRepo false
+        }
+        val ok = runCatching { target.deleteRecursively() }.getOrDefault(false)
+        if (ok) {
+            refreshLocked(all = false)
+            postInfo("已删除：" + path)
+        } else {
+            postError("删除失败：" + path)
         }
         ok
     }
