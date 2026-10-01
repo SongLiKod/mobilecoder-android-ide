@@ -5,9 +5,23 @@
 
 JavaVM *g_vm = NULL;
 
+/*
+ * mbedTLS 平台熵源改指 /dev/urandom。必须在任何 libgit2/libssh2 初始化前
+ * 生效，故放在 JNI_OnLoad（共享库一加载即执行，早于一切 native 调用）。
+ *
+ * 背景：mbedTLS 的 getrandom 快速路径（library/entropy_poll.c）只在 glibc
+ * 下启用，Android/bionic 走 fopen(mbedtls_platform_dev_random) 回退，其
+ * 默认值是 "/dev/random"——内核熵池耗尽时该读取会阻塞（本机实测
+ * entropy_avail=31 时 dd 读 64B 超时 5s 不返回），git/ssh 引擎初始化随之
+ * 挂起数十秒到数分钟。/dev/urandom 与 getrandom 同源：CRNG 就绪后读取
+ * 立即返回，SecureRandom 等系统组件同样取自它，不损失熵质量。
+ */
+extern const char *mbedtls_platform_dev_random;
+
 jint mc_jni_onload(JavaVM *vm, void *reserved) {
     (void) reserved;
     g_vm = vm;
+    mbedtls_platform_dev_random = "/dev/urandom";
     return JNI_VERSION_1_6;
 }
 

@@ -75,13 +75,14 @@ object RootfsManager {
 
     /**
      * Termux 官方仓库的 proot 三件套（固定地址，随 [EnvSource] 不变，
-     * **2026-09 实测三个 .deb 均 HTTP 200**）。
+     * **2026-10 实测六个 .deb（2 架构）均 HTTP 200 + ar 魔数**；
+     * proot 上游 2026-10-02 由 5.1.107.95 升至 5.1.107.96，旧地址已 404）。
      */
     fun prootDebUrls(arch: String): List<String> {
         val tuxArch = if (arch == "aarch64") "aarch64" else "x86_64"
         val base = "https://packages.termux.dev/apt/termux-main/pool/main"
         return listOf(
-            "$base/p/proot/proot_5.1.107.95_$tuxArch.deb",
+            "$base/p/proot/proot_5.1.107.96_$tuxArch.deb",
             "$base/libt/libtalloc/libtalloc_2.4.3_$tuxArch.deb",
             "$base/liba/libandroid-shmem/libandroid-shmem_0.7_$tuxArch.deb",
         )

@@ -10,8 +10,20 @@ import java.io.File
  *  - libgit2 / libssh2 初始化与 CA 证书路径（assets → cache，供 mbedTLS 校验 HTTPS 仓库）
  *  - 进程环境变量（HOME / PATH / ANDROID_HOME / JAVA_HOME / GRADLE_USER_HOME 等），
  *    由终端 PTY 与 CLI 子进程继承（TECH.md 4.2 / 4.3）
+ *
+ * 锁模型：每个 ensure* 各持一把独立锁，互不串扰。
+ * 三者曾共用对象锁——git/ssh 的原生初始化耗时（曾经卡在 /dev/random 熵源
+ * 阻塞读上，可达数分钟）会把主线程上的 ensureProcessEnvironment 连带堵死：
+ * 连快速路径的 envReady 检查也要先抢同一把锁，启动直接白屏。
+ * 初始化彼此无依赖，拆锁后慢初始化只影响自己。
  */
 object NativeRuntime {
+
+    private val gitLock = Any()
+
+    private val sshLock = Any()
+
+    private val envLock = Any()
 
     @Volatile
     private var gitReady = false
@@ -23,59 +35,65 @@ object NativeRuntime {
     private var envReady = false
 
     /** 初始化 Git 引擎并安装 CA 证书，成功返回 true。 */
-    @Synchronized
     fun ensureGitReady(context: Context): Boolean {
         if (gitReady) return true
-        val ok = runCatching {
-            if (!GitNative.runtimeInit()) return@runCatching false
-            val cert = extractCaBundle(context)
-            if (cert != null) GitNative.setCertificateFile(cert.absolutePath)
-            true
-        }.getOrDefault(false)
-        gitReady = ok
-        return ok
+        synchronized(gitLock) {
+            if (gitReady) return true
+            val ok = runCatching {
+                if (!GitNative.runtimeInit()) return@runCatching false
+                val cert = extractCaBundle(context)
+                if (cert != null) GitNative.setCertificateFile(cert.absolutePath)
+                true
+            }.getOrDefault(false)
+            gitReady = ok
+            return ok
+        }
     }
 
     /** 初始化 SSH 引擎（libssh2），成功返回 true。 */
-    @Synchronized
     fun ensureSshReady(): Boolean {
         if (sshReady) return true
-        sshReady = runCatching { SshNative.runtimeInit() }.getOrDefault(false)
-        return sshReady
+        synchronized(sshLock) {
+            if (sshReady) return true
+            sshReady = runCatching { SshNative.runtimeInit() }.getOrDefault(false)
+            return sshReady
+        }
     }
 
     /**
      * 向进程注入子进程环境变量。
      * 必须在创建终端会话 / 执行 CLI 命令之前调用一次。
      */
-    @Synchronized
     fun ensureProcessEnvironment(context: Context): Boolean {
         if (envReady) return true
-        val files = context.filesDir
-        val cache = context.cacheDir
-        val sdk = File(files, "sdk")
-        val bin = File(files, "bin")
-        listOf(bin, sdk).forEach { if (!it.exists()) it.mkdirs() }
+        synchronized(envLock) {
+            if (envReady) return true
+            val files = context.filesDir
+            val cache = context.cacheDir
+            val sdk = File(files, "sdk")
+            val bin = File(files, "bin")
+            listOf(bin, sdk).forEach { if (!it.exists()) it.mkdirs() }
 
-        // PATH：files/bin（node / npm 入口）→ guest 标准路径（rootfs 的 /usr/bin 等，
-        // Linux 环境装好后由 proot 看见）→ bionic 的 /system/bin（rootfs 未装时兜底，
-        // 不存在的目录在 PATH 搜索中自动跳过）
-        val path = buildString {
-            append(bin.absolutePath)
-            append(":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-            append(":/system/bin:/system/xbin:/vendor/bin")
+            // PATH：files/bin（node / npm 入口）→ guest 标准路径（rootfs 的 /usr/bin 等，
+            // Linux 环境装好后由 proot 看见）→ bionic 的 /system/bin（rootfs 未装时兜底，
+            // 不存在的目录在 PATH 搜索中自动跳过）
+            val path = buildString {
+                append(bin.absolutePath)
+                append(":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                append(":/system/bin:/system/xbin:/vendor/bin")
+            }
+            val result = runCatching {
+                TerminalNative.setEnv("HOME", files.absolutePath)
+                TerminalNative.setEnv("TMPDIR", File(cache, "tmp").absolutePath)
+                TerminalNative.setEnv("PATH", path)
+                TerminalNative.setEnv("ANDROID_HOME", sdk.absolutePath)
+                TerminalNative.setEnv("ANDROID_SDK_ROOT", sdk.absolutePath)
+                TerminalNative.setEnv("GRADLE_USER_HOME", File(files, ".gradle").absolutePath)
+                TerminalNative.setEnv("MOBILECODER_HOME", files.absolutePath)
+            }.getOrDefault(-1)
+            envReady = true
+            return result == 0
         }
-        val result = runCatching {
-            TerminalNative.setEnv("HOME", files.absolutePath)
-            TerminalNative.setEnv("TMPDIR", File(cache, "tmp").absolutePath)
-            TerminalNative.setEnv("PATH", path)
-            TerminalNative.setEnv("ANDROID_HOME", sdk.absolutePath)
-            TerminalNative.setEnv("ANDROID_SDK_ROOT", sdk.absolutePath)
-            TerminalNative.setEnv("GRADLE_USER_HOME", File(files, ".gradle").absolutePath)
-            TerminalNative.setEnv("MOBILECODER_HOME", files.absolutePath)
-        }.getOrDefault(-1)
-        envReady = true
-        return result == 0
     }
 
     /** JAVA_HOME（用户在「构建环境」中导入 JDK 后由调用方写入）。 */
