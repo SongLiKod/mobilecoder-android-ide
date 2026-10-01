@@ -15,10 +15,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -141,6 +143,7 @@ fun FileTreeDrawer(
     val rows = remember(tree, collapsed) { buildTreeRows(tree, collapsed) }
 
     var menuPath by remember { mutableStateOf<String?>(null) }
+    var createMenuOpen by remember { mutableStateOf(false) }
     var nameDialog by remember { mutableStateOf<NameDialog?>(null) }
     var pendingDelete by remember { mutableStateOf<FileNode?>(null) }
     var pendingMove by remember { mutableStateOf<FileNode?>(null) }
@@ -179,6 +182,43 @@ fun FileTreeDrawer(
                         title = rootPath?.let { File(it).name } ?: "文件",
                         modifier = Modifier.weight(1f),
                     )
+                    // 新建（与长按菜单共用同一套创建流程；重命名/删除/移动仍为长按专属）
+                    Box {
+                        IconButton(
+                            onClick = { createMenuOpen = true },
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "新建")
+                        }
+                        DropdownMenu(
+                            expanded = createMenuOpen,
+                            onDismissRequest = { createMenuOpen = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("新建文件") },
+                                leadingIcon = { Icon(Icons.Default.FileCopy, contentDescription = null) },
+                                onClick = {
+                                    createMenuOpen = false
+                                    rootPath?.let {
+                                        nameDialog = NameDialog.Create(NameDialog.Create.Kind.FILE, it)
+                                    }
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("新建目录") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.CreateNewFolder, contentDescription = null)
+                                },
+                                onClick = {
+                                    createMenuOpen = false
+                                    rootPath?.let {
+                                        nameDialog =
+                                            NameDialog.Create(NameDialog.Create.Kind.DIRECTORY, it)
+                                    }
+                                },
+                            )
+                        }
+                    }
                     IconButton(onClick = { EditorController.refreshTree() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "刷新")
                     }

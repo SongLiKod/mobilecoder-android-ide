@@ -3,6 +3,7 @@
 package com.mobilecoder.ide.feature.git
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,12 +17,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -29,6 +33,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
@@ -74,8 +81,9 @@ fun GitScreen(
     val progress by GitController.progress.collectAsStateWithLifecycle()
 
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var subView by rememberSaveable { mutableIntStateOf(SUB_MAIN) }
+    var branchSubTab by rememberSaveable { mutableIntStateOf(0) }
     var showClone by rememberSaveable { mutableStateOf(false) }
-    var showPorcelain by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(projectPath) {
         runCatching { GitController.bind(projectPath) }
@@ -86,7 +94,7 @@ fun GitScreen(
             repo = repo,
             loading = loading,
             onRefresh = { scope.launch { runCatching { GitController.refresh() } } },
-            onHelp = { showPorcelain = true },
+            onOpenSettings = { subView = SUB_SETTINGS },
         )
 
         message?.let { banner ->
@@ -98,55 +106,63 @@ fun GitScreen(
         }
 
         if (repo.opened) {
-            val titles = listOf("变更", "日志", "分支", "冲突", "标签", "远程", "设置")
-            ScrollableTabRow(
-                selectedTabIndex = tab,
-                edgePadding = 8.dp,
-                containerColor = MaterialTheme.colorScheme.surface,
-            ) {
-                titles.forEachIndexed { index, title ->
-                    val label = if (index == TAB_CONFLICTS && conflicts.isNotEmpty()) {
-                        "冲突 (${conflicts.size})"
-                    } else {
-                        title
-                    }
-                    Tab(
-                        selected = tab == index,
-                        onClick = { tab = index },
-                        text = { Text(label, maxLines = 1) },
+            when (subView) {
+                SUB_CONFLICTS -> {
+                    SubViewBackBar(
+                        title = "冲突处理(${conflicts.size})",
+                        onBack = { subView = SUB_MAIN },
                     )
+                    ConflictTab(modifier = Modifier.weight(1f))
                 }
-            }
 
-            when (tab) {
-                TAB_CHANGES -> ChangesTab(
-                    modifier = Modifier.weight(1f),
-                )
+                SUB_SETTINGS -> {
+                    SubViewBackBar(
+                        title = "仓库设置",
+                        onBack = { subView = SUB_MAIN },
+                    )
+                    SettingsTab(modifier = Modifier.weight(1f))
+                }
 
-                TAB_LOG -> LogTab(
-                    modifier = Modifier.weight(1f),
-                )
+                else -> {
+                    // 旧版本保存的 tab 索引可能超出新的 4 个 Tab，使用前先收敛
+                    val currentTab = tab.coerceIn(TAB_CHANGES, TAB_REMOTES)
+                    val titles = listOf("变更", "历史", "分支", "远程")
+                    ScrollableTabRow(
+                        selectedTabIndex = currentTab,
+                        edgePadding = 8.dp,
+                        containerColor = MaterialTheme.colorScheme.surface,
+                    ) {
+                        titles.forEachIndexed { index, title ->
+                            Tab(
+                                selected = currentTab == index,
+                                onClick = { tab = index },
+                                text = { Text(title, maxLines = 1) },
+                            )
+                        }
+                    }
 
-                TAB_BRANCHES -> BranchTab(
-                    modifier = Modifier.weight(1f),
-                    onConflicts = { tab = TAB_CONFLICTS },
-                )
+                    when (currentTab) {
+                        TAB_CHANGES -> ChangesTab(
+                            modifier = Modifier.weight(1f),
+                            onOpenConflicts = { subView = SUB_CONFLICTS },
+                        )
 
-                TAB_CONFLICTS -> ConflictTab(
-                    modifier = Modifier.weight(1f),
-                )
+                        TAB_LOG -> LogTab(
+                            modifier = Modifier.weight(1f),
+                        )
 
-                TAB_TAGS -> TagsTab(
-                    modifier = Modifier.weight(1f),
-                )
+                        TAB_BRANCHES -> BranchesSubView(
+                            modifier = Modifier.weight(1f),
+                            subTab = branchSubTab,
+                            onSubTabChange = { branchSubTab = it },
+                            onConflicts = { subView = SUB_CONFLICTS },
+                        )
 
-                TAB_REMOTES -> RemotesTab(
-                    modifier = Modifier.weight(1f),
-                )
-
-                else -> SettingsTab(
-                    modifier = Modifier.weight(1f),
-                )
+                        else -> RemotesTab(
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
             }
         } else {
             NoRepoContent(
@@ -161,10 +177,6 @@ fun GitScreen(
                 onClone = { showClone = true },
             )
         }
-    }
-
-    if (showPorcelain) {
-        PorcelainHelpDialog(onDismiss = { showPorcelain = false })
     }
 
     if (showClone) {
@@ -199,13 +211,16 @@ fun GitScreen(
     }
 }
 
-/** Tab 索引。 */
+/** Tab 索引（主视图 4 个 Tab：变更 / 历史 / 分支 / 远程）。 */
 private const val TAB_CHANGES = 0
 private const val TAB_LOG = 1
 private const val TAB_BRANCHES = 2
-private const val TAB_CONFLICTS = 3
-private const val TAB_TAGS = 4
-private const val TAB_REMOTES = 5
+private const val TAB_REMOTES = 3
+
+/** 子视图：0=主 Tab 区，1=冲突处理，2=仓库设置（子视图时隐藏 Tab 行）。 */
+private const val SUB_MAIN = 0
+private const val SUB_CONFLICTS = 1
+private const val SUB_SETTINGS = 2
 
 // ---------------------------------------------------------------------------
 // 顶部仓库信息行
@@ -216,8 +231,10 @@ private fun RepoHeader(
     repo: GitRepoUiState,
     loading: Boolean,
     onRefresh: () -> Unit,
-    onHelp: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
+    var menuOpen by rememberSaveable { mutableStateOf(false) }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -271,11 +288,98 @@ private fun RepoHeader(
                 strokeWidth = 2.dp,
             )
         }
-        IconButton(onClick = onHelp) {
-            Icon(Icons.Default.Info, contentDescription = "日常命令参考")
+        Box {
+            IconButton(onClick = { menuOpen = true }) {
+                Icon(Icons.Default.MoreVert, contentDescription = "更多操作")
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("仓库设置") },
+                    onClick = {
+                        menuOpen = false
+                        onOpenSettings()
+                    },
+                )
+            }
         }
         IconButton(onClick = onRefresh) {
             Icon(Icons.Default.Refresh, contentDescription = "刷新")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 子视图返回行（冲突处理 / 仓库设置）
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun SubViewBackBar(
+    title: String,
+    onBack: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 4.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.size(40.dp),
+        ) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 4.dp),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 分支 Tab 的子页：分支 / 标签 分段切换
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun BranchesSubView(
+    modifier: Modifier = Modifier,
+    subTab: Int,
+    onSubTabChange: (Int) -> Unit,
+    onConflicts: () -> Unit,
+) {
+    Column(modifier = modifier.fillMaxSize()) {
+        SingleChoiceSegmentedButtonRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            SegmentedButton(
+                selected = subTab == 0,
+                onClick = { onSubTabChange(0) },
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+            ) {
+                Text("分支", style = MaterialTheme.typography.labelMedium)
+            }
+            SegmentedButton(
+                selected = subTab == 1,
+                onClick = { onSubTabChange(1) },
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+            ) {
+                Text("标签", style = MaterialTheme.typography.labelMedium)
+            }
+        }
+
+        if (subTab == 0) {
+            BranchTab(
+                modifier = Modifier.weight(1f),
+                onConflicts = onConflicts,
+            )
+        } else {
+            TagsTab(modifier = Modifier.weight(1f))
         }
     }
 }
@@ -471,67 +575,6 @@ private fun CloneDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
-        },
-    )
-}
-
-@Composable
-private fun PorcelainHelpDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("日常命令参考") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 480.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text(
-                    text = "Main Porcelain 日常命令。终端可执行标为「可用」，其余为标准 git 对照。也可在 Git → 设置 查阅。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                GitPorcelain.groups.forEach { group ->
-                    Text(
-                        text = group.title,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    group.commands.forEach { cmd ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text(
-                                text = cmd.name,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.weight(0.34f),
-                            )
-                            Text(
-                                text = if (cmd.implemented) "可用" else "参考",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (cmd.implemented) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                modifier = Modifier.weight(0.16f),
-                            )
-                            Text(
-                                text = cmd.summary,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(0.50f),
-                            )
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
 }

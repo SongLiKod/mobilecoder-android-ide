@@ -178,24 +178,6 @@ internal fun SshTestPage(
             )
         }
 
-        if (selectedKey?.type == SshKeyType.ED25519) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                ),
-            ) {
-                Text(
-                    text = "提示：" + ED25519_BACKEND_NOTICE,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(12.dp),
-                )
-            }
-        }
-
         // ---------------- 连接表单 ----------------
         OutlinedTextField(
             value = host,
@@ -393,13 +375,6 @@ private fun TestResultCard(result: SshTestResult) {
                     text = "主机密钥类型：${result.hostKeyType}",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (!result.success && result.usedEd25519) {
-                Text(
-                    text = ED25519_BACKEND_NOTICE,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = color,
                 )
             }
             if (!result.success && result.reachable && result.usedKey) {

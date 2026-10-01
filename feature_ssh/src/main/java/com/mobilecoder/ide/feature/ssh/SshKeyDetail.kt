@@ -63,6 +63,7 @@ internal fun SshKeyDetailPage(
     meta: SshKeyMeta,
     onBack: () -> Unit,
     onActivated: () -> Unit,
+    notify: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -177,13 +178,14 @@ internal fun SshKeyDetailPage(
                     "SSH 公钥",
                     meta.publicKey,
                     "已复制，可粘贴到 GitHub → Settings → SSH keys",
+                    notify,
                 )
             }) {
                 Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
                 Text("复制公钥")
             }
             TextButton(onClick = {
-                copyToClipboard(context, "SSH 指纹", meta.fingerprint, "指纹已复制：${meta.fingerprint}")
+                copyToClipboard(context, "SSH 指纹", meta.fingerprint, "指纹已复制：${meta.fingerprint}", notify)
             }) {
                 Text("复制指纹")
             }

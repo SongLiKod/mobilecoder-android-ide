@@ -3,6 +3,7 @@ package com.mobilecoder.ide.feature.git
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -10,14 +11,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -60,6 +64,7 @@ fun BranchTab(
     var newName by rememberSaveable { mutableStateOf("") }
     var mergeTarget by rememberSaveable { mutableStateOf("") }
     var deleteTarget by rememberSaveable { mutableStateOf("") }
+    var checkoutTarget by rememberSaveable { mutableStateOf("") }
 
     Column(modifier = modifier.fillMaxSize()) {
         Row(
@@ -112,11 +117,7 @@ fun BranchTab(
             items(branches, key = { it.name }) { branch ->
                 BranchRow(
                     branch = branch,
-                    onCheckout = {
-                        scope.launch {
-                            runCatching { GitController.checkoutBranch(branch.name) }
-                        }
-                    },
+                    onCheckout = { checkoutTarget = branch.name },
                     onMerge = { mergeTarget = branch.name },
                     onDelete = { deleteTarget = branch.name },
                 )
@@ -157,12 +158,27 @@ fun BranchTab(
         )
     }
 
+    // ---------------- 切换分支确认（行点击 / 「切换」按钮共用一条路径） ----------------
+    if (checkoutTarget.isNotBlank()) {
+        AppAlertDialog(
+            title = "切换分支",
+            message = "切换到分支「$checkoutTarget」？未提交改动会跟随工作区。",
+            confirmLabel = "切换",
+            onConfirm = {
+                val target = checkoutTarget
+                checkoutTarget = ""
+                scope.launch { runCatching { GitController.checkoutBranch(target) } }
+            },
+            onDismiss = { checkoutTarget = "" },
+        )
+    }
+
     // ---------------- 合并确认 ----------------
     if (mergeTarget.isNotBlank()) {
         AppAlertDialog(
             title = "合并分支",
             message = "把「$mergeTarget」合并到当前分支「${head?.branch ?: "HEAD"}」？\n" +
-                "若产生冲突会自动跳转到「冲突」页处理。",
+                "若产生冲突会自动打开「冲突处理」页。",
             confirmLabel = "合并",
             onConfirm = {
                 val target = mergeTarget
@@ -246,7 +262,7 @@ private fun HeadCard(head: GitHead?, merging: Boolean) {
             }
 
             Text(
-                text = "当前分支不可删除；点右侧按钮可切换 / 合并分支",
+                text = "当前分支不可删除；点分支行可切换分支，点右侧 ⋮ 可合并 / 删除分支",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
@@ -254,7 +270,7 @@ private fun HeadCard(head: GitHead?, merging: Boolean) {
     }
 }
 
-/** 单个分支行。 */
+/** 单个分支行：行点击 = 切换分支（带确认），右侧 ⋮ 菜单 = 合并 / 删除。 */
 @Composable
 private fun BranchRow(
     branch: GitBranch,
@@ -262,10 +278,12 @@ private fun BranchRow(
     onMerge: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    var menuOpen by rememberSaveable { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = !branch.isHead, onClick = onMerge)
+            .clickable(enabled = !branch.isHead, onClick = onCheckout)
             .padding(horizontal = 16.dp, vertical = 6.dp),
     ) {
         Row(
@@ -326,13 +344,36 @@ private fun BranchRow(
 
             if (!branch.isHead) {
                 TextButton(onClick = onCheckout) { Text("切换") }
-                TextButton(onClick = onMerge) { Text("合并") }
-                IconButton(onClick = onDelete, enabled = !branch.isHead) {
-                    Icon(
-                        imageVector = Icons.Default.Delete,
-                        contentDescription = "删除分支",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Box {
+                    IconButton(
+                        onClick = { menuOpen = true },
+                        modifier = Modifier.size(40.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "更多操作",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = menuOpen,
+                        onDismissRequest = { menuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("合并到当前分支") },
+                            onClick = {
+                                menuOpen = false
+                                onMerge()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("删除分支") },
+                            onClick = {
+                                menuOpen = false
+                                onDelete()
+                            },
+                        )
+                    }
                 }
             }
         }

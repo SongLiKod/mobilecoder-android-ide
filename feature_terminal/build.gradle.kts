@@ -30,8 +30,6 @@ dependencies {
     implementation(project(":core_common"))
     implementation(project(":core_storage"))
     implementation(project(":core_native"))
-    // 标签行显示当前分支徽标（订阅 GitController.head）
-    implementation(project(":feature_git"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)

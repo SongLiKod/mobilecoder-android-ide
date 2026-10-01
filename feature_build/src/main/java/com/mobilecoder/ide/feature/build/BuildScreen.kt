@@ -3,6 +3,7 @@ package com.mobilecoder.ide.feature.build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,14 +21,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Store
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -42,6 +42,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -80,7 +82,8 @@ import kotlinx.coroutines.launch
  * PRD 2.7 安卓项目编译打包页面。
  *
  * 布局（Column，不加 bottomBar，由 app 的 Scaffold 提供底部导航）：
- *  1. 工程信息 + 环境就绪徽标 + 「构建环境」入口
+ *  0. 环境状态条（整行点击 → [onOpenEnvironment] 打开「环境中心」）
+ *  1. 工程信息
  *  2. 变体选择 + 开始/取消构建 + Clean + 内存仪表
  *  3. 阶段进度条
  *  4. 实时日志（自动滚动 / 暂停 / 清空 / 复制）
@@ -88,11 +91,15 @@ import kotlinx.coroutines.launch
  *  6. APK 产物（安装 / 分享 / 复制路径 / 打开目录）
  *  7. 构建历史（可折叠）
  *
+ * 本页是路由页（壳层统一渲染返回栏 + 「构建与运行」标题），因此**不自带**路由级
+ * 返回栏 / 页面大标题；提示类反馈统一走页面内 [SnackbarHostState]（无 Toast）。
+ *
  * 颜色全部取自 [LocalAppPalette] / MaterialTheme.colorScheme（PRD 2.1 日志高亮随主题）。
  */
 @Composable
 fun BuildScreen(
     projectPath: String,
+    onOpenEnvironment: (startOnMarket: Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -120,11 +127,14 @@ fun BuildScreen(
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showAdvanced by rememberSaveable { mutableStateOf(false) }
     var extraTasksText by rememberSaveable { mutableStateOf("") }
-    var showEnv by rememberSaveable { mutableStateOf(false) }
-    var showMarket by rememberSaveable { mutableStateOf(false) }
-    var hint by remember { mutableStateOf("") }
     var selectedError by remember { mutableStateOf<BuildError?>(null) }
     var elapsedMs by remember { mutableStateOf(0L) }
+
+    // 页面内本地 Snackbar：所有 hint / 结果反馈统一走这里（不用 Toast）
+    val snackbarHostState = remember { SnackbarHostState() }
+    val showHint: (String) -> Unit = { message ->
+        scope.launch { snackbarHostState.showSnackbar(message) }
+    }
 
     LaunchedEffect(projectPath) {
         BuildRunner.init(context)
@@ -152,363 +162,340 @@ fun BuildScreen(
         if (autoScroll && logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
     }
 
-    if (showEnv) {
-        BuildEnvDialog(onDismiss = { showEnv = false }, projectDir = projectDir)
-    }
+    Box(modifier = modifier) {
+        Column(modifier = Modifier.fillMaxSize()) {
 
-    // 软件市场：整页接管本 Tab（安装在 MarketInstaller 单例里静默跑，返回不中断）
-    if (showMarket) {
-        MarketScreen(onBack = { showMarket = false }, modifier = modifier)
-        return
-    }
-
-    Column(modifier = modifier.fillMaxSize()) {
-
-        // ---------------- 顶部：工程信息 + 环境徽标 + 入口 ----------------
-        SectionHeader(
-            title = "编译构建",
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            action = {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    EnvBadge(ready = envStatus?.ready == true)
-                    IconButton(onClick = { showMarket = true }) {
-                        Icon(Icons.Default.Store, contentDescription = "软件市场")
-                    }
-                    IconButton(onClick = { showEnv = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = "构建环境")
-                    }
-                }
-            },
-        )
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = projectDir.name.ifBlank { projectPath },
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = projectPath,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-
-        if (!isProject) {
-            val isNodeProject = remember(projectPath) { File(projectPath, "package.json").exists() }
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                ),
-            ) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        text = if (isNodeProject) "该项目是 Node / Vue 工程" else "该项目不是安卓 Gradle 工程",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                    Text(
-                        text = if (isNodeProject) {
-                            "Node 工程无需 Gradle 构建：请点右上角「构建环境」在线下载 Node.js，再在「终端」执行 npm install / npm run build。"
-                        } else {
-                            "缺少 settings.gradle / build.gradle。请在「项目」页新建「安卓应用」项目生成骨架后再构建。"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                }
-            }
-        }
-
-        // ---------------- 变体 + Clean ----------------
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.weight(1f)) {
-                listOf("debug" to "Debug", "release" to "Release").forEachIndexed { index, (value, label) ->
-                    SegmentedButton(
-                        selected = variant == value,
-                        onClick = { if (!running) variant = value },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = 2),
-                    ) {
-                        Text(label, style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
-            FilterChip(
-                selected = clean,
-                onClick = { if (!running) clean = !clean },
-                label = { Text("Clean") },
+            // ---------------- 环境状态条：整体就绪度 + 组件摘要（→ 环境中心） ----------------
+            EnvironmentStatusBar(
+                status = envStatus,
+                onClick = { onOpenEnvironment(false) },
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
-        }
 
-        // ---------------- 主操作 + 内存仪表 ----------------
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Button(
-                onClick = {
-                    hint = ""
-                    if (running) {
-                        BuildRunner.cancel()
-                    } else {
-                        scope.launch {
-                            runCatching { AppStorage.preferences.setBuildVariant(variant) }
-                            val ok = BuildRunner.startBuild(
-                                BuildRequest(
-                                    projectDir = projectDir,
-                                    variant = variant,
-                                    clean = clean,
-                                    extraTasks = BuildRunner.parseExtraTasks(extraTasksText),
-                                ),
-                            )
-                            if (!ok) hint = "构建未能启动：请稍后重试（可能已有构建在进行）"
-                        }
-                    }
-                },
-                enabled = isProject || running,
-            ) {
-                Icon(
-                    imageVector = if (running) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = null,
-                    modifier = Modifier.padding(end = 4.dp),
-                )
-                Text(if (running) "取消构建" else "开始构建")
-            }
-            Spacer(Modifier.width(4.dp))
-            MemoryGauge(sample = memory, modifier = Modifier.weight(1f))
-        }
-
-        // ---------------- 高级选项：附加 Gradle 任务（默认空 = 安全默认值） ----------------
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(onClick = { showAdvanced = !showAdvanced }) {
-                Text(
-                    text = if (showAdvanced) "收起高级选项" else "高级选项",
-                    style = MaterialTheme.typography.labelMedium,
-                )
-            }
-            Spacer(Modifier.weight(1f))
-            if (extraTasksText.isNotBlank()) {
-                Text(
-                    text = "附加：${BuildRunner.parseExtraTasks(extraTasksText).joinToString(" ")}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(end = 16.dp),
-                )
-            }
-        }
-        if (showAdvanced) {
-            OutlinedTextField(
-                value = extraTasksText,
-                onValueChange = { if (!running) extraTasksText = it },
+            // ---------------- 顶部：工程信息 ----------------
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
-                enabled = !running,
-                singleLine = true,
-                label = { Text("附加 Gradle 任务（可选，空格分隔）") },
-                placeholder = { Text("例如：lint test") },
-                textStyle = MaterialTheme.typography.bodySmall,
-            )
-        }
-
-        // ---------------- 阶段进度 ----------------
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
-            color = when (state) {
-                is BuildState.Success -> Color(0xFF000000 or palette.success.rgb)
-                is BuildState.Failed -> Color(0xFF000000 or palette.logError.rgb)
-                else -> MaterialTheme.colorScheme.primary
-            },
-        )
-        StatusLine(state = state, phase = phase, elapsedMs = elapsedMs)
-
-        // ---------------- 实时日志 ----------------
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "实时日志（${logs.size}）",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onBackground,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(onClick = { autoScroll = !autoScroll }) {
-                Icon(
-                    imageVector = if (autoScroll) Icons.Default.Pause else Icons.Default.ArrowDownward,
-                    contentDescription = if (autoScroll) "暂停自动滚动" else "恢复自动滚动",
-                    tint = if (autoScroll) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
-            }
-            IconButton(
-                onClick = {
-                    clipboard.setText(AnnotatedString(logs.joinToString("\n") { it.text }))
-                    hint = "已复制全部日志（${logs.size} 行）"
-                },
-                enabled = logs.isNotEmpty(),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "复制全部日志")
-            }
-            IconButton(onClick = { BuildRunner.clearLogs() }, enabled = logs.isNotEmpty()) {
-                Icon(Icons.Default.DeleteSweep, contentDescription = "清空日志")
-            }
-        }
-
-        LogPane(
-            logs = logs,
-            listState = listState,
-            palette = palette,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .background(
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                    shape = RoundedCornerShape(8.dp),
-                )
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-        )
-
-        // ---------------- 底部：错误 / 产物 / 历史（可折叠，内部滚动） ----------------
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 280.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            if (errors.isNotEmpty()) {
-                SectionHeader(
-                    title = "错误定位（${errors.size}）",
-                    action = {
-                        IconButton(onClick = { showErrors = !showErrors }) {
-                            Icon(
-                                imageVector = if (showErrors) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                contentDescription = if (showErrors) "收起错误" else "展开错误",
-                            )
-                        }
-                    },
-                )
-                if (showErrors) {
-                    errors.takeLast(50).forEach { error ->
-                        ErrorRow(
-                            error = error,
-                            selected = selectedError == error,
-                            onClick = {
-                                selectedError = error
-                                BuildRunner.requestJump(error)
-                                hint = if (error.inProject) {
-                                    "已记录跳转目标：${error.location}"
-                                } else {
-                                    "该文件不在工程内，无法跳转：${error.location}"
-                                }
-                            },
-                        )
-                    }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = projectDir.name.ifBlank { projectPath },
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = projectPath,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
-                HorizontalDivider()
             }
 
-            if (artifacts.isNotEmpty() || state is BuildState.Success) {
-                SectionHeader(
-                    title = "APK 产物（${artifacts.size}）",
-                    action = {
-                        IconButton(onClick = { showArtifacts = !showArtifacts }) {
-                            Icon(
-                                imageVector = if (showArtifacts) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                contentDescription = if (showArtifacts) "收起产物" else "展开产物",
-                            )
-                        }
-                    },
-                )
-                if (showArtifacts) {
-                    if (artifacts.isEmpty()) {
+            if (!isProject) {
+                val isNodeProject = remember(projectPath) { File(projectPath, "package.json").exists() }
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
-                            text = "本次构建未发现 APK 产物",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = if (isNodeProject) "该项目是 Node / Vue 工程" else "该项目不是安卓 Gradle 工程",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
                         )
-                    } else {
-                        artifacts.forEach { artifact ->
-                            ArtifactRow(
-                                artifact = artifact,
-                                onHint = { hint = it },
-                            )
+                        Text(
+                            text = if (isNodeProject) {
+                                "Node 工程无需 Gradle 构建：请在顶部「环境状态条」进入「环境中心」在线下载 Node.js，" +
+                                    "再在「终端」执行 npm install / npm run build。"
+                            } else {
+                                "缺少 settings.gradle / build.gradle。请在「项目」页新建「安卓应用」项目生成骨架后再构建。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
+            }
+
+            // ---------------- 变体 + Clean ----------------
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.weight(1f)) {
+                    listOf("debug" to "Debug", "release" to "Release").forEachIndexed { index, (value, label) ->
+                        SegmentedButton(
+                            selected = variant == value,
+                            onClick = { if (!running) variant = value },
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = 2),
+                        ) {
+                            Text(label, style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
-                HorizontalDivider()
+                FilterChip(
+                    selected = clean,
+                    onClick = { if (!running) clean = !clean },
+                    label = { Text("Clean") },
+                )
             }
 
-            if (history.isNotEmpty()) {
-                SectionHeader(
-                    title = "构建历史（${history.size}）",
-                    action = {
-                        IconButton(onClick = { showHistory = !showHistory }) {
-                            Icon(
-                                imageVector = if (showHistory) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                contentDescription = if (showHistory) "收起历史" else "展开历史",
-                            )
+            // ---------------- 主操作 + 内存仪表 ----------------
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Button(
+                    onClick = {
+                        if (running) {
+                            BuildRunner.cancel()
+                        } else {
+                            scope.launch {
+                                runCatching { AppStorage.preferences.setBuildVariant(variant) }
+                                val ok = BuildRunner.startBuild(
+                                    BuildRequest(
+                                        projectDir = projectDir,
+                                        variant = variant,
+                                        clean = clean,
+                                        extraTasks = BuildRunner.parseExtraTasks(extraTasksText),
+                                    ),
+                                )
+                                if (!ok) showHint("构建未能启动：请稍后重试（可能已有构建在进行）")
+                            }
                         }
                     },
+                    enabled = isProject || running,
+                ) {
+                    Icon(
+                        imageVector = if (running) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.padding(end = 4.dp),
+                    )
+                    Text(if (running) "取消构建" else "开始构建")
+                }
+                Spacer(Modifier.width(4.dp))
+                MemoryGauge(sample = memory, modifier = Modifier.weight(1f))
+            }
+
+            // ---------------- 高级选项：附加 Gradle 任务（默认空 = 安全默认值） ----------------
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = { showAdvanced = !showAdvanced }) {
+                    Text(
+                        text = if (showAdvanced) "收起高级选项" else "高级选项",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                if (extraTasksText.isNotBlank()) {
+                    Text(
+                        text = "附加：${BuildRunner.parseExtraTasks(extraTasksText).joinToString(" ")}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(end = 16.dp),
+                    )
+                }
+            }
+            if (showAdvanced) {
+                OutlinedTextField(
+                    value = extraTasksText,
+                    onValueChange = { if (!running) extraTasksText = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    enabled = !running,
+                    singleLine = true,
+                    label = { Text("附加 Gradle 任务（可选，空格分隔）") },
+                    placeholder = { Text("例如：lint test") },
+                    textStyle = MaterialTheme.typography.bodySmall,
                 )
-                if (showHistory) {
-                    history.forEach { entry -> HistoryRow(entry) }
+            }
+
+            // ---------------- 阶段进度 ----------------
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                color = when (state) {
+                    is BuildState.Success -> Color(0xFF000000 or palette.success.rgb)
+                    is BuildState.Failed -> Color(0xFF000000 or palette.logError.rgb)
+                    else -> MaterialTheme.colorScheme.primary
+                },
+            )
+            StatusLine(state = state, phase = phase, elapsedMs = elapsedMs)
+
+            // ---------------- 实时日志 ----------------
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "实时日志（${logs.size}）",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = { autoScroll = !autoScroll }) {
+                    Icon(
+                        imageVector = if (autoScroll) Icons.Default.Pause else Icons.Default.ArrowDownward,
+                        contentDescription = if (autoScroll) "暂停自动滚动" else "恢复自动滚动",
+                        tint = if (autoScroll) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(logs.joinToString("\n") { it.text }))
+                        showHint("已复制全部日志（${logs.size} 行）")
+                    },
+                    enabled = logs.isNotEmpty(),
+                ) {
+                    Icon(Icons.Default.ContentCopy, contentDescription = "复制全部日志")
+                }
+                IconButton(onClick = { BuildRunner.clearLogs() }, enabled = logs.isNotEmpty()) {
+                    Icon(Icons.Default.DeleteSweep, contentDescription = "清空日志")
                 }
             }
 
-            if (hint.isNotBlank()) {
-                Text(
-                    text = hint,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+            LogPane(
+                logs = logs,
+                listState = listState,
+                palette = palette,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .background(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+            )
+
+            // ---------------- 底部：错误 / 产物 / 历史（可折叠，内部滚动） ----------------
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 280.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (errors.isNotEmpty()) {
+                    SectionHeader(
+                        title = "错误定位（${errors.size}）",
+                        action = {
+                            IconButton(onClick = { showErrors = !showErrors }) {
+                                Icon(
+                                    imageVector = if (showErrors) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = if (showErrors) "收起错误" else "展开错误",
+                                )
+                            }
+                        },
+                    )
+                    if (showErrors) {
+                        errors.takeLast(50).forEach { error ->
+                            ErrorRow(
+                                error = error,
+                                selected = selectedError == error,
+                                onClick = {
+                                    selectedError = error
+                                    BuildRunner.requestJump(error)
+                                    showHint(
+                                        if (error.inProject) {
+                                            "已记录跳转目标：${error.location}"
+                                        } else {
+                                            "该文件不在工程内，无法跳转：${error.location}"
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    HorizontalDivider()
+                }
+
+                if (artifacts.isNotEmpty() || state is BuildState.Success) {
+                    SectionHeader(
+                        title = "APK 产物（${artifacts.size}）",
+                        action = {
+                            IconButton(onClick = { showArtifacts = !showArtifacts }) {
+                                Icon(
+                                    imageVector = if (showArtifacts) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = if (showArtifacts) "收起产物" else "展开产物",
+                                )
+                            }
+                        },
+                    )
+                    if (showArtifacts) {
+                        if (artifacts.isEmpty()) {
+                            Text(
+                                text = "本次构建未发现 APK 产物",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            artifacts.forEach { artifact ->
+                                ArtifactRow(
+                                    artifact = artifact,
+                                    onHint = { showHint(it) },
+                                )
+                            }
+                        }
+                    }
+                    HorizontalDivider()
+                }
+
+                if (history.isNotEmpty()) {
+                    SectionHeader(
+                        title = "构建历史（${history.size}）",
+                        action = {
+                            IconButton(onClick = { showHistory = !showHistory }) {
+                                Icon(
+                                    imageVector = if (showHistory) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = if (showHistory) "收起历史" else "展开历史",
+                                )
+                            }
+                        },
+                    )
+                    if (showHistory) {
+                        history.forEach { entry -> HistoryRow(entry) }
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
             }
-            Spacer(Modifier.height(8.dp))
         }
+
+        SnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter))
     }
 }
 
@@ -516,14 +503,72 @@ fun BuildScreen(
 // 组件
 // ---------------------------------------------------------------------------
 
-/** 环境就绪徽标：就绪绿 / 缺失红（随主题调色板）。 */
+/**
+ * 环境状态条：整体就绪度（[EnvBadge]，如「就绪 4/4」）+ 各组件简要摘要 + 进入
+ * 「环境中心」的箭头。整行可点击（44dp ≥ 40dp 触控目标），点击回调 [onClick]。
+ */
 @Composable
-private fun EnvBadge(ready: Boolean) {
+private fun EnvironmentStatusBar(
+    status: EnvStatus?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // 取一份非委托的局部引用，便于 null 判定后的智能转换
+    val current: EnvStatus? = status
+    val summary = when {
+        current == null -> "正在检测环境组件…"
+        else -> current.items.joinToString(" · ") { item ->
+            "${item.kind.title}${if (item.ready) "✓" else "✗"}"
+        }
+    }
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            EnvBadge(status = current)
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = "进入环境中心",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * 环境就绪徽标：就绪绿 / 缺失红（随主题调色板），带就绪计数（如「就绪 4/4」）；
+ * 尚未完成体检（[status] 为 null）时显示「检测中」。
+ */
+@Composable
+private fun EnvBadge(status: EnvStatus?) {
     val palette = LocalAppPalette.current
-    val color = if (ready) {
-        Color(0xFF000000 or palette.success.rgb)
-    } else {
-        Color(0xFF000000 or palette.logError.rgb)
+    // 取一份非委托的局部引用，便于 null 判定后的智能转换
+    val current: EnvStatus? = status
+    val items = current?.items.orEmpty()
+    val readyCount = items.count { it.ready }
+    val color = when {
+        current == null -> MaterialTheme.colorScheme.onSurfaceVariant
+        current.ready -> Color(0xFF000000 or palette.success.rgb)
+        else -> Color(0xFF000000 or palette.logError.rgb)
     }
     Surface(
         shape = RoundedCornerShape(50),
@@ -535,12 +580,20 @@ private fun EnvBadge(ready: Boolean) {
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                text = if (ready) "●" else "▲",
+                text = when {
+                    current == null -> "…"
+                    current.ready -> "●"
+                    else -> "▲"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = color,
             )
             Text(
-                text = if (ready) "环境就绪" else "环境缺失",
+                text = when {
+                    current == null -> "检测中"
+                    current.ready -> "就绪 $readyCount/${items.size}"
+                    else -> "缺 ${items.size - readyCount}/${items.size}"
+                },
                 style = MaterialTheme.typography.labelMedium,
                 color = color,
                 fontWeight = FontWeight.SemiBold,

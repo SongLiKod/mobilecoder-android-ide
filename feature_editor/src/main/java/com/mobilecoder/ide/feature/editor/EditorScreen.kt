@@ -6,29 +6,27 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.FindInPage
-import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -59,12 +57,12 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mobilecoder.ide.core.common.theme.LocalAppPalette
+import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
+import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
-import com.mobilecoder.ide.feature.git.GitController
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -75,7 +73,7 @@ import kotlin.math.roundToInt
  * 底部 = 问题面板（可收起）+ 状态栏。不自带 Scaffold，外层 app 已提供顶栏与底部导航。
  */
 @Composable
-fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
+fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Modifier = Modifier) {
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
@@ -84,18 +82,14 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
     }
     LaunchedEffect(projectPath) {
         EditorController.setProject(projectPath)
-        // 绑定仓库：拿到当前分支（非 Git 仓库时 head 为 null，徽标隐藏）
-        runCatching { GitController.bind(projectPath) }
     }
 
     val tabs by EditorController.tabs.collectAsStateWithLifecycle()
     val activePath by EditorController.activePath.collectAsStateWithLifecycle()
     val settings by EditorController.settings.collectAsStateWithLifecycle()
     val find by EditorController.find.collectAsStateWithLifecycle()
-    val search by EditorController.search.collectAsStateWithLifecycle()
     val message by EditorController.message.collectAsStateWithLifecycle()
     val history by EditorController.history.collectAsStateWithLifecycle()
-    val gitHead by GitController.head.collectAsStateWithLifecycle()
     val palette = LocalAppPalette.current
     val colors = remember(palette) { highlightColorsOf(palette) }
 
@@ -107,6 +101,10 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
     var gotoOpen by rememberSaveable { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var pendingClosePath by remember { mutableStateOf<String?>(null) }
+
+    // 软键盘弹出时底部问题面板隐藏（保持 open 状态，收起键盘后自动恢复）
+    val imeVisible = isImeVisible()
 
     val text = activeTab?.value?.text ?: ""
     val cursor = activeTab?.value?.selection?.start ?: 0
@@ -137,46 +135,24 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
                 tabs = tabs,
                 activePath = activePath,
                 onSelect = { EditorController.activate(it) },
-                onClose = { EditorController.closeTab(it) },
+                onClose = { path ->
+                    val closing = tabs.firstOrNull { it.path == path }
+                    if (closing != null && closing.dirty) {
+                        pendingClosePath = path
+                    } else {
+                        EditorController.closeTab(path)
+                    }
+                },
                 modifier = Modifier.weight(1f),
             )
-            gitHead?.branch?.takeIf { it.isNotBlank() }?.let { branch ->
-                BranchBadge(
-                    branch = branch,
-                    ahead = gitHead?.ahead ?: 0,
-                    behind = gitHead?.behind ?: 0,
-                    detached = gitHead?.detached == true,
-                    modifier = Modifier.padding(horizontal = 4.dp),
-                )
-            }
-            if (searchOpen) {
-                IconButton(onClick = {
-                    searchOpen = false
-                    EditorController.setSearchOpen(false)
-                }) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "关闭检索",
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                }
-            } else {
-                IconButton(onClick = {
-                    searchOpen = true
-                    EditorController.setSearchOpen(true)
-                }) {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = "项目检索",
-                        tint = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-            }
-            IconButton(onClick = { EditorController.setFindOpen(true) }) {
+            IconButton(onClick = {
+                searchOpen = true
+                EditorController.setSearchOpen(true)
+            }) {
                 Icon(
-                    imageVector = Icons.Default.FindInPage,
-                    contentDescription = "文件内查找",
-                    tint = if (find.open) {
+                    imageVector = Icons.Default.Search,
+                    contentDescription = "检索",
+                    tint = if (searchOpen) {
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.onSurface
@@ -192,6 +168,13 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
+                )
+            }
+            IconButton(onClick = onOpenBuild) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "构建与运行",
+                    tint = MaterialTheme.colorScheme.onSurface,
                 )
             }
             Box {
@@ -230,7 +213,6 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
                     onToggleLineNumbers = { EditorController.toggleLineNumbers() },
                     onToggleWordWrap = { EditorController.toggleWordWrap() },
                     onToggleAutoSave = { EditorController.toggleAutoSave() },
-                    onFontSize = { delta -> EditorController.setFontSize(settings.fontSize + delta) },
                     onFoldAll = {
                         menuOpen = false
                         activeTab?.let { EditorController.setAllFolds(it.path, collapse = true) }
@@ -290,6 +272,14 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
                         searchOpen = false
                         EditorController.setSearchOpen(false)
                     },
+                    onFindInFile = { query ->
+                        searchOpen = false
+                        EditorController.setSearchOpen(false)
+                        if (activeTab != null && activeTab.editable) {
+                            if (query.isNotBlank()) EditorController.setFindQuery(query.trim())
+                            EditorController.setFindOpen(true)
+                        }
+                    },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -309,7 +299,8 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
         }
 
         // ---------------- 底部面板（问题 / 大纲）+ 状态栏 ----------------
-        if (problemsOpen && activeTab != null && activeTab.editable) {
+        // 软键盘弹出期间仅隐藏显示，problemsOpen 状态保留，键盘收起后自动恢复
+        if (problemsOpen && !imeVisible && activeTab != null && activeTab.editable) {
             EditorBottomPanel(
                 tab = activeTab,
                 active = panelTab,
@@ -371,62 +362,26 @@ fun EditorScreen(projectPath: String, modifier: Modifier = Modifier) {
             onDismiss = { gotoOpen = false },
         )
     }
+
+    // 关闭未保存文件的二次确认（干净 Tab 直接关闭，不弹窗）
+    pendingClosePath?.let { path ->
+        val closing = tabs.firstOrNull { it.path == path }
+        AppAlertDialog(
+            title = "关闭未保存的文件？",
+            message = "「${closing?.name ?: path}」存在未保存的修改，确定要关闭吗？",
+            confirmLabel = "仍要关闭",
+            onConfirm = {
+                pendingClosePath = null
+                EditorController.closeTab(path)
+            },
+            onDismiss = { pendingClosePath = null },
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
 // 编辑器本体
 // ---------------------------------------------------------------------------
-
-/** 当前分支徽标（分支图标 + 名称 + 领先/落后计数；非仓库时由调用方隐藏）。 */
-@Composable
-private fun BranchBadge(
-    branch: String,
-    ahead: Int,
-    behind: Int,
-    detached: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val tint = MaterialTheme.colorScheme.onSurfaceVariant
-    Box(
-        modifier = modifier.background(
-            MaterialTheme.colorScheme.surfaceVariant,
-            RoundedCornerShape(6.dp),
-        ),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Default.AccountTree,
-                contentDescription = "当前分支",
-                tint = tint,
-                modifier = Modifier
-                    .padding(start = 6.dp)
-                    .size(12.dp),
-            )
-            Text(
-                text = if (detached) "HEAD ($branch)" else branch,
-                style = MaterialTheme.typography.labelSmall,
-                color = tint,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .padding(start = 4.dp, end = 6.dp)
-                    .widthIn(max = 110.dp),
-            )
-            if (ahead > 0 || behind > 0) {
-                Text(
-                    text = buildString {
-                        if (ahead > 0) append("↑$ahead")
-                        if (behind > 0) append(" ↓$behind")
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 1,
-                    modifier = Modifier.padding(end = 6.dp),
-                )
-            }
-        }
-    }
-}
 
 @Composable
 private fun EditorBody(
@@ -657,10 +612,13 @@ private fun EditorBody(
 @Composable
 private fun ProjectSearchOverlay(
     onDismiss: () -> Unit,
+    onFindInFile: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val search by EditorController.search.collectAsStateWithLifecycle()
     val root by EditorController.projectRoot.collectAsStateWithLifecycle()
+    // 检索范围（本地状态）：全项目 = 项目内容检索；当前文件 = 转入文件内查找
+    var searchWholeProject by remember { mutableStateOf(true) }
 
     Column(
         modifier = modifier.background(MaterialTheme.colorScheme.background),
@@ -686,6 +644,31 @@ private fun ProjectSearchOverlay(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+
+        // 检索范围切换（触控高度 >= 40dp）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilterChip(
+                selected = searchWholeProject,
+                onClick = { searchWholeProject = true },
+                label = { Text("全项目") },
+                modifier = Modifier.heightIn(min = 40.dp),
+            )
+            FilterChip(
+                selected = !searchWholeProject,
+                onClick = {
+                    searchWholeProject = false
+                    onFindInFile(search.query)
+                },
+                label = { Text("当前文件") },
+                modifier = Modifier.heightIn(min = 40.dp),
+            )
         }
 
         when {

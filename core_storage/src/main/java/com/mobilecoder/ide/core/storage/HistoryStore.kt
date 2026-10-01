@@ -121,6 +121,35 @@ object HistoryStore {
         }
     }
 
+    /**
+     * 撤销删除：按原样重新插入（保留原 id / 时间 / 来源 / 收藏）。
+     * 幂等：同 id 已存在时忽略。
+     */
+    suspend fun restore(record: HistoryRecord) {
+        ensureLoaded()
+        mutex.withLock {
+            val others = _records.value.filterNot { it.id == record.id }
+            val room = (LIMIT - 1).coerceAtLeast(0)
+            val kept = if (others.size <= room) {
+                others
+            } else {
+                // 与 addRecord 同规则：收藏优先保留，超出丢弃最旧的普通项
+                val favorite = others.filter { it.favorite }.sortedByDescending { it.time }
+                val plain = others.filterNot { it.favorite }.sortedByDescending { it.time }
+                (favorite + plain).take(room)
+            }
+            persist((kept + record).sortedByDescending { it.time })
+        }
+    }
+
+    /** 清空全部记录（含收藏；持久化一并清空，不可撤销）。 */
+    suspend fun clearAll() {
+        ensureLoaded()
+        mutex.withLock {
+            persist(emptyList())
+        }
+    }
+
     /** 终端命令（时间倒序），供终端 ↑ 键逐条回填。 */
     fun terminalCommands(): List<String> = textsOf(_records.value, SOURCE_TERMINAL)
 

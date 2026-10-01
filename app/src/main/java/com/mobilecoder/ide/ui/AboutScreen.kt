@@ -2,7 +2,6 @@ package com.mobilecoder.ide.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,13 +9,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -40,11 +35,10 @@ import kotlin.math.roundToInt
  * 关于页：版本信息 + 简介 + 检查更新（应用内下载、系统确认框覆盖安装，
  * 全程不跳转其他界面）+ 使用声明。
  *
- * 从「项目」页底部入口进入（不占底部导航位），系统返回键 / 顶栏返回可退出。
+ * 二级路由：返回条由 app 壳的 SubPage 统一提供，页面内不再自绘返回行。
  */
 @Composable
 fun AboutScreen(
-    onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by UpdateController.state.collectAsStateWithLifecycle()
@@ -55,22 +49,6 @@ fun AboutScreen(
             .fillMaxSize()
             .verticalScroll(rememberScrollState()),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 4.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-            }
-            Text(
-                text = "关于",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-
         Column(
             modifier = Modifier
                 .fillMaxWidth()

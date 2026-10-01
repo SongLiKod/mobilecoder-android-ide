@@ -31,7 +31,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Tag
@@ -88,8 +87,8 @@ fun EditorTabRow(
     LazyRow(
         modifier = modifier
             .fillMaxWidth()
-            .height(42.dp),
-        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
+            .height(44.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         items(tabs, key = { it.path }) { tab ->
@@ -102,7 +101,7 @@ fun EditorTabRow(
                 },
                 shape = MaterialTheme.shapes.small,
                 modifier = Modifier
-                    .height(32.dp)
+                    .height(36.dp)
                     .clickable { onSelect(tab.path) },
             ) {
                 Row(
@@ -134,13 +133,13 @@ fun EditorTabRow(
                     }
                     IconButton(
                         onClick = { onClose(tab.path) },
-                        modifier = Modifier.size(26.dp),
+                        modifier = Modifier.size(36.dp),
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "关闭",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(15.dp),
+                            modifier = Modifier.size(16.dp),
                         )
                     }
                 }
@@ -170,9 +169,9 @@ fun EditorStatusBar(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .height(40.dp)
             .background(MaterialTheme.colorScheme.surface)
-            .clickable(onClick = onToggleProblems)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .padding(horizontal = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -204,21 +203,26 @@ fun EditorStatusBar(
                 text = "共 ${tab.totalLines} 行",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
             )
             Text(
                 text = "UTF-8",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
             )
             Text(
                 text = tab.language.label,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
                 modifier = Modifier
+                    .height(40.dp)
+                    .clip(MaterialTheme.shapes.small)
                     .background(
                         color = if (outlineOpen) {
                             MaterialTheme.colorScheme.surfaceVariant
@@ -227,9 +231,8 @@ fun EditorStatusBar(
                         },
                         shape = MaterialTheme.shapes.small,
                     )
-                    .clip(MaterialTheme.shapes.small)
                     .clickable(onClick = onToggleOutline)
-                    .padding(horizontal = 5.dp, vertical = 1.dp),
+                    .padding(horizontal = 8.dp),
             ) {
                 Text(
                     text = if (symbolCount > 0) "大纲 $symbolCount" else "大纲",
@@ -245,6 +248,8 @@ fun EditorStatusBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
                 modifier = Modifier
+                    .height(40.dp)
+                    .clip(MaterialTheme.shapes.small)
                     .background(
                         color = if (issueCount > 0) {
                             MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
@@ -255,7 +260,8 @@ fun EditorStatusBar(
                         },
                         shape = MaterialTheme.shapes.small,
                     )
-                    .padding(horizontal = 5.dp, vertical = 1.dp),
+                    .clickable(onClick = onToggleProblems)
+                    .padding(horizontal = 8.dp),
             ) {
                 if (issueCount > 0) {
                     Icon(
@@ -299,7 +305,7 @@ fun EditorBottomPanel(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .height(190.dp)
+            .height(140.dp)
             .background(MaterialTheme.colorScheme.surface),
     ) {
         Row(
@@ -620,7 +626,6 @@ fun EditorOptionsMenu(
     onToggleLineNumbers: () -> Unit,
     onToggleWordWrap: () -> Unit,
     onToggleAutoSave: () -> Unit,
-    onFontSize: (Int) -> Unit,
     onFoldAll: () -> Unit,
     onUnfoldAll: () -> Unit,
     modifier: Modifier = Modifier,
@@ -655,23 +660,6 @@ fun EditorOptionsMenu(
                 Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = null)
             },
             onClick = onOpenOutline,
-        )
-        DropdownMenuItem(
-            text = { Text("字体大小 ${settings.fontSize}") },
-            leadingIcon = {
-                Icon(Icons.Default.FormatSize, contentDescription = null)
-            },
-            trailingIcon = {
-                Row {
-                    androidx.compose.material3.TextButton(onClick = { onFontSize(-1) }) {
-                        Text("A-")
-                    }
-                    androidx.compose.material3.TextButton(onClick = { onFontSize(+1) }) {
-                        Text("A+")
-                    }
-                }
-            },
-            onClick = { },
         )
         DropdownMenuItem(
             text = { Text("行号") },
