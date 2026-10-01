@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.MoreVert
@@ -86,6 +87,7 @@ import com.mobilecoder.ide.core.common.theme.AppPalette
 import com.mobilecoder.ide.core.common.theme.LocalAppPalette
 import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
+import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.feature.git.GitController
 import kotlinx.coroutines.launch
@@ -420,10 +422,27 @@ fun TerminalScreen(
                 }
                 KeyButton("⌫") { active?.sendBackspace() }
             }
-            IconButton(onClick = { keyboard?.hide() }) {
+            // 键盘图标：键盘可见时收起；不可见时先聚焦输入框再拉起 ——
+            // 没有焦点时 LocalSoftwareKeyboardController.show() 是空操作，
+            // 所以必须先 focusRequester.requestFocus()，否则点了没反应。
+            val imeVisible = isImeVisible()
+            IconButton(
+                onClick = {
+                    if (imeVisible) {
+                        keyboard?.hide()
+                    } else {
+                        focusRequester.requestFocus()
+                        keyboard?.show()
+                    }
+                },
+            ) {
                 Icon(
-                    imageVector = Icons.Default.KeyboardHide,
-                    contentDescription = "隐藏键盘",
+                    imageVector = if (imeVisible) {
+                        Icons.Default.KeyboardHide
+                    } else {
+                        Icons.Default.Keyboard
+                    },
+                    contentDescription = if (imeVisible) "隐藏键盘" else "显示键盘",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
