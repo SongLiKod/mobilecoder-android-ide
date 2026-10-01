@@ -155,6 +155,15 @@ data class GitStatusEntry(
             else -> "${index.indexChar()}${worktree.worktreeChar()}"
         }
 
+    /**
+     * 是否是**新增文件**：未跟踪的新文件（`??`），或已暂存为新增（`A ` / `AM`）。
+     *
+     * 这类文件从未进过 HEAD，所以「还原」它们的语义就是**把文件删掉**——
+     * 不会丢任何已提交内容；已入库的文件不满足此标记，还原仍是回滚改动。
+     */
+    val isNew: Boolean
+        get() = index == GitStatusKind.NEW || worktree == GitStatusKind.UNTRACKED
+
     /** 该行是否属于指定分组（索引与工作区同时变更时，同一路径会在两个分组各出现一次）。 */
     fun inGroup(group: GitChangeGroup): Boolean = when (group) {
         GitChangeGroup.CONFLICTED ->

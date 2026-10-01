@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -58,7 +59,8 @@ private data class RestoreRequest(
  *
  * 分组：已暂存 / 未暂存 / 未跟踪 / 冲突 / 已忽略；
  * 行点击展开 Diff 查看器；顶部为提交区与工作区统计。
- * 「还原」需二次确认：未暂存组只丢弃工作区改动，已暂存组连同暂存一并回到 HEAD。
+ * 「还原」需二次确认：未暂存组只丢弃工作区改动，已暂存组连同暂存一并回到 HEAD；
+ * **新增文件（未跟踪 `??` / 已暂存 `A `）的「还原」= 删除该文件**（`GitController.removeAdded`）。
  */
 @Composable
 fun ChangesTab(
@@ -199,6 +201,8 @@ fun ChangesTab(
                 onPrimaryAction = { entry ->
                     scope.launch { runCatching { GitController.stage(entry.path) } }
                 },
+                // 新增文件没有历史可回滚 → 「还原」= 删除该文件（二次确认后执行）
+                onRestore = { entry -> pendingRestore = RestoreRequest(GitChangeGroup.UNTRACKED, entry) },
             )
 
             changeGroup(
@@ -229,23 +233,40 @@ fun ChangesTab(
 
     // ---------------- 还原确认 ----------------
     pendingRestore?.let { req ->
+        val added = req.entry.isNew
         AppAlertDialog(
-            title = "还原「${req.entry.path}」",
-            message = if (req.group == GitChangeGroup.STAGED) {
-                "将丢弃该文件的全部改动（含已暂存部分），恢复到最近一次提交的内容。此操作不可撤销。"
+            title = if (added) {
+                "删除新增「${req.entry.path}」"
             } else {
-                "将丢弃该文件在工作区的改动，恢复为暂存区中的内容；已暂存的部分不受影响。"
+                "还原「${req.entry.path}」"
             },
-            confirmLabel = "还原",
+            message = when {
+                // 新增文件：还原的语义就是删文件（未跟踪直接删；已暂存的新增连同暂存记录一起清）
+                added && req.group == GitChangeGroup.STAGED ->
+                    "该文件已暂存为新增但尚未提交。将取消暂存并删除该文件，删除后无法恢复。"
+
+                added ->
+                    "该文件是新增（未跟踪）文件。将从磁盘删除该文件，删除后无法恢复。"
+
+                req.group == GitChangeGroup.STAGED ->
+                    "将丢弃该文件的全部改动（含已暂存部分），恢复到最近一次提交的内容。此操作不可撤销。"
+
+                else ->
+                    "将丢弃该文件在工作区的改动，恢复为暂存区中的内容；已暂存的部分不受影响。"
+            },
+            confirmLabel = if (added) "删除" else "还原",
             destructive = true,
             onConfirm = {
                 pendingRestore = null
-                val path = req.entry.path
-                val toHead = req.group == GitChangeGroup.STAGED
                 scope.launch {
                     runCatching {
-                        if (toHead) GitController.restoreToHead(path)
-                        else GitController.restoreWorktree(path)
+                        when {
+                            req.entry.isNew -> GitController.removeAdded(req.entry.path)
+                            req.group == GitChangeGroup.STAGED ->
+                                GitController.restoreToHead(req.entry.path)
+
+                            else -> GitController.restoreWorktree(req.entry.path)
+                        }
                     }
                 }
             },
@@ -349,11 +370,17 @@ private fun StatusRow(
                 }
             }
             if (onRestore != null) {
+                // 新增文件没有历史可回滚 → 「还原」= 删文件，用删除图标 + 错误色明示破坏性
+                val delete = entry.isNew
                 IconButton(onClick = { onRestore(entry) }) {
                     Icon(
-                        imageVector = Icons.Default.Restore,
-                        contentDescription = "还原",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        imageVector = if (delete) Icons.Default.Delete else Icons.Default.Restore,
+                        contentDescription = if (delete) "还原（删除新增文件）" else "还原",
+                        tint = if (delete) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
                 }
             }

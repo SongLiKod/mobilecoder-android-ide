@@ -653,6 +653,53 @@ object GitController {
     }
 
     /**
+     * 还原新增文件 = **删除该文件**（变更页：新增文件没有历史可回滚，只能删掉）。
+     *
+     * - 未跟踪的新文件（`??`）：直接从磁盘删除（未跟踪目录整棵删除，里面不会有已跟踪文件）；
+     * - 已暂存为新增的文件（`A `）：先取消暂存再删，否则索引里会残留一条「已删除」假变更。
+     *
+     * 只放行 [GitStatusEntry.isNew] 的路径：文件没进过 HEAD，删掉即回到「没有这个文件」，
+     * 不丢任何已提交内容；其余文件一律拒绝（那属于丢历史，应走提交或显式删除并提交）。
+     */
+    suspend fun removeAdded(path: String): Boolean = withRepo(false) {
+        if (!ensureOpen()) return@withRepo false
+        val entry = _status.value.firstOrNull { it.path == path }
+        if (entry == null || !entry.isNew) {
+            postError("只有新增文件可以用这种方式还原（已提交过的文件不能直接删除）")
+            return@withRepo false
+        }
+        val workdir = _repo.value.workdir.ifBlank { _repo.value.path }
+        val root = runCatching { File(workdir).canonicalFile }.getOrNull()
+        val target = root?.let { runCatching { File(it, path).canonicalFile }.getOrNull() }
+        if (root == null || target == null) {
+            postError("无法定位仓库目录，未执行删除")
+            return@withRepo false
+        }
+        // 越界保护：status 里的相对路径不允许指到仓库之外（`../` 等脏数据）
+        if (target.path == root.path || !isWithin(root.path, target.path)) {
+            postError("路径超出仓库范围，已拒绝删除：" + path)
+            return@withRepo false
+        }
+        if (entry.index == GitStatusKind.NEW) {
+            val ok = runCatching { GitNative.unstage(path) }.getOrDefault(false)
+            if (!ok) {
+                postError("取消暂存失败：" + nativeError("未知错误"))
+                return@withRepo false
+            }
+        }
+        val removed = runCatching {
+            if (target.isDirectory) target.deleteRecursively() else target.delete()
+        }.getOrDefault(false)
+        refreshLocked(all = false)
+        if (!removed && target.exists()) {
+            postError("删除失败：文件可能被占用或没有权限（$path）")
+            return@withRepo false
+        }
+        postInfo("已删除新增文件：" + path)
+        true
+    }
+
+    /**
      * 提交暂存区。
      *
      * @return 0 成功 / 2 没有已暂存的变更 / -1 失败
