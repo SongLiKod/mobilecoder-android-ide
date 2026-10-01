@@ -21,7 +21,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /** 底部按键行的特殊键。 */
-enum class TerminalSpecialKey { ESC, TAB, UP, DOWN, LEFT, RIGHT, HOME, END }
+enum class TerminalSpecialKey { ESC, TAB, UP, DOWN, LEFT, RIGHT, HOME, END, PAGE_UP, PAGE_DOWN }
 
 /**
  * 一个独立的终端会话（PRD 2.3「多终端窗口并行」）。
@@ -136,19 +136,46 @@ class TerminalSession(
         if (intercepted != null) runCli(intercepted)
     }
 
+    /** ESC 控制字符（0x1B）与 TAB（0x09）：源码不写字面转义序列，避免编码问题。 */
+    private val escStr = 27.toChar().toString()
+    private val tabStr = 9.toChar().toString()
+
     /** 按键行特殊键（转义序列 / 控制字符，绕过拦截器）。 */
     fun sendSpecial(key: TerminalSpecialKey, ctrl: Boolean = false) {
         val seq = when (key) {
-            TerminalSpecialKey.ESC -> "\u001b"
-            TerminalSpecialKey.TAB -> if (ctrl) "\u001b[Z" else "\u0009"
-            TerminalSpecialKey.UP -> if (ctrl) "\u001b[1;5A" else "\u001b[A"
-            TerminalSpecialKey.DOWN -> if (ctrl) "\u001b[1;5B" else "\u001b[B"
-            TerminalSpecialKey.RIGHT -> if (ctrl) "\u001b[1;5C" else "\u001b[C"
-            TerminalSpecialKey.LEFT -> if (ctrl) "\u001b[1;5D" else "\u001b[D"
-            TerminalSpecialKey.HOME -> if (ctrl) "\u001b[1;5H" else "\u001b[H"
-            TerminalSpecialKey.END -> if (ctrl) "\u001b[1;5F" else "\u001b[F"
+            TerminalSpecialKey.ESC -> escStr
+            TerminalSpecialKey.TAB -> if (ctrl) escStr + "[Z" else tabStr
+            TerminalSpecialKey.UP -> if (ctrl) escStr + "[1;5A" else escStr + "[A"
+            TerminalSpecialKey.DOWN -> if (ctrl) escStr + "[1;5B" else escStr + "[B"
+            TerminalSpecialKey.RIGHT -> if (ctrl) escStr + "[1;5C" else escStr + "[C"
+            TerminalSpecialKey.LEFT -> if (ctrl) escStr + "[1;5D" else escStr + "[D"
+            TerminalSpecialKey.HOME -> if (ctrl) escStr + "[1;5H" else escStr + "[H"
+            TerminalSpecialKey.END -> if (ctrl) escStr + "[1;5F" else escStr + "[F"
+            TerminalSpecialKey.PAGE_UP -> if (ctrl) escStr + "[5;5~" else escStr + "[5~"
+            TerminalSpecialKey.PAGE_DOWN -> if (ctrl) escStr + "[6;5~" else escStr + "[6~"
         }
         writeText(seq)
+    }
+
+    /**
+     * 触摸 → 鼠标序列（绕过拦截器直写 PTY），坐标为 1 基字符格。
+     *
+     * 仅在应用开启鼠标报告（CSI ?1000/1002/1003 h）时发送 ——
+     * opencode 这类 TUI 收到滚轮事件后自己滚动面板；未开启时是空操作。
+     */
+    fun sendMouseButton(button: Int, col: Int, row: Int, press: Boolean = true) {
+        val mode = emulator.mouseMode.value
+        if (!mode.tracking) return
+        val bytes = TerminalMouse.encode(mode.sgr, button, col, row, press)
+        if (bytes.isNotEmpty()) writeRaw(bytes)
+    }
+
+    /** 左键点击：SGR（?1006）发 press + release，X10 无释放语义只发 press。 */
+    fun sendMouseClick(col: Int, row: Int) {
+        sendMouseButton(TerminalMouse.LEFT, col, row, press = true)
+        if (emulator.mouseMode.value.sgr) {
+            sendMouseButton(TerminalMouse.LEFT, col, row, press = false)
+        }
     }
 
     /** Ctrl+字母：写入 0x01..0x1A；Ctrl+C 额外清理拦截状态。 */

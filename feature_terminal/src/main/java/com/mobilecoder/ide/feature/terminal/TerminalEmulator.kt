@@ -33,6 +33,19 @@ data class TerminalLine(
 )
 
 /**
+ * 鼠标报告状态（DECSET `?1000/1002/1003` + SGR 编码 `?1006`）。
+ *
+ * TUI（opencode / lazygit / htop …）开启后期望滚轮/点击以鼠标序列发给自己
+ * 处理 —— 此时触摸滑动应转发给 TUI，而不是滚本地 scrollback。
+ */
+data class TerminalMouseMode(
+    /** 任一鼠标报告模式（1000/1002/1003）处于开启状态 */
+    val tracking: Boolean = false,
+    /** SGR 编码（1006）：坐标无上限且支持释放（`m`）事件 */
+    val sgr: Boolean = false,
+)
+
+/**
  * VT100/xterm 子集解析器 + 屏幕缓冲（PRD 2.3 / TECH 4.2）。
  *
  * 线程模型：本类**不是**线程安全的。PTY 读线程的字节先由 [TerminalSession] 缓冲，
@@ -46,6 +59,7 @@ data class TerminalLine(
  *    38;5;N / 48;5;N（256 色）、38;2;R;G;B / 48;2;R;G;B（真彩色）
  *  - OSC 0/2 窗口标题、OSC 8 超链接跳过；DCS/SOS/APC/PM 字符串跳过
  *  - 滚动区域 DECSTBM、备用屏幕 (?47/?1047/?1049)、插入模式 IRM、自动换行 DECAWM
+ *  - 鼠标报告 (?1000/1002/1003/1006)：只记录状态供触摸手势分流，不参与渲染
  */
 class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
 
@@ -124,6 +138,13 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
 
     /** 需要回写给 PTY 的终端应答（DSR / DA）。 */
     var onResponse: ((String) -> Unit)? = null
+
+    private val mouseModes = HashSet<Int>() // 已开启的鼠标报告模式（1000/1002/1003）
+    private var mouseSgr = false // SGR 编码（1006）
+    private val _mouseMode = MutableStateFlow(TerminalMouseMode())
+
+    /** 鼠标报告状态：Compose 侧读取以分流触摸手势（发 TUI 滚轮还是滚 scrollback）。 */
+    val mouseMode: StateFlow<TerminalMouseMode> = _mouseMode.asStateFlow()
 
     init {
         resetTabStops()
@@ -796,6 +817,13 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
         state = State.GROUND
         lastPrinted = null
         resetTabStops()
+        mouseModes.clear()
+        mouseSgr = false
+        publishMouseMode()
+    }
+
+    private fun publishMouseMode() {
+        _mouseMode.value = TerminalMouseMode(tracking = mouseModes.isNotEmpty(), sgr = mouseSgr)
     }
 
     private fun enterAltScreen() {
@@ -904,7 +932,15 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
                     7 -> autowrap = enable
                     25 -> cursorVisible = enable
                     47, 1047, 1049 -> if (enable) enterAltScreen() else exitAltScreen()
-                    else -> Unit // 鼠标/括号粘贴等模式：忽略但接受
+                    1000, 1002, 1003 -> {
+                        if (enable) mouseModes.add(p) else mouseModes.remove(p)
+                        publishMouseMode()
+                    }
+                    1006 -> {
+                        mouseSgr = enable
+                        publishMouseMode()
+                    }
+                    else -> Unit // 括号粘贴等模式：忽略但接受
                 }
             }
         } else {
