@@ -68,7 +68,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
@@ -84,6 +86,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -383,6 +386,7 @@ fun TerminalScreen(
                     session = session,
                     palette = palette,
                     style = termStyle,
+                    availableWidthPx = areaSize.width,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -755,6 +759,7 @@ private fun TerminalViewport(
     session: TerminalSession,
     palette: AppPalette,
     style: TextStyle,
+    availableWidthPx: Int,
     modifier: Modifier = Modifier,
 ) {
     val emulator = session.emulator
@@ -800,30 +805,73 @@ private fun TerminalViewport(
                     isCursorLine = index == cursorLine,
                     palette = palette,
                     style = style,
+                    availableWidthPx = availableWidthPx,
                 )
             }
         }
     }
 }
 
+/**
+ * 单行终端文本。
+ *
+ * 网格里 1 个单元格按 1 个字符算，但**字形未必等宽**：中文 / 制表符 / emoji 等
+ * 缺字时走回退字体，明显比测宽用的 `M` 宽；滚动区里按旧列数存留的行也可能比
+ * 当前视口宽。这些行若直接交给容器约束，超出部分会被裁掉 —— 表现就是
+ * 「换行后行尾缺字符」。
+ *
+ * 这里改用**自然宽度**（不给宽度上限）测量该行，测量结果放不下时整体 `scaleX`
+ * 压到刚好铺满可视宽度：一个字符都不会丢，且宽度本来就够的行完全不受影响。
+ */
 @Composable
 private fun TerminalLineText(
     line: TerminalLine,
     isCursorLine: Boolean,
     palette: AppPalette,
     style: TextStyle,
+    availableWidthPx: Int,
 ) {
     val annotated = remember(line, palette, isCursorLine) {
         buildTerminalLine(line, palette, isCursorLine)
     }
-    Text(
-        text = annotated,
-        style = style,
-        maxLines = 1,
-        softWrap = false,
-        overflow = TextOverflow.Clip,
-        modifier = Modifier.fillMaxWidth(),
-    )
+    Layout(
+        content = {
+            Text(
+                text = annotated,
+                style = style,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip,
+            )
+        },
+    ) { measurables, constraints ->
+        val placeable = measurables.first().measure(
+            constraints.copy(minWidth = 0, maxWidth = Constraints.Infinity),
+        )
+        val natural = placeable.width
+        // 可视宽度：优先用父约束（LazyColumn 行约束），退化时用视口实测宽度
+        val maxWidth = if (constraints.maxWidth == Constraints.Infinity) {
+            availableWidthPx.coerceAtLeast(1)
+        } else {
+            constraints.maxWidth
+        }
+        val fits = natural <= maxWidth
+        val width = when {
+            constraints.maxWidth == Constraints.Infinity -> maxWidth.coerceAtLeast(constraints.minWidth)
+            else -> constraints.maxWidth
+        }
+        layout(width, placeable.height) {
+            if (fits) {
+                placeable.place(0, 0)
+            } else {
+                // 以左上角为锚点横向压缩：scaleY 保持 1，行高、行距都不变
+                placeable.placeWithLayer(0, 0) {
+                    scaleX = maxWidth.toFloat() / natural
+                    transformOrigin = TransformOrigin(0f, 0f)
+                }
+            }
+        }
+    }
 }
 
 /** 把一屏行转成 AnnotatedString（SGR 样式 + 光标反色块）。 */

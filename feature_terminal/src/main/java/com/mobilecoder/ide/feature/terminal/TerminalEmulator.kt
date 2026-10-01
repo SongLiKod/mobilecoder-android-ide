@@ -319,13 +319,22 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
         bump()
     }
 
-    /** 调整窗口尺寸（保留已有内容，光标裁剪到范围内）。 */
+    /**
+     * 调整窗口尺寸（保留已有内容，光标始终留在屏内）。
+     *
+     * 两处最容易「丢字 / 丢行」的地方在这里兜住：
+     *  1. **列数变小**：直接 [TerminalRow.resize] 会把行尾截掉 —— 先按新列宽把超宽的
+     *     行拆成多行（只拆不合），行尾字符一个都不丢；
+     *  2. **行数变小**：不能无脑「保留顶部」—— 光标行可能正好在要被丢掉的底部（键盘
+     *     弹出、顶/底栏显隐动画都会触发），此时从**顶部**让位，让出的行进 scrollback。
+     */
     fun resize(newCols: Int, newRows: Int) {
         val c = newCols.coerceAtLeast(2)
         val r = newRows.coerceAtLeast(2)
         if (c == cols && r == rows) return
-        grid = resizeGrid(grid, c, r)
-        mainGrid?.let { mainGrid = resizeGrid(it, c, r) }
+        if (c != cols) normalizeColumns(c)
+        grid = fitRowCount(grid, c, r, keepCursorVisible = true)
+        mainGrid?.let { mainGrid = fitRowCount(it, c, r, keepCursorVisible = false) }
         cols = c
         rows = r
         scrollTop = 0
@@ -337,11 +346,111 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
         bump()
     }
 
-    private fun resizeGrid(source: Array<TerminalRow>, c: Int, r: Int): Array<TerminalRow> {
-        val target = Array(r) { idx ->
-            if (idx < source.size) source[idx].also { it.resize(c) } else TerminalRow(c)
+    /** 列宽变为 [c]：scrollback / 主屏 / 备用屏的行统一规整到 [c] 列宽。 */
+    private fun normalizeColumns(c: Int) {
+        if (scrollback.isNotEmpty()) {
+            val rebuilt = ArrayList<TerminalRow>(scrollback.size + 2)
+            for (row in scrollback) appendNormalized(row, c, rebuilt)
+            scrollback.clear()
+            rebuilt.forEach { scrollback.addLast(it) }
         }
-        return target
+        grid = normalizeRows(grid, c, cursorAware = true)
+        mainGrid?.let { mainGrid = normalizeRows(it, c, cursorAware = false) }
+    }
+
+    /** 规整一屏行；[cursorAware] 时按拆分情况修正光标（当前屏用，备用屏不涉及光标）。 */
+    private fun normalizeRows(
+        source: Array<TerminalRow>,
+        c: Int,
+        cursorAware: Boolean,
+    ): Array<TerminalRow> {
+        if (source.isEmpty()) return source
+        val out = ArrayList<TerminalRow>(source.size + 2)
+        var shift = 0
+        for (idx in source.indices) {
+            val before = out.size
+            appendNormalized(source[idx], c, out)
+            val parts = out.size - before
+            if (cursorAware && parts > 1) {
+                when {
+                    // 光标在拆出来的行之前：整体下移
+                    idx < cursorRow -> shift += parts - 1
+                    // 光标就在本行：落进它所属的那一段
+                    idx == cursorRow -> {
+                        shift += cursorCol / c
+                        cursorCol %= c
+                    }
+                }
+            }
+        }
+        if (cursorAware) cursorRow += shift
+        return out.toTypedArray()
+    }
+
+    /**
+     * 把 [row] 按 [c] 列宽规整后追加进 [out]：
+     * 超宽且**行尾有内容**的行拆成多行（单元格样式整段搬过去）；其余情况只补空格或
+     * 截掉尾部纯空格（不算丢字）。
+     */
+    private fun appendNormalized(row: TerminalRow, c: Int, out: MutableList<TerminalRow>) {
+        if (row.cols <= c) {
+            if (row.cols != c) row.resize(c)
+            out.add(row)
+            return
+        }
+        var last = -1
+        for (i in row.cols - 1 downTo 0) {
+            if (row.chars[i] != ' ' || row.bg[i] != COLOR_DEFAULT) {
+                last = i
+                break
+            }
+        }
+        if (last < c) {
+            row.resize(c)
+            out.add(row)
+            return
+        }
+        var from = 0
+        while (from < row.cols) {
+            val part = TerminalRow(c)
+            val to = minOf(from + c, row.cols)
+            val n = to - from
+            System.arraycopy(row.chars, from, part.chars, 0, n)
+            System.arraycopy(row.fg, from, part.fg, 0, n)
+            System.arraycopy(row.bg, from, part.bg, 0, n)
+            System.arraycopy(row.attrs, from, part.attrs, 0, n)
+            out.add(part)
+            from = to
+        }
+    }
+
+    /**
+     * 让一屏行数适配 [r]：不足补空行；超出且 [keepCursorVisible] 时先从顶部让位
+     * （主屏常规滚动区让出的行进 scrollback，不丢内容），仍超出才丢底部（通常为空行）。
+     */
+    private fun fitRowCount(
+        source: Array<TerminalRow>,
+        c: Int,
+        r: Int,
+        keepCursorVisible: Boolean,
+    ): Array<TerminalRow> {
+        val list = ArrayList<TerminalRow>(maxOf(source.size, r) + 2)
+        source.forEach { row ->
+            row.resize(c)
+            list.add(row)
+        }
+        if (list.size > r) {
+            val overflow = if (keepCursorVisible) (cursorRow - (r - 1)).coerceAtLeast(0) else 0
+            val saveToScrollback = keepCursorVisible &&
+                mainGrid == null && scrollTop == 0 && scrollBottom == rows - 1
+            repeat(overflow) {
+                val top = list.removeAt(0)
+                if (saveToScrollback) addToScrollback(top)
+            }
+            while (list.size > r) list.removeAt(list.size - 1)
+        }
+        while (list.size < r) list.add(TerminalRow(c))
+        return list.toTypedArray()
     }
 
     /** 清屏 + 清 scrollback + 复位（溢出菜单「清屏」）。 */
