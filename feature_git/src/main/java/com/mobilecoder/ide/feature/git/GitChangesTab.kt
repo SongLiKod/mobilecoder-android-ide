@@ -85,33 +85,28 @@ fun ChangesTab(
         conflicted.isEmpty() && ignored.isEmpty()
 
     Column(modifier = modifier.fillMaxSize()) {
-        // ---------------- 提交区 ----------------
+        // ---------------- 提交区（压成「一行输入 + 一行元信息」） ----------------
+        // 原来是 2~4 行输入框 + 身份行 + 独立统计行，合计约 165dp；现在输入框固定单行
+        //（56dp），身份与统计并到同一行，合计约 90dp —— 文件列表多出约 75dp 可视高度。
+        val statsValue = stats
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            OutlinedTextField(
-                value = commitMessage,
-                onValueChange = { commitMessage = it },
-                label = { Text("提交信息（必填）") },
-                modifier = Modifier.fillMaxWidth(),
-                minLines = 2,
-                maxLines = 4,
-                enabled = !busy,
-            )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    text = "${identity.name} <${identity.email}>",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                OutlinedTextField(
+                    value = commitMessage,
+                    onValueChange = { commitMessage = it },
                     modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    singleLine = true,
+                    // 用 placeholder 而非 label：label 在有内容时会浮到上边框、把高度再撑高一截
+                    placeholder = { Text("提交信息（必填）") },
+                    enabled = !busy,
                 )
                 Button(
                     onClick = {
@@ -125,23 +120,43 @@ fun ChangesTab(
                     Text("提交")
                 }
             }
-        }
 
-        // ---------------- 工作区统计 ----------------
-        val statsValue = stats
-        if (statsValue != null && !statsValue.isEmpty) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                StatChip(label = "新增文件", value = "${statsValue.added}")
-                StatChip(label = "删除文件", value = "${statsValue.deleted}")
-                StatChip(label = "修改文件", value = "${statsValue.modified}")
-                StatChip(label = "增加行", value = "+${statsValue.linesAdd}", emphasize = true)
-                StatChip(label = "删除行", value = "-${statsValue.linesDel}", emphasize = true)
+            // 元信息行：左 = 提交身份（超长省略），右 = 工作区统计（超出宽度可横向滑动）
+            val identityText = when {
+                identity.name.isNotBlank() && identity.email.isNotBlank() ->
+                    "${identity.name} <${identity.email}>"
+
+                identity.name.isNotBlank() -> identity.name
+                else -> identity.email
+            }
+            if (identityText.isNotBlank() || (statsValue != null && !statsValue.isEmpty)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (identityText.isNotBlank()) {
+                        Text(
+                            text = identityText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (statsValue != null && !statsValue.isEmpty) {
+                        Row(
+                            modifier = Modifier
+                                .weight(2f)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            StatChip(label = "新增", value = "${statsValue.added}")
+                            StatChip(label = "删除", value = "${statsValue.deleted}")
+                            StatChip(label = "修改", value = "${statsValue.modified}")
+                            StatChip(label = "增加行", value = "+${statsValue.linesAdd}", emphasize = true)
+                            StatChip(label = "删除行", value = "-${statsValue.linesDel}", emphasize = true)
+                        }
+                    }
+                }
             }
         }
 

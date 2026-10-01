@@ -9,9 +9,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -43,9 +45,9 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -120,7 +122,8 @@ enum class AppDestination(
 }
 
 /**
- * 全局根布局：Scaffold（顶栏 + 底部导航）+ NavHost 挂载全部 feature 页面。
+ * 全局根布局：Scaffold（**紧凑单行顶栏** + 底部导航）+ NavHost 挂载全部 feature 页面。
+ * 顶栏刻意压到 40dp 单行（应用名 + 当前项目同行），把高度让给各页内容区。
  * 同时承载 PRD 2.1「全局主题系统」三模式切换（首页）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -138,24 +141,39 @@ fun AppRoot(
         // imePadding：键盘弹出时整体上移（内容 + 底部导航），避免输入框被遮挡
         modifier = modifier.fillMaxSize().imePadding(),
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            text = stringResource(R.string.app_name),
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            text = project?.name ?: stringResource(R.string.no_project_open),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                },
-            )
+            // 紧凑单行顶栏 = 状态栏内边距 + 40dp 标题行。
+            // 原 M3 TopAppBar 是「状态栏 + 64dp 固定行 + 两行标题」，合计约 90dp，
+            // 每个页面都被吃掉近 1/8 的可视高度；这里把应用名与项目名并到一行，
+            // 每页内容区直接多出约 24dp。
+            Surface(color = MaterialTheme.colorScheme.surface) {
+                val subtitle = project?.name?.takeIf { it.isNotBlank() }
+                    ?: stringResource(R.string.no_project_open)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .height(40.dp)
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = stringResource(R.string.app_name),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                    )
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 8.dp),
+                    )
+                }
+            }
         },
         bottomBar = {
             NavigationBar {

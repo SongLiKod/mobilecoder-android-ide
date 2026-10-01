@@ -218,64 +218,64 @@ private fun RepoHeader(
     onRefresh: () -> Unit,
     onHelp: () -> Unit,
 ) {
+    // 单行：标题 + 状态徽标 + 仓库目录名（超长省略）+ 操作按钮。
+    // 原来是两行（标题行 + 目录名行），比现在多占约 12dp，压缩后把空间留给文件列表。
+    val (statusText, statusColor) = when {
+        repo.opened -> "已打开" to MaterialTheme.colorScheme.primary
+        repo.isRepo -> "仓库不可用" to MaterialTheme.colorScheme.error
+        else -> "非 Git 仓库" to MaterialTheme.colorScheme.onSurfaceVariant
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
+            .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "Git",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                when {
-                    repo.opened -> Text(
-                        text = "已打开",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-
-                    repo.isRepo -> Text(
-                        text = "仓库不可用",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-
-                    else -> Text(
-                        text = "非 Git 仓库",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Text(
-                text = File(repo.path.ifBlank { "-" }).name,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        Text(
+            text = "Git",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+        Text(
+            text = statusText,
+            style = MaterialTheme.typography.labelSmall,
+            color = statusColor,
+            maxLines = 1,
+            modifier = Modifier.padding(start = 6.dp),
+        )
+        Text(
+            text = File(repo.path.ifBlank { "-" }).name,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp),
+        )
 
         if (loading) {
             CircularProgressIndicator(
                 modifier = Modifier
-                    .padding(end = 8.dp)
-                    .size(18.dp),
+                    .padding(end = 4.dp)
+                    .size(16.dp),
                 strokeWidth = 2.dp,
             )
         }
-        IconButton(onClick = onHelp) {
-            Icon(Icons.Default.Info, contentDescription = "日常命令参考")
+        IconButton(onClick = onHelp, modifier = Modifier.size(40.dp)) {
+            Icon(
+                imageVector = Icons.Default.Info,
+                contentDescription = "日常命令参考",
+                modifier = Modifier.size(20.dp),
+            )
         }
-        IconButton(onClick = onRefresh) {
-            Icon(Icons.Default.Refresh, contentDescription = "刷新")
+        IconButton(onClick = onRefresh, modifier = Modifier.size(40.dp)) {
+            Icon(
+                imageVector = Icons.Default.Refresh,
+                contentDescription = "刷新",
+                modifier = Modifier.size(20.dp),
+            )
         }
     }
 }
