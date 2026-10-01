@@ -56,6 +56,8 @@ android {
 
     buildFeatures {
         compose = true
+        // About 页展示当前版本（BuildConfig.VERSION_NAME ← gradle.properties VERSION_NAME）
+        buildConfig = true
     }
 
     lint {

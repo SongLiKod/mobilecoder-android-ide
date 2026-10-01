@@ -12,6 +12,8 @@
     <!-- 平台强制要求：用于承载“后台长时间任务保活”前台服务（WAKE_LOCK + 通知的载体） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 应用内检查更新：安装下载的更新包（系统弹确认框；未授权时先跳系统授权页） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- 平板、折叠屏自适应；横竖屏与深浅色切换不重建 Activity（主题全局切换无闪烁、无重启） -->
     <application
@@ -49,5 +51,11 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- 应用内更新：PackageInstaller 会话结果回传。不导出、无 intent-filter——
+             系统经我们提交的 PendingIntent（按会话 id 显式指向本组件）回发 -->
+        <receiver
+            android:name=".update.UpdateReceiver"
+            android:exported="false" />
     </application>
 </manifest>
