@@ -6,6 +6,8 @@ import android.os.SystemClock
 import com.mobilecoder.ide.core.common.cli.AptCli
 import com.mobilecoder.ide.core.nativebridge.TerminalCallback
 import com.mobilecoder.ide.core.nativebridge.TerminalNative
+import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.core.storage.OperationSource
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -149,7 +151,19 @@ class TerminalSession(
     fun submitLine(text: String) {
         if (text.isNotEmpty()) interceptor.feed(text)
         val intercepted = interceptor.enter()
-        if (intercepted != null) runCli(intercepted)
+        if (intercepted != null) {
+            // 进程内命令（apt / git …）：执行完由 AptCli.onExecuted 记入操作历史
+            runCli(intercepted)
+        } else if (text.isNotBlank()) {
+            // 直通 shell 的普通命令：退出码 shell 侧拿不到，留空（null = 未知）
+            runCatching {
+                AppStorage.history.record(
+                    command = text,
+                    source = OperationSource.TERMINAL,
+                    project = File(cwd).name,
+                )
+            }
+        }
     }
 
     /** 按键行特殊键（转义序列 / 控制字符，绕过拦截器）。 */

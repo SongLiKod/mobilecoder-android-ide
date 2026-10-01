@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 
 /**
- * 全局配置（编辑器/终端/Git/CLI/构建等模块的用户设置）。
+ * 全局配置（编辑器/终端/Git/构建等模块的用户设置）。
  * 所有方法均为 suspend，读写走同一个 DataStore 单例，天然原子。
  */
 class AppPreferences(
@@ -70,17 +70,6 @@ class AppPreferences(
         current.remove(command)
         current.add(0, command)
         set(KEY_TERM_HISTORY, JSONArray(current.take(limit)).toString())
-    }
-
-    // ---------------- CLI ----------------
-
-    suspend fun cliHistory(): List<String> = jsonArray(KEY_CLI_HISTORY)
-    suspend fun addCliHistory(line: String, limit: Int = 100) {
-        if (line.isBlank()) return
-        val current = jsonArray(KEY_CLI_HISTORY).toMutableList()
-        current.remove(line)
-        current.add(0, line)
-        set(KEY_CLI_HISTORY, JSONArray(current.take(limit)).toString())
     }
 
     // ---------------- 构建 ----------------
@@ -167,7 +156,6 @@ class AppPreferences(
         private val KEY_EDITOR_AUTOSAVE = stringPreferencesKey("editor_autosave")
         private val KEY_TERM_FONT = intPreferencesKey("terminal_font_size")
         private val KEY_TERM_HISTORY = stringPreferencesKey("terminal_history")
-        private val KEY_CLI_HISTORY = stringPreferencesKey("cli_history")
         private val KEY_BUILD_VARIANT = stringPreferencesKey("build_variant")
         private val KEY_BUILD_MEM = intPreferencesKey("build_memory_limit_mb")
         private val KEY_ENV_SOURCE = stringPreferencesKey("env_download_source")

@@ -20,11 +20,11 @@ import kotlin.coroutines.coroutineContext
 data class CliCommand(
     /** 命令名，例如 `build`（用户输入 `apt build`）。 */
     val name: String,
-    /** 一句话说明（CLI 面板卡片副标题）。 */
+    /** 一句话说明（`apt help` 输出与历史记录提示）。 */
     val summary: String,
     /** 用法示例，例如 `apt build [--release]`。 */
     val usage: String = "apt $name",
-    /** 分组（项目 / 代码 / 构建 / 系统），用于面板分栏。 */
+    /** 分组（项目 / 代码 / 构建 / 系统），用于 `apt help` 归类输出。 */
     val group: String = "通用",
     /**
      * 是否在终端里拦截同名命令行（如 `git`：Android 设备上没有同名可执行文件，
@@ -35,7 +35,7 @@ data class CliCommand(
      * 执行体。
      * @param args 命令名之后的参数
      * @param cwd  项目工作目录
-     * @param emit 追加一行输出（终端/面板实时回显）
+     * @param emit 追加一行输出（终端实时回显）
      * @return 进程式退出码（0 成功）
      */
     val handler: suspend (args: List<String>, cwd: File, emit: (String) -> Unit) -> Int,
@@ -54,8 +54,10 @@ data class CliTask(
  *  - **命令注册表**：内置命令与各 feature 注册的命令（`build`/`package` 由 feature_build 注册，
  *    `init`/`format`/`lint`/`clean` 由 feature_cli 注册）统一在此汇聚；
  *  - **协程任务队列**：Mutex 串行化，防止多指令并发冲突；
- *  - **实时日志**：`emit` 逐行回调，终端与 CLI 面板共享同一输出通道；
- *  - **两种使用方式**：终端输入 `apt xxx`（拦截）与可视化面板一键执行。
+ *  - **实时日志**：`emit` 逐行回调，终端逐行回显到屏幕缓冲；
+ *  - **唯一入口**：终端拦截（`apt xxx` / `git xxx`）→ 进程内执行；
+ *  - **执行结果回传**：[onExecuted] 钩子把「命令 + 退出码 + 耗时」交给操作历史
+ *    （可视化 CLI 面板已废弃，历史页取而代之）。
  *
  * 引擎位于 core_common，保证 feature_terminal / feature_cli / feature_build 之间无循环依赖。
  */
@@ -66,9 +68,6 @@ object AptCli {
     private val registry = LinkedHashMap<String, CliCommand>()
     private val mutex = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
-    private val _history = MutableStateFlow<List<String>>(emptyList())
-    val history: StateFlow<List<String>> = _history.asStateFlow()
 
     private val _running = MutableStateFlow<CliTask?>(null)
     val running: StateFlow<CliTask?> = _running.asStateFlow()
@@ -86,6 +85,16 @@ object AptCli {
      */
     @Volatile
     var onCancel: (() -> Unit)? = null
+
+    /**
+     * 命令执行完成钩子（App 启动时注入 → 操作历史记录）。
+     *
+     * 历史存储在 core_storage，而 core_common 不能反向依赖它，所以用钩子回传：
+     * `exitCode = -1` 表示命令被取消，`durationMs` 只统计实际执行时间（不含排队）。
+     * 任意线程调用，绝不抛异常。
+     */
+    @Volatile
+    var onExecuted: ((line: String, cwd: File, exitCode: Int, durationMs: Long) -> Unit)? = null
 
     /** 注册命令（同名覆盖）。 */
     @Synchronized
@@ -147,10 +156,10 @@ object AptCli {
     val isIdle: Boolean get() = _running.value == null
 
     /**
-     * 取消当前正在执行的命令（CLI 面板「停止」按钮 / 终端 Ctrl+C）。
+     * 取消当前正在执行的命令（终端 Ctrl+C）。
      *
      * 取消是协作式的：命令协程在下一个挂起点抛出 CancellationException，
-     * 网络类命令（fetch/push/pull/push/clone）会额外调用 `GitNative.cancelNetwork()`
+     * 网络类命令（fetch / pull / push / clone）会额外调用 `GitNative.cancelNetwork()`
      * 中止传输，因此不会一直卡在「执行中」。
      *
      * @return true 表示确有任务被取消
@@ -215,42 +224,50 @@ object AptCli {
         }
 
         val job = coroutineContext.job
+        // 实际开始执行的时刻（不含 Mutex 排队等待），取消时保持 0 → 不上报历史
+        var execStartedAt = 0L
+        var exitCode: Int? = null
         return try {
             mutex.withLock() {
                 _running.value = CliTask(line, System.currentTimeMillis())
                 currentJob = job
-                pushHistory(line)
+                execStartedAt = System.currentTimeMillis()
                 try {
                     if (!cwd.isDirectory) {
                         emit("工作目录不存在：${cwd.absolutePath}")
-                        return@withLock 2
+                        exitCode = 2
+                    } else {
+                        val rc = command.handler(args, cwd, emit)
+                        // 执行期间收到取消请求 → 不再当作正常退出，按取消收尾
+                        coroutineContext.ensureActive()
+                        exitCode = rc
                     }
-                    val rc = command.handler(args, cwd, emit)
-                    // 执行期间收到取消请求 → 不再当作正常退出，按取消收尾
-                    coroutineContext.ensureActive()
-                    rc
                 } catch (e: CancellationException) {
                     emit("命令已取消")
                     throw e
                 } catch (t: Throwable) {
                     emit("命令执行失败：${t.message ?: t::class.java.simpleName}")
-                    1
+                    exitCode = 1
                 } finally {
                     _running.value = null
                 }
             }
+            exitCode ?: 0
         } finally {
+            // 命令结束（含取消/异常）→ 交给操作历史记录。
+            // 钩子由 App 启动时注入：core_common 不能反向依赖 core_storage。
+            if (execStartedAt > 0L) {
+                runCatching {
+                    onExecuted?.invoke(
+                        line,
+                        cwd,
+                        exitCode ?: -1,
+                        System.currentTimeMillis() - execStartedAt,
+                    )
+                }
+            }
             if (currentJob === job) currentJob = null
         }
-    }
-
-    private fun pushHistory(line: String) {
-        if (line.isBlank()) return
-        val next = _history.value.toMutableList().apply {
-            remove(line)
-            add(0, line)
-        }
-        _history.value = next.take(100)
     }
 
     /** 支持引号：`apt init "My App"`。 */

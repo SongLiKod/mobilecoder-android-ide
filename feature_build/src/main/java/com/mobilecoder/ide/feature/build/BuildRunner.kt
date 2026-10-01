@@ -10,6 +10,7 @@ import com.mobilecoder.ide.core.nativebridge.CliCallback
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.core.storage.OperationSource
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
@@ -474,7 +475,7 @@ object BuildRunner {
             return fail(
                 task, startedAt,
                 "未检测到 Gradle 工程（缺少 settings.gradle / build.gradle / gradlew）。" +
-                    "可在 CLI 面板执行 `apt init` 生成安卓项目骨架后重试",
+                    "可在终端执行 `apt init` 生成安卓项目骨架后重试",
             )
         }
 
@@ -648,6 +649,14 @@ object BuildRunner {
         if (task.clean) append("（先 clean）")
         if (task.extraTasks.isNotEmpty()) append(" + ${task.extraTasks.joinToString(" ")}")
         append(" · ${task.projectPath}")
+    }
+
+    /** 历史记录里展示的等价命令行：`gradle clean assembleDebug lint`。 */
+    private fun buildCommand(task: BuildTask): String = buildString {
+        append("gradle ")
+        if (task.clean) append("clean ")
+        append(if (task.variant == "release") "assembleRelease" else "assembleDebug")
+        task.extraTasks.forEach { append(" ").append(it) }
     }
 
     // ------------------------------------------------------------------
@@ -1046,6 +1055,17 @@ object BuildRunner {
         )
         val next = (listOf(entry) + _history.value).take(HISTORY_LIMIT)
         _history.value = next
+        // 同步写进全局「操作历史」页（原 CLI 面板废弃后取而代之的记录列表）
+        runCatching {
+            AppStorage.history.record(
+                command = buildCommand(task),
+                source = OperationSource.BUILD,
+                project = File(task.projectPath).name,
+                exitCode = if (success) 0 else 1,
+                durationMs = durationMs,
+                createdAt = entry.time,
+            )
+        }
         scope.launch {
             runCatching {
                 withContext(Dispatchers.IO) { writeHistory(next) }

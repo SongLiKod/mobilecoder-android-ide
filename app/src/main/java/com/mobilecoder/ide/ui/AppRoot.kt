@@ -18,7 +18,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Delete
@@ -26,6 +25,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Terminal
@@ -81,7 +81,7 @@ import com.mobilecoder.ide.core.storage.ProjectMeta
 import com.mobilecoder.ide.core.storage.ProjectTemplate
 import com.mobilecoder.ide.feature.ai.AiScreen
 import com.mobilecoder.ide.feature.build.BuildScreen
-import com.mobilecoder.ide.feature.cli.CliScreen
+import com.mobilecoder.ide.feature.cli.HistoryScreen
 import com.mobilecoder.ide.feature.editor.EditorScreen
 import com.mobilecoder.ide.feature.git.GitController
 import com.mobilecoder.ide.feature.git.GitProgress
@@ -100,15 +100,18 @@ enum class AppDestination(
     HOME("home", "项目", Icons.Default.Folder),
     EDITOR("editor", "编辑", Icons.Default.Edit),
     TERMINAL("terminal", "终端", Icons.Default.Terminal),
-    CLI("cli", "CLI", Icons.AutoMirrored.Filled.List),
+    HISTORY("history", "历史", Icons.Default.History),
     GIT("git", "Git", Icons.Default.AccountTree),
     SSH("ssh", "SSH", Icons.Default.Lock),
     AI("ai", "AI", Icons.Default.SmartToy),
     BUILD("build", "构建", Icons.Default.Build),
     ;
 
-    /** 是否需要「当前项目」上下文。 */
-    val needsProject: Boolean get() = this != HOME && this != SSH
+    /**
+     * 是否需要「当前项目」上下文。
+     * 「历史」页汇总全部项目/全局操作，没有项目也能看，故与 HOME、SSH 同列。
+     */
+    val needsProject: Boolean get() = this != HOME && this != SSH && this != HISTORY
 
     companion object {
         fun of(route: String?): AppDestination? =
@@ -185,8 +188,8 @@ fun AppRoot(
             composable(AppDestination.TERMINAL.route) {
                 ProjectGuard { path -> TerminalScreen(projectPath = path) }
             }
-            composable(AppDestination.CLI.route) {
-                ProjectGuard { path -> CliScreen(projectPath = path) }
+            composable(AppDestination.HISTORY.route) {
+                HistoryScreen()
             }
             composable(AppDestination.GIT.route) {
                 ProjectGuard { path -> GitScreen(projectPath = path) }

@@ -27,7 +27,7 @@ import kotlinx.coroutines.withContext
  * proot 执行，否则必然拿到一个看不出原因的 127。
  *
  * 其余子命令：[uninstall] / [update] / [search] / [listLines]，均以 npm 为后端。
- * 取消（Ctrl+C / 面板停止）通过 [CompletableDeferred] 取消挂起实现，并在 finally 中
+ * 取消（终端 Ctrl+C）通过 [CompletableDeferred] 取消挂起实现，并在 finally 中
  * 杀掉仍在运行的 npm 子进程，不留孤儿进程。
  */
 object ToolInstaller {
@@ -508,7 +508,7 @@ object ToolInstaller {
         return try {
             exit.await()
         } finally {
-            // Ctrl+C / 面板停止 → 杀掉仍在运行的 npm 子进程，不留孤儿
+            // 终端 Ctrl+C → 杀掉仍在运行的 npm 子进程，不留孤儿
             if (!exit.isCompleted) runCatching { CliNative.killProcess(pid, 15) }
         }
     }

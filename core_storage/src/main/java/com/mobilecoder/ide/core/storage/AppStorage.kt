@@ -43,6 +43,8 @@ object AppStorage {
             preferences = AppPreferences(dataStore, crypto)
             projects = ProjectRepository(paths, dataStore)
             sshKeys = SshKeyStore(paths, dataStore, crypto)
+            // 操作历史（原 CLI 面板废弃后的「历史」页数据源），构造时同步读盘
+            history = OperationHistoryStore(File(paths.history, "operations.tsv"))
             initialized = true
         }
         // 预热：Keystore 探测 + 密钥索引恢复（不阻塞冷启动，TECH.md 8 ≤2s）
@@ -82,6 +84,10 @@ object AppStorage {
         private set
 
     lateinit var sshKeys: SshKeyStore
+        private set
+
+    /** 操作历史（终端命令 / apt 命令 / 构建 / Git），「历史」页的数据源。 */
+    lateinit var history: OperationHistoryStore
         private set
 
     /** 存储结构根（`files/`）。 */

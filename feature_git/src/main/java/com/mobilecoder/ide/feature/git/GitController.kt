@@ -5,6 +5,7 @@ import com.mobilecoder.ide.core.nativebridge.GitNative
 import com.mobilecoder.ide.core.nativebridge.GitProgressCallback
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.core.storage.OperationSource
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -457,12 +458,14 @@ object GitController {
                 _progressLog.value = emptyList()
                 _progress.value = GitProgress("clone", url, -1, -1)
                 if (!prepareCredentials(url)) return@withBusy false
+                val historyStart = System.currentTimeMillis()
                 val rc = try {
                     GitNative.clone(url.trim(), targetPath.trim(), branch.trim())
                 } finally {
                     runCatching { GitNative.clearCredentials() }
                     _progress.value = null
                 }
+                recordGitHistory(cloneCommand(url, branch), File(targetPath).name, rc, historyStart)
                 if (rc != 0) {
                     postError("克隆失败：" + nativeError("请检查地址与网络"))
                     false
@@ -507,6 +510,7 @@ object GitController {
                 val prev = runCatching { GitNative.workdirPath() }.getOrDefault("")
                 _progressLog.value = emptyList()
                 _progress.value = GitProgress("clone", url, -1, -1)
+                val historyStart = System.currentTimeMillis()
                 try {
                     if (!prepareCredentials(url)) return@withBusy false
                     val rc = try {
@@ -514,6 +518,12 @@ object GitController {
                     } finally {
                         runCatching { GitNative.clearCredentials() }
                     }
+                    recordGitHistory(
+                        cloneCommand(url, branch),
+                        File(targetPath).name,
+                        rc,
+                        historyStart,
+                    )
                     if (rc != 0) {
                         postError("克隆失败：" + nativeError("请检查地址与网络"))
                         false
@@ -530,6 +540,36 @@ object GitController {
     /** 供 feature 页面发一条横幅提示（成功/失败）。 */
     fun notify(text: String, error: Boolean = false) {
         if (error) postError(text) else postInfo(text)
+    }
+
+    // ---------------- 操作历史 ----------------
+
+    /**
+     * 记一条操作历史（克隆 / 提交 / 拉取 / 推送 / 抓取），展示在底部导航「历史」页。
+     * 与终端、构建页的记录同一个存储；绝不抛异常。
+     *
+     * @param startedAt 操作发起时刻（[System.currentTimeMillis]），用于算耗时
+     */
+    private fun recordGitHistory(command: String, project: String, rc: Int, startedAt: Long) {
+        runCatching {
+            AppStorage.history.record(
+                command = command,
+                source = OperationSource.GIT,
+                project = project,
+                exitCode = rc,
+                durationMs = System.currentTimeMillis() - startedAt,
+            )
+        }
+    }
+
+    /** 历史记录的「项目」列：当前仓库目录名（无仓库时为空）。 */
+    private fun repoLabel(): String = runCatching { File(_repo.value.path).name }.getOrDefault("")
+
+    /** 克隆命令的可读写法：`git clone -b main https://…`。 */
+    private fun cloneCommand(url: String, branch: String): String {
+        val target = url.trim()
+        val name = branch.trim()
+        return if (name.isEmpty()) "git clone $target" else "git clone -b $name $target"
     }
 
     // ---------------- 变更：状态 / 暂存 / 提交 ----------------
@@ -623,6 +663,7 @@ object GitController {
             postError("提交信息不能为空")
             return@withRepo -1
         }
+        val historyStart = System.currentTimeMillis()
         val identity = loadIdentity()
         val rc = try {
             GitNative.commit(message.trim(), identity.name, identity.email)
@@ -630,6 +671,12 @@ object GitController {
             postError("提交失败：" + (t.message ?: "未知错误"))
             return@withRepo -1
         }
+        recordGitHistory(
+            "git commit -m \"${message.trim().take(60)}\"",
+            repoLabel(),
+            rc,
+            historyStart,
+        )
         when (rc) {
             0 -> {
                 postInfo("提交成功")
@@ -915,15 +962,19 @@ object GitController {
 
     /** @return 0 成功 / -1 失败 */
     suspend fun fetch(remote: String): Int = withRepo(-1) {
-        withBusy(-1) { fetchLocked(remote) }
+        val historyStart = System.currentTimeMillis()
+        val rc = withBusy(-1) { fetchLocked(remote) }
+        recordGitHistory("git fetch $remote", repoLabel(), rc, historyStart)
+        rc
     }
 
     /** 拉取 = fetch + merge(当前分支)。 @return 0 成功 / 1 冲突 / 2 已是最新 / -1 失败 */
     suspend fun pull(remote: String): Int = withRepo(-1) {
-        withBusy(-1) {
+        val historyStart = System.currentTimeMillis()
+        val rc = withBusy(-1) {
             if (!ensureEngine() || !ensureOpen()) return@withBusy -1
-            val rc = fetchLocked(remote)
-            if (rc != 0) return@withBusy rc
+            val fetched = fetchLocked(remote)
+            if (fetched != 0) return@withBusy fetched
             val branchName = _head.value?.branch.orEmpty()
             if (branchName.isBlank()) {
                 postInfo("拉取完成（当前没有可合并的分支）")
@@ -936,11 +987,14 @@ object GitController {
             }
             merged
         }
+        recordGitHistory("git pull $remote", repoLabel(), rc, historyStart)
+        rc
     }
 
     /** @return 0 成功 / -1 失败 */
     suspend fun push(remote: String, branch: String): Int = withRepo(-1) {
-        withBusy(-1) {
+        val historyStart = System.currentTimeMillis()
+        val rc = withBusy(-1) {
             if (!ensureEngine() || !ensureOpen()) return@withBusy -1
             val url = remoteUrlLocked(remote) ?: run {
                 postError("远程仓库不存在：$remote")
@@ -948,13 +1002,13 @@ object GitController {
             }
             if (!prepareCredentials(url)) return@withBusy -1
             _progressLog.value = emptyList()
-            val rc = try {
+            val pushed = try {
                 GitNative.push(remote, branch)
             } finally {
                 runCatching { GitNative.clearCredentials() }
                 _progress.value = null
             }
-            if (rc == 0) {
+            if (pushed == 0) {
                 /* IDE 语义等价 `git push -u`：成功即写上游，之后终端 `git pull` 无需配置 */
                 runCatching {
                     GitNative.configSet("branch.$branch.remote", remote) == 0 &&
@@ -965,8 +1019,10 @@ object GitController {
             } else {
                 postError("推送失败：" + nativeError("请检查凭据与权限"))
             }
-            rc
+            pushed
         }
+        recordGitHistory("git push $remote $branch", repoLabel(), rc, historyStart)
+        rc
     }
 
     // ---------------- 身份 / 忽略规则 ----------------

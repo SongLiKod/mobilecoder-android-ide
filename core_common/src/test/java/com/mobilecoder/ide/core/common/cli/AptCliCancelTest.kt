@@ -15,7 +15,7 @@ import org.junit.Test
  * CLI「停止」能力（PRD 2.4：命令执行中可随时停止）。
  *
  * 之前命令跑起来后没有任何取消入口：`_running` 只有等 handler 返回才复位，
- * 网络命令卡住时面板永远转圈、终端 Ctrl+C 也无效。[AptCli.cancelCurrent]
+ * 网络命令卡住时终端一直转圈、Ctrl+C 也无效。[AptCli.cancelCurrent]
  * 是唯一的出口，这里验证：
  *  - 取消后 handler 不再往下走、回显「命令已取消」；
  *  - 取消钩子（feature_git 中止 native 传输）被调用；

@@ -219,7 +219,7 @@ public final class GitNative {
 
     /**
      * 取消进行中的 fetch / push：可从任意线程调用，立即中止正在传输的网络操作
-     * （CLI 面板停止按钮 / 终端 Ctrl+C）。无进行中操作时为空操作。
+     * （终端 Ctrl+C）。无进行中操作时为空操作。
      */
     public static native void cancelNetwork();
 

@@ -63,7 +63,7 @@ object GitCli {
 
     /**
      * 注册进 CLI 引擎（`terminalIntercept = true`：终端输入 `git …` 由拦截器接管，
-     * CLI 面板也会出现「版本控制」分组的 git 命令）。由 `GitController.init` 调用。
+     * `apt help` 里也会出现「版本控制」分组的 git 命令）。由 `GitController.init` 调用。
      */
     fun register() {
         AptCli.register(
@@ -1341,7 +1341,7 @@ object GitCli {
      * 在 IO 线程执行可能阻塞的 native 网络调用，本协程每 300ms 把 [GitController.progress]
      * 回显到终端（进度无变化时不输出）——避免 `git pull` 之类长时间"没有任何输出"。
      *
-     * 取消（面板停止按钮 / 终端 Ctrl+C）时本协程在 [delay] 处抛出 CancellationException，
+     * 取消（终端 Ctrl+C）时本协程在 [delay] 处抛出 CancellationException，
      * 阻塞线程由 [GitNative.cancelNetwork] 中止传输，随后 [block] 返回、子协程结束。
      */
     private suspend fun <T> runWithProgress(

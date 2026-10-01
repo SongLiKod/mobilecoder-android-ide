@@ -102,7 +102,15 @@
 
 - `opencode clean` 清理构建缓存
 
-支持两种使用方式：终端手动输入、可视化面板一键执行。
+命令统一在「终端」页手动输入执行；可视化 CLI 面板已废弃，底部导航改为「历史」页：
+
+- 汇总全部操作记录：终端 shell 命令、`apt`/`git` 进程内命令、构建页编译打包、Git 克隆/提交/推送/拉取/抓取
+
+- 每条记录支持**复制 / 收藏 / 删除**，收藏带星标且不会被容量上限（500 条）挤掉
+
+- 支持关键词搜索、按来源（终端 / apt 命令 / 构建 / Git）筛选，清空时默认保留收藏
+
+- 记录落盘保存（`files/history/operations.tsv`），应用重启后仍在
 
 ### 2\.5 Git 版本控制模块
 
@@ -320,6 +328,8 @@ enum class AppThemeMode {
 
 - 日志实时回调 UI 层展示
 
+- 执行结果（命令 / 退出码 / 耗时）经 `onExecuted` 钩子写入操作历史
+
 ### 4\.4 Git 模块技术方案
 
 - 底层使用 libgit2 JNI，不依赖系统 Git
@@ -356,6 +366,7 @@ enum class AppThemeMode {
 ├── files/projects/    # 用户所有项目源码
 ├── files/ssh_keys/    # 加密密钥存储
 ├── files/sdk/         # 编译环境
+├── files/history/     # 操作历史（终端命令 / apt / 构建 / Git）
 ├── cache/tmp/         # 编译缓存
 └── datastore/         # 主题、全局配置
 ```
@@ -384,7 +395,7 @@ enum class AppThemeMode {
 
 - feature\_terminal：内置终端
 
-- feature\_cli：OpenCode 命令工具
+- feature\_cli：OpenCode 命令工具 \+ 底部导航「历史」页（操作历史：复制 / 收藏 / 删除）
 
 - feature\_git：版本控制
 
