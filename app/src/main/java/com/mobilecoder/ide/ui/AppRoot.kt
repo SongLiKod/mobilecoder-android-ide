@@ -78,6 +78,7 @@ import com.mobilecoder.ide.core.common.theme.ThemeManager
 import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.SectionHeader
+import com.mobilecoder.ide.core.common.ui.rememberImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.core.storage.ProjectMeta
 import com.mobilecoder.ide.core.storage.ProjectTemplate
@@ -137,8 +138,12 @@ fun AppRoot(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
 
+    // 软键盘可见时把底部导航整条撤掉（否则「导航 + 输入区」占去近半屏），收起键盘后恢复
+    val imeVisible by rememberImeVisible()
+
     Scaffold(
-        // imePadding：键盘弹出时整体上移（内容 + 底部导航），避免输入框被遮挡
+        // imePadding：键盘弹出时整体上移，避免输入框被遮挡；
+        // 同时 bottomBar 在键盘弹出期间隐藏，内容区拿到整块空间。
         modifier = modifier.fillMaxSize().imePadding(),
         topBar = {
             // 紧凑单行顶栏 = 状态栏内边距 + 40dp 标题行。
@@ -176,14 +181,17 @@ fun AppRoot(
             }
         },
         bottomBar = {
-            NavigationBar {
-                AppDestination.entries.forEach { destination ->
-                    NavigationBarItem(
-                        selected = currentRoute == destination.route,
-                        onClick = { navController.navigateTo(destination.route) },
-                        icon = { Icon(destination.icon, contentDescription = destination.label) },
-                        label = { Text(destination.label) },
-                    )
+            // 键盘弹出 → 隐藏底部导航（把屏幕让给内容和键盘）；键盘收起 → 恢复显示
+            if (!imeVisible) {
+                NavigationBar {
+                    AppDestination.entries.forEach { destination ->
+                        NavigationBarItem(
+                            selected = currentRoute == destination.route,
+                            onClick = { navController.navigateTo(destination.route) },
+                            icon = { Icon(destination.icon, contentDescription = destination.label) },
+                            label = { Text(destination.label) },
+                        )
+                    }
                 }
             }
         },

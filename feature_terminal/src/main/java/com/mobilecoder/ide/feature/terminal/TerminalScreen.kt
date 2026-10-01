@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.MoreVert
@@ -64,6 +65,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -86,6 +88,7 @@ import com.mobilecoder.ide.core.common.theme.AppPalette
 import com.mobilecoder.ide.core.common.theme.LocalAppPalette
 import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
+import com.mobilecoder.ide.core.common.ui.rememberImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.feature.git.GitController
 import kotlinx.coroutines.launch
@@ -110,6 +113,18 @@ fun TerminalScreen(
     val palette = LocalAppPalette.current
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    // 软键盘可见状态：终端里键盘图标据此决定是"收起"还是"唤起"（AppRoot 据此隐藏底部导航）
+    val imeVisible by rememberImeVisible()
+    // requestFocus() 异步生效，等焦点就位后再唤起软键盘才可靠
+    var pendingShowKeyboard by remember { mutableStateOf(false) }
+    LaunchedEffect(pendingShowKeyboard) {
+        if (pendingShowKeyboard) {
+            keyboard?.show()
+            pendingShowKeyboard = false
+        }
+    }
 
     val sessions by TerminalManager.sessions.collectAsStateWithLifecycle()
     val activeId by TerminalManager.activeId.collectAsStateWithLifecycle()
@@ -420,10 +435,26 @@ fun TerminalScreen(
                 }
                 KeyButton("⌫") { active?.sendBackspace() }
             }
-            IconButton(onClick = { keyboard?.hide() }) {
+            // 键盘图标：键盘弹出时点它 = 收起（先让输入框失焦，否则仅 hide() 在部分机型上不生效）；
+            // 键盘收起时点它 = 重新聚焦输入框并唤起键盘
+            IconButton(
+                onClick = {
+                    if (imeVisible) {
+                        focusManager.clearFocus()
+                        keyboard?.hide()
+                    } else {
+                        focusRequester.requestFocus()
+                        pendingShowKeyboard = true
+                    }
+                },
+            ) {
                 Icon(
-                    imageVector = Icons.Default.KeyboardHide,
-                    contentDescription = "隐藏键盘",
+                    imageVector = if (imeVisible) {
+                        Icons.Default.KeyboardHide
+                    } else {
+                        Icons.Default.Keyboard
+                    },
+                    contentDescription = if (imeVisible) "隐藏键盘" else "显示键盘",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
