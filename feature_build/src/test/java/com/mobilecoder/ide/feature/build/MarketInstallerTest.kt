@@ -52,19 +52,20 @@ class MarketInstallerTest {
     @Test
     fun script_downloadUrl_mirrorWithOfficialFallback_archSubstituted() {
         val script = MarketInstaller.nodeScript("/d/tmp", "/d/work", "22.2.0", "arm64")
+        // 发布包文件名带 v 前缀（node-v22.2.0-…，实测官方源与 npmmirror 均如此）
         assertTrue(
             script.contains(
-                "https://registry.npmmirror.com/-/binary/node/v22.2.0/node-22.2.0-linux-arm64.tar.gz",
+                "https://registry.npmmirror.com/-/binary/node/v22.2.0/node-v22.2.0-linux-arm64.tar.gz",
             ),
         )
         assertTrue(
-            script.contains("https://nodejs.org/dist/v22.2.0/node-22.2.0-linux-arm64.tar.gz"),
+            script.contains("https://nodejs.org/dist/v22.2.0/node-v22.2.0-linux-arm64.tar.gz"),
         )
         // 镜像失败回退官方源（|| 串联）
         assertTrue(script.contains(".tar.gz' -o node.tar.gz || curl "))
         // x64 包
         val x64 = MarketInstaller.nodeScript("/d/tmp", "/d/work", "22.2.0", "x64")
-        assertTrue(x64.contains("node-22.2.0-linux-x64.tar.gz"))
+        assertTrue(x64.contains("node-v22.2.0-linux-x64.tar.gz"))
         assertFalse(x64.contains("linux-arm64"))
     }
 
@@ -90,10 +91,10 @@ class MarketInstallerTest {
         assertTrue("校验必须在清理前", verify in 0 until cleanup)
         assertTrue("清理必须在完成前", cleanup in 0 until done)
         // 落位目标：bin/include/lib/share → /usr/local/
-        assertTrue(script.contains("bin' '/d/work/node-22.2.0-linux-arm64/include"))
+        assertTrue(script.contains("bin' '/d/work/node-v22.2.0-linux-arm64/include"))
         assertTrue(script.contains("share' /usr/local/"))
         // 清理下载物与解压目录
-        assertTrue(script.contains("rm -rf '/d/work/node.tar.gz' '/d/work/node-22.2.0-linux-arm64'"))
+        assertTrue(script.contains("rm -rf '/d/work/node.tar.gz' '/d/work/node-v22.2.0-linux-arm64'"))
     }
 
     @Test
@@ -107,7 +108,7 @@ class MarketInstallerTest {
             listOf(
                 "准备目录",
                 "安装依赖（apt：ca-certificates / curl）",
-                "下载 node-22.2.0-linux-arm64（npmmirror，失败回退官方源）",
+                "下载 node-v22.2.0-linux-arm64（npmmirror，失败回退官方源）",
                 "解压并安装到 /usr/local",
                 "校验安装",
                 "清理临时文件",
@@ -174,6 +175,17 @@ class MarketInstallerTest {
         assertFalse(MarketInstaller.isProgressFrame("100 24.5M  100 24.5M"))
         assertFalse(MarketInstaller.isProgressFrame("progress: 62.4% remaining"))
         assertFalse(MarketInstaller.isProgressFrame("E: 50% search failed"))
+    }
+
+    @Test
+    fun isProgressFrame_bareAnimationFrames_accepted() {
+        // curl -# 起步阶段（尚无百分比）的纯动画帧——真机日志里刷过这些行
+        assertTrue(MarketInstaller.isProgressFrame("#=#=#"))
+        assertTrue(MarketInstaller.isProgressFrame("##O#-#"))
+        assertTrue(MarketInstaller.isProgressFrame("-=O#-#   #   #"))
+        assertTrue(MarketInstaller.isProgressFrame("   #  =   -"))
+        assertFalse(MarketInstaller.isProgressFrame(""))
+        assertFalse(MarketInstaller.isProgressFrame("   "))
     }
 
     // ---- 日志行装配（\n / \r / \r\n / 半截块） ----

@@ -281,14 +281,14 @@ object MarketInstaller {
             return
         }
         val stage = _state.value.stage
-        if (stage.startsWith("下载")) {
-            val frame = isProgressFrame(line)
+        if (stage.startsWith("下载") && isProgressFrame(line)) {
             val pct = downloadPercent(line)
-            if (frame && pct != null) {
+            if (pct != null) {
                 val p = 0.35f + 0.55f * pct
                 publish { it.copy(progress = p) }
-                return // 进度帧不进日志，避免刷屏
             }
+            // 进度帧（含起步动画帧）不进日志，避免刷屏
+            return
         }
         appendLog(line)
     }
@@ -342,7 +342,8 @@ object MarketInstaller {
      */
     internal fun nodeScript(tmpDir: String, workDir: String, version: String, arch: String): String {
         val v = version.removePrefix("v")
-        val pkg = "node-$v-linux-$arch"
+        // 官方发布包文件名带 v 前缀：node-v22.2.0-linux-arm64.tar.gz（2026-10 实测官方源与 npmmirror 均如此）
+        val pkg = "node-v$v-linux-$arch"
         val mirror = "https://registry.npmmirror.com/-/binary/node/v$v/$pkg.tar.gz"
         val official = "https://nodejs.org/dist/v$v/$pkg.tar.gz"
         return listOf(
@@ -394,15 +395,20 @@ object MarketInstaller {
     }
 
     /**
-     * 判断是否为 curl 进度条帧（`#####… 62.4%`，仅 # / 空格 / 数字 / 点构成）。
+     * 判断是否为 curl `-#` 进度帧：带百分比的条帧（`#####… 62.4%`），
+     * 或起步阶段尚无百分比的纯动画帧（`#=-O ` 构成，如 `#=#=#`）。
      * 用来把 `\r` 原地刷新的进度帧与普通日志行区分开。
      */
     internal fun isProgressFrame(line: String): Boolean {
         val trimmed = line.trim()
-        if (!trimmed.endsWith("%")) return false
-        val before = trimmed.dropLast(1)
-        if (before.none { it.isDigit() }) return false
-        return before.all { it == '#' || it == ' ' || it == '.' || it.isDigit() }
+        if (trimmed.isEmpty()) return false
+        if (trimmed.endsWith("%")) {
+            val before = trimmed.dropLast(1)
+            val hasDigit = before.any { it.isDigit() }
+            val barOnly = before.all { it == '#' || it == ' ' || it == '.' || it.isDigit() }
+            if (hasDigit && barOnly) return true
+        }
+        return trimmed.all { it == '#' || it == '=' || it == '-' || it == 'O' || it == ' ' }
     }
 
     /** 按 rootfs 探测点判断 [item] 是否已安装。 */
