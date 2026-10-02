@@ -46,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
@@ -105,15 +106,18 @@ fun buildTreeRows(tree: List<FileNode>, collapsed: Set<String>): List<TreeRow> {
     return rows
 }
 
-/** 拖拽落点解析：命中的行是目录则直接作为目标，是文件则取其所在目录。 */
-private fun resolveDropTarget(pos: Offset, bounds: Map<String, Rect>): String? {
-    for ((path, rect) in bounds) {
-        if (rect.contains(pos)) {
-            val file = File(path)
-            return if (file.isDirectory) path else file.parentFile?.path
-        }
-    }
-    return null
+/**
+ * 拖拽落点解析：命中的行是目录则直接作为目标，是文件则取其所在目录。
+ *
+ * 只按**当前行序列** [rows] 匹配（与拖拽高亮同源）：[bounds] 是坐标簿，
+ * 行离开组合即被清掉（TreeRowItem 的 DisposableEffect），避免陈旧 rect 让
+ * 拖拽按历史坐标把文件移动到看不见的目录。
+ *
+ * internal 仅为单测可见（DropTargetResolveTest 锁「陈旧坐标簿不参与解析」）。
+ */
+internal fun resolveDropTarget(pos: Offset, bounds: Map<String, Rect>, rows: List<TreeRow>): String? {
+    val row = rows.firstOrNull { r -> bounds[r.path]?.contains(pos) == true } ?: return null
+    return if (row.isDirectory) row.path else row.node.file.parentFile?.path
 }
 
 private data class DragState(val path: String, val origin: Offset, val pos: Offset)
@@ -186,10 +190,7 @@ fun FileTreeDrawer(
     var drag by remember { mutableStateOf<DragState?>(null) }
     val bounds = remember { mutableStateMapOf<String, Rect>() }
 
-    val dropTargetPath = drag?.let { state ->
-        rows.firstOrNull { row -> bounds[row.path]?.contains(state.pos) == true }
-            ?.let { if (it.isDirectory) it.path else it.node.file.parentFile?.path }
-    }
+    val dropTargetPath = drag?.let { state -> resolveDropTarget(state.pos, bounds, rows) }
 
     Box(modifier = modifier.fillMaxSize()) {
         Box(
@@ -315,8 +316,10 @@ fun FileTreeDrawer(
                                 onDragEnd = {
                                     val state = drag
                                     drag = null
-                                    if (state != null) {
-                                        val target = resolveDropTarget(state.pos, bounds)
+                                    // 原地长按（弹菜单、零位移）不构成拖放：直接忽略，
+                                    // 连落点解析都不做，杜绝按陈旧坐标误移动文件
+                                    if (state != null && state.pos != state.origin) {
+                                        val target = resolveDropTarget(state.pos, bounds, rows)
                                         if (target != null &&
                                             target != state.path &&
                                             target != File(state.path).parentFile?.path
@@ -436,6 +439,12 @@ private fun TreeRowItem(
 ) {
     val isDragging = drag?.path == row.path
     val isTarget = !isDragging && dropTargetPath == row.path && row.isDirectory
+
+    // 行离开组合（折叠 / 刷新 / 滚出视口）时同步清掉坐标簿里的旧 rect，
+    // 否则拖拽落点会按历史坐标解析到看不见的目录（曾把 ui 目录误移动到 app/ 下）。
+    DisposableEffect(row.path) {
+        onDispose { bounds.remove(row.path) }
+    }
 
     Box(
         modifier = Modifier
