@@ -1,31 +1,38 @@
 package com.mobilecoder.ide.feature.history
 
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -34,17 +41,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.storage.HistoryRecord
 import com.mobilecoder.ide.core.storage.HistoryStore
@@ -56,117 +63,197 @@ import kotlinx.coroutines.launch
 /**
  * 「记录」页（原 CLI 面板位置）：终端命令与其它操作的统一流水。
  *
- * - 每条**紧凑单行**展示：收藏星 + 内容（单行省略）+ 来源·时间 + 复制/编辑/删除；
- * - 点按整行 = 复制到剪贴板；
- * - 收藏项置顶分组（收藏 / 全部两段）；
- * - 右上角「+」手动新增记录（来源「手动」）。
+ * 路由级返回箭头与大标题由外壳统一渲染，本页不重复绘制。
+ *
+ * - 首行 = 条数（随来源筛选变化）+「⋮」菜单（新增记录 / 清除全部，清除需确认）；
+ * - 来源筛选 chips：全部 / 终端 / 构建 / 市场 / 手动；
+ * - 每条**紧凑单行**：收藏星 + 内容（单行省略）+ 来源·时间 +「⋯」菜单（复制 / 编辑 / 删除）；
+ * - 点按整行 = 复制到剪贴板（撤销删除经 Snackbar「已删除 · 撤销」）；
+ * - 收藏项置顶分组（收藏 / 全部两段）。
  */
 @Composable
 fun HistoryScreen(modifier: Modifier = Modifier) {
     val records by HistoryStore.records.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val snackbarHostState = remember { SnackbarHostState() }
 
     // 首次进入时加载持久化记录（并迁移旧终端历史）
     LaunchedEffect(Unit) { runCatching { HistoryStore.ensureLoaded() } }
 
     var editing by remember { mutableStateOf<HistoryRecord?>(null) }
     var adding by remember { mutableStateOf(false) }
+    var confirmClearAll by remember { mutableStateOf(false) }
+    var headerMenuOpen by remember { mutableStateOf(false) }
+    var sourceFilter by rememberSaveable { mutableStateOf(SOURCE_ALL) }
 
     val copy: (String) -> Unit = { text ->
         clipboard.setText(AnnotatedString(text))
-        Toast.makeText(context, "已复制到剪贴板", Toast.LENGTH_SHORT).show()
+        scope.launch { snackbarHostState.showSnackbar("已复制到剪贴板") }
     }
 
-    val ordered = remember(records) { HistoryStore.displayOrder(records) }
+    // 删除：立即移除 + Snackbar「已删除 · 撤销」，点「撤销」按原样恢复该条记录
+    val delete: (HistoryRecord) -> Unit = { record ->
+        scope.launch {
+            runCatching { HistoryStore.remove(record.id) }
+            val result = runCatching {
+                snackbarHostState.showSnackbar(
+                    message = "已删除",
+                    actionLabel = "撤销",
+                    duration = SnackbarDuration.Short,
+                    withDismissAction = true,
+                )
+            }.getOrNull()
+            if (result == SnackbarResult.ActionPerformed) {
+                runCatching { HistoryStore.restore(record) }
+            }
+        }
+    }
+
+    val filtered = remember(records, sourceFilter) {
+        if (sourceFilter == SOURCE_ALL) {
+            records
+        } else {
+            records.filter { it.source == sourceFilter }
+        }
+    }
+    val ordered = remember(filtered) { HistoryStore.displayOrder(filtered) }
     val favorites = remember(ordered) { ordered.filter { it.favorite } }
     val rest = remember(ordered) { ordered.filterNot { it.favorite } }
 
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
-        // ---------------- 头部：标题 + 条数 + 新增 ----------------
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, top = 8.dp, end = 4.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "历史记录",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onBackground,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = "${records.size} 条",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.outline,
-            )
-            IconButton(onClick = { adding = true }, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = "新增记录",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-        }
-
-        // ---------------- 列表 ----------------
-        if (ordered.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                EmptyState(
-                    title = "暂无记录",
-                    subtitle = "终端命令、构建等操作会自动记录在这里\n也可点右上角「+」手动新增",
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 12.dp),
+        Column(modifier = Modifier.fillMaxSize()) {
+            // ---------------- 首行：条数 + 「⋮」菜单 ----------------
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, top = 8.dp, end = 4.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (favorites.isNotEmpty()) {
-                    item(key = "section-favorites") { SectionLabel("收藏") }
-                    items(favorites, key = { "fav-${it.id}" }) { record ->
+                Text(
+                    text = if (sourceFilter == SOURCE_ALL) {
+                        "共 ${records.size} 条"
+                    } else {
+                        "${filtered.size} 条 / 共 ${records.size} 条"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.weight(1f),
+                )
+                Box {
+                    IconButton(
+                        onClick = { headerMenuOpen = true },
+                        modifier = Modifier.size(40.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "更多操作",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = headerMenuOpen,
+                        onDismissRequest = { headerMenuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("新增记录") },
+                            onClick = {
+                                headerMenuOpen = false
+                                adding = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("清除全部") },
+                            onClick = {
+                                headerMenuOpen = false
+                                confirmClearAll = true
+                            },
+                        )
+                    }
+                }
+            }
+
+            // ---------------- 来源筛选 chips ----------------
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SOURCE_FILTERS.forEach { (value, label) ->
+                    FilterChip(
+                        selected = sourceFilter == value,
+                        onClick = { sourceFilter = value },
+                        modifier = Modifier.height(40.dp),
+                        label = {
+                            Text(text = label, style = MaterialTheme.typography.labelSmall)
+                        },
+                    )
+                }
+            }
+
+            // ---------------- 列表 ----------------
+            if (ordered.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    EmptyState(
+                        title = "暂无记录",
+                        subtitle = "终端命令、构建等操作会自动记录在这里\n也可点右上角「⋮」手动新增",
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 12.dp),
+                ) {
+                    if (favorites.isNotEmpty()) {
+                        item(key = "section-favorites") { SectionLabel("收藏") }
+                        items(favorites, key = { "fav-${it.id}" }) { record ->
+                            RecordRow(
+                                record = record,
+                                onCopy = { copy(record.text) },
+                                onToggleFavorite = {
+                                    scope.launch {
+                                        runCatching { HistoryStore.setFavorite(record.id, false) }
+                                    }
+                                },
+                                onEdit = { editing = record },
+                                onDelete = { delete(record) },
+                            )
+                        }
+                        if (rest.isNotEmpty()) {
+                            item(key = "section-all") { SectionLabel("全部") }
+                        }
+                    }
+                    items(rest, key = { it.id }) { record ->
                         RecordRow(
                             record = record,
                             onCopy = { copy(record.text) },
                             onToggleFavorite = {
                                 scope.launch {
-                                    runCatching { HistoryStore.setFavorite(record.id, false) }
+                                    runCatching { HistoryStore.setFavorite(record.id, true) }
                                 }
                             },
                             onEdit = { editing = record },
-                            onDelete = {
-                                scope.launch { runCatching { HistoryStore.remove(record.id) } }
-                            },
+                            onDelete = { delete(record) },
                         )
                     }
-                    if (rest.isNotEmpty()) {
-                        item(key = "section-all") { SectionLabel("全部") }
-                    }
-                }
-                items(rest, key = { it.id }) { record ->
-                    RecordRow(
-                        record = record,
-                        onCopy = { copy(record.text) },
-                        onToggleFavorite = {
-                            scope.launch {
-                                runCatching { HistoryStore.setFavorite(record.id, true) }
-                            }
-                        },
-                        onEdit = { editing = record },
-                        onDelete = {
-                            scope.launch { runCatching { HistoryStore.remove(record.id) } }
-                        },
-                    )
                 }
             }
         }
+
+        // 撤销删除 / 复制提示（本地 Snackbar，不使用 Toast）
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(16.dp),
+        )
     }
 
     // ---------------- 编辑 / 新增弹窗 ----------------
@@ -195,7 +282,38 @@ fun HistoryScreen(modifier: Modifier = Modifier) {
             onDismiss = { adding = false },
         )
     }
+
+    // ---------------- 清除全部确认 ----------------
+    if (confirmClearAll) {
+        AppAlertDialog(
+            title = "清除全部记录？",
+            message = "此操作不可撤销",
+            onDismiss = { confirmClearAll = false },
+            confirmLabel = "清除",
+            dismissLabel = "取消",
+            destructive = true,
+            onConfirm = {
+                confirmClearAll = false
+                scope.launch { runCatching { HistoryStore.clearAll() } }
+            },
+        )
+    }
 }
+
+/** 「全部」筛选值（空串，与具体来源区分）。 */
+private const val SOURCE_ALL = ""
+
+/**
+ * 来源筛选 chips：全部 / 终端 / 构建 / 市场 / 手动。
+ * 仅列出 [HistoryStore] 已有来源常量，不臆造新来源。
+ */
+private val SOURCE_FILTERS: List<Pair<String, String>> = listOf(
+    SOURCE_ALL to "全部",
+    HistoryStore.SOURCE_TERMINAL to HistoryStore.SOURCE_TERMINAL,
+    HistoryStore.SOURCE_BUILD to HistoryStore.SOURCE_BUILD,
+    HistoryStore.SOURCE_MARKET to HistoryStore.SOURCE_MARKET,
+    HistoryStore.SOURCE_MANUAL to HistoryStore.SOURCE_MANUAL,
+)
 
 /** 分组小标题（收藏 / 全部）。 */
 @Composable
@@ -211,8 +329,8 @@ private fun SectionLabel(text: String) {
 }
 
 /**
- * 一条记录的紧凑单行：收藏星 + 内容（单行省略）+ 来源·时间 + 复制/编辑/删除。
- * 点击整行也是复制。
+ * 一条记录的紧凑单行：收藏星（40dp）+ 内容（单行省略）+ 来源·时间 +「⋯」菜单（复制 / 编辑 / 删除）。
+ * 点击整行仍是复制；收藏星与「⋯」各自独立可点，不触发整行复制。
  */
 @Composable
 private fun RecordRow(
@@ -222,6 +340,8 @@ private fun RecordRow(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -229,16 +349,20 @@ private fun RecordRow(
             .padding(horizontal = 8.dp, vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ActionIcon(
-            icon = if (record.favorite) Icons.Default.Star else Icons.Default.StarBorder,
-            contentDescription = if (record.favorite) "取消收藏" else "收藏",
-            tint = if (record.favorite) {
-                Color(0xFFFFB300)
-            } else {
-                MaterialTheme.colorScheme.outlineVariant
-            },
+        IconButton(
             onClick = onToggleFavorite,
-        )
+            modifier = Modifier.size(40.dp),
+        ) {
+            Icon(
+                imageVector = if (record.favorite) Icons.Default.Star else Icons.Default.StarBorder,
+                contentDescription = if (record.favorite) "取消收藏" else "收藏",
+                tint = if (record.favorite) {
+                    Color(0xFFFFB300)
+                } else {
+                    MaterialTheme.colorScheme.outlineVariant
+                },
+            )
+        }
         Text(
             text = record.text,
             style = MaterialTheme.typography.bodyMedium,
@@ -257,47 +381,44 @@ private fun RecordRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 96.dp),
         )
-        ActionIcon(
-            icon = Icons.Default.ContentCopy,
-            contentDescription = "复制",
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            onClick = onCopy,
-        )
-        ActionIcon(
-            icon = Icons.Default.Edit,
-            contentDescription = "编辑",
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            onClick = onEdit,
-        )
-        ActionIcon(
-            icon = Icons.Default.Delete,
-            contentDescription = "删除",
-            tint = MaterialTheme.colorScheme.error,
-            onClick = onDelete,
-        )
-    }
-}
-
-/** 小尺寸图标按钮（30dp 触控区、17dp 图标，保持行紧凑）。 */
-@Composable
-private fun ActionIcon(
-    icon: ImageVector,
-    contentDescription: String,
-    tint: Color,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .size(30.dp)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = tint,
-            modifier = Modifier.size(17.dp),
-        )
+        Box {
+            IconButton(
+                onClick = { menuOpen = true },
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "更多操作",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("复制") },
+                    onClick = {
+                        menuOpen = false
+                        onCopy()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("编辑") },
+                    onClick = {
+                        menuOpen = false
+                        onEdit()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("删除") },
+                    onClick = {
+                        menuOpen = false
+                        onDelete()
+                    },
+                )
+            }
+        }
     }
 }
 

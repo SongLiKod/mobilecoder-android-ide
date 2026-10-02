@@ -5,29 +5,38 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
-import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,15 +49,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mobilecoder.ide.core.common.theme.AppColor
-import com.mobilecoder.ide.core.common.theme.LocalAppPalette
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.SectionHeader
 import com.mobilecoder.ide.core.common.ui.StatChip
@@ -64,8 +72,10 @@ import kotlinx.coroutines.withContext
  * PRD 2.6「GitHub SSH Key 可视化配置模块」主页面。
  *
  * SSH 是全局功能（不依赖项目），页面结构：
- *  标题 + 操作（新建 / 导入 / 测试） → 密钥列表（内部滚动） → GitHub 绑定指引（折叠）
- * 详情 / 连接测试为模块内二级页，生成 / 导入为弹窗。
+ *  操作行（测试 / 新建 / 导入 / 更多） → 密钥列表（内部滚动）
+ *  无密钥时内嵌 GitHub 绑定指引；有密钥时收进「⋮ 查看绑定指引」浮层。
+ *  路由级标题由外壳统一渲染（SSH 密钥），本页不再自绘页级大标题。
+ *  详情 / 连接测试为模块内二级页（保留内部返回箭头），生成 / 导入为弹窗。
  */
 @Composable
 fun SshScreen(modifier: Modifier = Modifier) {
@@ -79,57 +89,69 @@ fun SshScreen(modifier: Modifier = Modifier) {
     var showImport by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
 
+    // 页面级 Snackbar（替代 Toast）：短时提示，自动消失
+    val snackbarHostState = remember { SnackbarHostState() }
+    val notify: (String) -> Unit = { message ->
+        scope.launch { snackbarHostState.showSnackbar(message) }
+    }
+
     LaunchedEffect(Unit) {
         SshController.init(context)
         SshController.refresh()
     }
 
-    if (showTest) {
-        SshTestPage(
-            modifier = modifier,
-            keys = keys,
-            onBack = { showTest = false },
-        )
-    } else {
-        val detailKey = keys.firstOrNull { it.id == detailId }
-        if (detailKey != null) {
-            SshKeyDetailPage(
-                modifier = modifier,
-                meta = detailKey,
-                onBack = { detailId = "" },
-                onActivated = {
-                    scope.launch {
-                        withContext(Dispatchers.IO) { SshController.store()?.setActive(detailKey.id) }
-                        SshController.refresh()
-                    }
-                },
+    Box(modifier = modifier.fillMaxSize()) {
+        if (showTest) {
+            SshTestPage(
+                keys = keys,
+                onBack = { showTest = false },
             )
         } else {
-            SshHome(
-                modifier = modifier,
-                keys = keys,
-                busy = busy,
-                onOpenGenerate = { showGenerate = true },
-                onOpenImport = { showImport = true },
-                onOpenTest = { showTest = true },
-                onOpenDetail = { detailId = it },
-                onActivate = { id ->
-                    scope.launch {
-                        busy = true
-                        val ok = withContext(Dispatchers.IO) {
-                            runCatching { SshController.store()?.setActive(id) }.isSuccess
-                        }
-                        busy = false
-                        if (ok) {
+            val detailKey = keys.firstOrNull { it.id == detailId }
+            if (detailKey != null) {
+                SshKeyDetailPage(
+                    meta = detailKey,
+                    onBack = { detailId = "" },
+                    notify = notify,
+                    onActivated = {
+                        scope.launch {
+                            withContext(Dispatchers.IO) { SshController.store()?.setActive(detailKey.id) }
                             SshController.refresh()
-                            showToast(context, "已切换激活密钥，Git 与连接测试将默认使用它")
-                        } else {
-                            showToast(context, "设置激活密钥失败，请重试")
                         }
-                    }
-                },
-            )
+                    },
+                )
+            } else {
+                SshHome(
+                    keys = keys,
+                    busy = busy,
+                    notify = notify,
+                    onOpenGenerate = { showGenerate = true },
+                    onOpenImport = { showImport = true },
+                    onOpenTest = { showTest = true },
+                    onOpenDetail = { detailId = it },
+                    onActivate = { id ->
+                        scope.launch {
+                            busy = true
+                            val ok = withContext(Dispatchers.IO) {
+                                runCatching { SshController.store()?.setActive(id) }.isSuccess
+                            }
+                            busy = false
+                            if (ok) {
+                                SshController.refresh()
+                                notify("已切换激活密钥，Git 与连接测试将默认使用它")
+                            } else {
+                                notify("设置激活密钥失败，请重试")
+                            }
+                        }
+                    },
+                )
+            }
         }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
     }
 
     if (showGenerate) {
@@ -138,7 +160,7 @@ fun SshScreen(modifier: Modifier = Modifier) {
             onGenerated = { id ->
                 showGenerate = false
                 detailId = id
-                showToast(context, "密钥已生成并加密保存")
+                notify("密钥已生成并加密保存")
             },
         )
     }
@@ -149,7 +171,7 @@ fun SshScreen(modifier: Modifier = Modifier) {
             onImported = { id ->
                 showImport = false
                 detailId = id
-                showToast(context, "私钥已导入并加密保存")
+                notify("私钥已导入并加密保存")
             },
         )
     }
@@ -163,6 +185,7 @@ fun SshScreen(modifier: Modifier = Modifier) {
 private fun SshHome(
     keys: List<SshKeyMeta>,
     busy: Boolean,
+    notify: (String) -> Unit,
     onOpenGenerate: () -> Unit,
     onOpenImport: () -> Unit,
     onOpenTest: () -> Unit,
@@ -172,19 +195,67 @@ private fun SshHome(
 ) {
     val context = LocalContext.current
     val active = keys.firstOrNull { it.isActive }
+    var moreMenu by rememberSaveable { mutableStateOf(false) }
+    var showGuide by rememberSaveable { mutableStateOf(false) }
 
     Column(modifier = modifier.fillMaxSize()) {
-        SectionHeader(
-            title = "SSH 密钥管理",
-            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 4.dp),
-            action = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onOpenGenerate) { Text("新建") }
-                    TextButton(onClick = onOpenImport) { Text("导入") }
-                    TextButton(onClick = onOpenTest) { Text("测试") }
+        // 操作行：路由级标题由外壳统一渲染，此处只保留右对齐操作（每个点击区 >= 40dp）
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Spacer(modifier = Modifier.weight(1f))
+            OutlinedButton(
+                onClick = onOpenGenerate,
+                modifier = Modifier
+                    .padding(end = 6.dp)
+                    .heightIn(min = 40.dp),
+            ) {
+                Text("新建")
+            }
+            OutlinedButton(
+                onClick = onOpenImport,
+                modifier = Modifier
+                    .padding(end = 6.dp)
+                    .heightIn(min = 40.dp),
+            ) {
+                Text("导入")
+            }
+            OutlinedButton(
+                onClick = onOpenTest,
+                modifier = Modifier.heightIn(min = 40.dp),
+            ) {
+                Text("测试")
+            }
+            if (keys.isNotEmpty()) {
+                // 有密钥时绑定指引收进「⋮」菜单，避免长期占据列表空间
+                Box {
+                    IconButton(
+                        onClick = { moreMenu = true },
+                        modifier = Modifier.size(40.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "更多操作",
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = moreMenu,
+                        onDismissRequest = { moreMenu = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("查看绑定指引") },
+                            onClick = {
+                                moreMenu = false
+                                showGuide = true
+                            },
+                        )
+                    }
                 }
-            },
-        )
+            }
+        }
 
         if (busy) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -202,7 +273,11 @@ private fun SshHome(
                     ActiveSummaryCard(meta = active, onOpen = { onOpenDetail(active.id) })
                 }
             }
-            item(key = "guide") { GitHubGuideCard(onOpenGitHub = { openGitHubSshSettings(context) }) }
+            if (keys.isEmpty()) {
+                item(key = "guide") {
+                    GitHubGuideCard(onOpenGitHub = { openGitHubSshSettings(context, notify) })
+                }
+            }
             item(key = "list-header") {
                 SectionHeader(
                     title = "密钥列表（${keys.size}）",
@@ -227,12 +302,18 @@ private fun SshHome(
             }
         }
     }
+
+    if (showGuide) {
+        GuideDialog(
+            onDismiss = { showGuide = false },
+            onOpenGitHub = { openGitHubSshSettings(context, notify) },
+        )
+    }
 }
 
 /** 激活密钥摘要：Git / 连接测试默认使用的凭据。 */
 @Composable
 private fun ActiveSummaryCard(meta: SshKeyMeta, onOpen: () -> Unit, modifier: Modifier = Modifier) {
-    val palette = LocalAppPalette.current
     Card(
         modifier = modifier
             .fillMaxWidth()
@@ -277,13 +358,6 @@ private fun ActiveSummaryCard(meta: SshKeyMeta, onOpen: () -> Unit, modifier: Mo
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
-            if (meta.type == com.mobilecoder.ide.core.storage.SshKeyType.ED25519) {
-                Text(
-                    text = ED25519_BACKEND_NOTICE,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(palette.warning.toComposeColorValue()),
-                )
-            }
         }
     }
 }
@@ -386,39 +460,87 @@ private fun GitHubGuideCard(onOpenGitHub: () -> Unit, modifier: Modifier = Modif
             }
 
             if (expanded) {
-                HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
-                GUIDE_STEPS.forEachIndexed { index, step ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                GuideBody(onOpenGitHub = onOpenGitHub)
+            }
+        }
+    }
+}
+
+/** 指引正文（折叠卡与浮层共用，文案保持与 PRD 一致）。 */
+@Composable
+private fun GuideBody(onOpenGitHub: () -> Unit) {
+    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
+    GUIDE_STEPS.forEachIndexed { index, step ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "${index + 1}.",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = step,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+    OutlinedButton(
+        onClick = onOpenGitHub,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("打开 GitHub → Settings → SSH keys")
+    }
+    Text(
+        text = "激活的密钥会自动作为 Git 推送 / 拉取的凭据（core_storage 加密存储，不落明文、不上传）。",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 8.dp),
+    )
+}
+
+/** 有密钥时通过「⋮ 查看绑定指引」打开的浮层（复用指引正文）。 */
+@Composable
+private fun GuideDialog(
+    onDismiss: () -> Unit,
+    onOpenGitHub: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "GitHub 绑定指引",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(40.dp),
                     ) {
-                        Text(
-                            text = "${index + 1}.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Text(
-                            text = step,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "关闭",
                         )
                     }
                 }
-                OutlinedButton(
-                    onClick = onOpenGitHub,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("打开 GitHub → Settings → SSH keys")
-                }
-                Text(
-                    text = "激活的密钥会自动作为 Git 推送 / 拉取的凭据（core_storage 加密存储，不落明文、不上传）。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
+                GuideBody(onOpenGitHub = onOpenGitHub)
             }
         }
     }
@@ -454,35 +576,31 @@ internal fun formatTime(millis: Long): String = try {
     ""
 }
 
-internal fun showToast(context: Context, message: String) {
-    try {
-        Handler(Looper.getMainLooper()).post {
-            Toast.makeText(context.applicationContext, message, Toast.LENGTH_SHORT).show()
-        }
-    } catch (_: Throwable) {
-        // Toast 失败不致命
-    }
-}
-
-/** 复制到剪贴板 + Toast 引导（PRD：一键复制公钥）。 */
-internal fun copyToClipboard(context: Context, label: String, text: String, toastMessage: String) {
+/** 复制到剪贴板 + 瞬时提示（Snackbar，PRD：一键复制公钥）。 */
+internal fun copyToClipboard(
+    context: Context,
+    label: String,
+    text: String,
+    successMessage: String,
+    notify: (String) -> Unit,
+) {
     try {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             ?: throw IllegalStateException("剪贴板服务不可用")
         clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
-        showToast(context, toastMessage)
+        notify(successMessage)
     } catch (t: Throwable) {
-        showToast(context, "复制失败：${t.message ?: "未知错误"}")
+        notify("复制失败：${t.message ?: "未知错误"}")
     }
 }
 
 /** 跳转 GitHub SSH 密钥设置页（无浏览器时给出可手动打开的提示）。 */
-private fun openGitHubSshSettings(context: Context) {
+private fun openGitHubSshSettings(context: Context, notify: (String) -> Unit) {
     try {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/settings/keys"))
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(intent)
     } catch (_: Throwable) {
-        showToast(context, "未找到可用浏览器，请手动打开 https://github.com/settings/keys")
+        notify("未找到可用浏览器，请手动打开 https://github.com/settings/keys")
     }
 }

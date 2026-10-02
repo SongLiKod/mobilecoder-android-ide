@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,6 +21,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -37,7 +37,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardHide
@@ -76,6 +76,8 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -102,12 +104,23 @@ import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.core.storage.HistoryStore
-import com.mobilecoder.ide.feature.git.GitController
 import kotlin.math.abs
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** 手势长按阈值（ms，Android/Compose 默认值）：超过即视为选区拖动而非滚轮。 */
 private const val LONG_PRESS_TIMEOUT_MS = 500L
+
+/**
+ * 内联瞬时提示（替代 Toast / 弹窗）：显示在命令输入行正上方，
+ * [durationMs] 毫秒后自动消失；[seq] 只用于让重复文案也能重触发计时。
+ */
+private data class InlineHint(
+    val text: String,
+    val isError: Boolean,
+    val durationMs: Long,
+    val seq: Int,
+)
 
 /**
  * PRD 2.3「内置终端」页面。
@@ -121,7 +134,7 @@ private const val LONG_PRESS_TIMEOUT_MS = 500L
  *  - 长按选中复制（SelectionContainer）、scrollback 竖向滚动 + 自动贴底；
  *  - 鼠标报告模式（TUI 开 `?1000/1002/1006`）下触摸转滚轮/点击发给程序，
  *    双指竖滑仍滚本地历史；未开启时手势行为不变；
- *  - 溢出菜单：新建 / 重命名 / 清屏 / 导出日志 / 关闭全部 / 字号调节。
+ *  - 溢出菜单：重命名 / 清屏 / 导出日志 / 关闭全部 / 显示或隐藏按键行。
  */
 @Composable
 fun TerminalScreen(
@@ -131,30 +144,19 @@ fun TerminalScreen(
     val palette = LocalAppPalette.current
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
+    val clipboard = LocalClipboardManager.current
 
     val sessions by TerminalManager.sessions.collectAsStateWithLifecycle()
     val activeId by TerminalManager.activeId.collectAsStateWithLifecycle()
     val errorMessage by TerminalManager.error.collectAsStateWithLifecycle()
     val noticeMessage by TerminalManager.notice.collectAsStateWithLifecycle()
-    val gitHead by GitController.head.collectAsStateWithLifecycle()
-
-    // ---- 绑定仓库：拿到当前分支（非 Git 仓库时 head 为 null，徽标隐藏） ----
-    LaunchedEffect(projectPath) {
-        runCatching { GitController.bind(projectPath) }
-    }
 
     val active = sessions.firstOrNull { it.id == activeId } ?: sessions.firstOrNull()
 
-    // ---- 字号（AppPreferences 持久化） ----
+    // ---- 字号（AppPreferences 持久化；修改入口在全局「设置」页） ----
     var fontSize by remember { mutableIntStateOf(13) }
     LaunchedEffect(Unit) {
         runCatching { fontSize = AppStorage.preferences.terminalFontSize() }
-    }
-
-    fun changeFontSize(delta: Int) {
-        val next = (fontSize + delta).coerceIn(9, 24)
-        fontSize = next
-        scope.launch { runCatching { AppStorage.preferences.setTerminalFontSize(next) } }
     }
 
     // ---- 终端度量：字符宽 / 行高 → cols/rows ----
@@ -201,24 +203,42 @@ fun TerminalScreen(
     // ---- 输入框状态 ----
     var input by rememberSaveable { mutableStateOf("") }
     var ctrlOn by remember { mutableStateOf(false) }
-    var historyIndex by remember { mutableIntStateOf(-1) }
     val focusRequester = remember { FocusRequester() }
 
     // 软键盘可见性：驱动按键行自动收起（④）+ 键盘图标方向
     val imeVisible = isImeVisible()
     // 按键行显隐：默认跟随键盘（弹出即收起，把终端渲染区让出来）；溢出菜单可手动固定，
-    // 手动值在本次会话内一直有效。
-    var keysForced by remember { mutableStateOf<Boolean?>(null) }
+    // 手动值用 rememberSaveable 持久化 —— 旋转 / 进程重建后仍然有效。
+    var keysForced by rememberSaveable { mutableStateOf<Boolean?>(null) }
     val showKeys = keysForced ?: !imeVisible
+
+    // ---- 内联瞬时提示：显示在输入行正上方，到时自动消失（不弹窗、不用 Toast） ----
+    var inlineHint by remember { mutableStateOf<InlineHint?>(null) }
+    var inlineHintSeq by remember { mutableIntStateOf(0) }
+    LaunchedEffect(inlineHint) {
+        val hint = inlineHint ?: return@LaunchedEffect
+        delay(hint.durationMs)
+        inlineHint = null
+    }
+
+    /** 触发一条内联提示：[isError] 用错误色，[durationMs] 后自动消失。 */
+    fun showInlineHint(text: String, isError: Boolean = false, durationMs: Long = 2500L) {
+        inlineHintSeq += 1
+        inlineHint = InlineHint(
+            text = text,
+            isError = isError,
+            durationMs = durationMs,
+            seq = inlineHintSeq,
+        )
+    }
 
     fun submitLine() {
         val session = active ?: return
         val text = input
         input = ""
-        historyIndex = -1
         val exit = session.exitCode.value
         if (exit != null) {
-            TerminalManager.showNotice("会话已退出（code=$exit），请先点击标签上的重启按钮。")
+            showInlineHint("会话已退出（code=$exit），请先点击标签上的重启按钮。", isError = true)
             return
         }
         if (ctrlOn) {
@@ -248,16 +268,23 @@ fun TerminalScreen(
         session.submitLine(text)
     }
 
-    fun pickHistory() {
-        scope.launch {
-            runCatching { HistoryStore.ensureLoaded() }
-            val history = HistoryStore.terminalCommands()
-            if (history.isEmpty()) return@launch
-            val next = historyIndex + 1
-            if (next >= history.size) return@launch
-            historyIndex = next
-            input = history[next]
+    // ---- 历史命令下拉：点 ↑ 展开最近命令列表，点选回填输入框（不自动发送） ----
+    var historyOpen by remember { mutableStateOf(false) }
+    var historyItems by remember { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(historyOpen) {
+        if (!historyOpen) return@LaunchedEffect
+        runCatching { HistoryStore.ensureLoaded() }
+        historyItems = HistoryStore.terminalCommands()
+    }
+
+    // ---- 粘贴：读剪贴板并追加到输入框（不自动发送）；空剪贴板给内联提示 ----
+    fun pasteFromClipboard() {
+        val text = clipboard.getText()?.text
+        if (text.isNullOrEmpty()) {
+            showInlineHint("剪贴板为空", durationMs = 2000L)
+            return
         }
+        input = (input + text).filter { it != '\n' && it != '\r' }.take(4000)
     }
 
     // ---- 溢出菜单 / 弹窗状态 ----
@@ -265,6 +292,9 @@ fun TerminalScreen(
     var renameOpen by remember { mutableStateOf(false) }
     var renameText by rememberSaveable { mutableStateOf("") }
     var closeAllConfirm by remember { mutableStateOf(false) }
+
+    // 命令输入行实测宽度：历史下拉按整行宽度展开（≈ matchParent）
+    var inputRowWidthPx by remember { mutableStateOf(0) }
 
     Column(
         modifier = modifier
@@ -304,15 +334,6 @@ fun TerminalScreen(
                     )
                 }
             }
-            gitHead?.branch?.takeIf { it.isNotBlank() }?.let { branch ->
-                BranchBadge(
-                    branch = branch,
-                    ahead = gitHead?.ahead ?: 0,
-                    behind = gitHead?.behind ?: 0,
-                    detached = gitHead?.detached == true,
-                    modifier = Modifier.padding(horizontal = 4.dp),
-                )
-            }
             IconButton(onClick = { menuOpen = true }) {
                 Icon(
                     imageVector = Icons.Default.MoreVert,
@@ -321,13 +342,6 @@ fun TerminalScreen(
                 )
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("新建会话") },
-                    onClick = {
-                        menuOpen = false
-                        TerminalManager.create(cols, rows, projectPath)
-                    },
-                )
                 DropdownMenuItem(
                     text = { Text("重命名") },
                     onClick = {
@@ -366,14 +380,6 @@ fun TerminalScreen(
                 DropdownMenuItem(
                     text = { Text(if (showKeys) "隐藏按键行" else "显示按键行") },
                     onClick = { keysForced = !showKeys },
-                )
-                DropdownMenuItem(
-                    text = { Text("字号（当前 ${fontSize}sp，−）") },
-                    onClick = { changeFontSize(-1) },
-                )
-                DropdownMenuItem(
-                    text = { Text("字号（当前 ${fontSize}sp，＋）") },
-                    onClick = { changeFontSize(1) },
                 )
             }
         }
@@ -501,17 +507,93 @@ fun TerminalScreen(
                 modifier = Modifier.fillMaxWidth().height(2.dp),
             )
         }
+        // 内联瞬时提示：紧贴输入行上方，到时自动消失（替代弹窗 / Toast）
+        inlineHint?.let { hint ->
+            Text(
+                text = hint.text,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (hint.isError) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surface)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            )
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surface)
-                .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp),
+                .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 8.dp)
+                .onSizeChanged { inputRowWidthPx = it.width },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = { pickHistory() }) {
+            // ↑ 历史命令：展开最近命令列表，点选回填输入框（不自动发送）
+            Box {
+                IconButton(onClick = { historyOpen = true }) {
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowUp,
+                        contentDescription = "历史命令",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                DropdownMenu(
+                    expanded = historyOpen,
+                    onDismissRequest = { historyOpen = false },
+                    // 菜单宽度 ≈ 整个输入行（首次布局前退化为最小宽度）
+                    modifier = if (inputRowWidthPx > 0) {
+                        Modifier.width(with(LocalDensity.current) { inputRowWidthPx.toDp() })
+                    } else {
+                        Modifier.widthIn(min = 280.dp)
+                    },
+                ) {
+                    if (historyItems.isEmpty()) {
+                        Text(
+                            text = "暂无历史命令",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        )
+                    } else {
+                        // ⚠ 这里不能用 LazyColumn：DropdownMenu 打开时会按 IntrinsicSize 对菜单
+                        // 内容做内在测量（intrinsic），LazyColumn 是 SubcomposeLayout 不支持
+                        // intrinsic，一展开就抛 IllegalStateException（"Asking for intrinsic
+                        // measurements of SubcomposeLayout layouts is not supported"）闪退。
+                        // 换成普通 Column 自己滚（上限 280dp，与原 UX 一致）。
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 280.dp)
+                                .verticalScroll(rememberScrollState()),
+                        ) {
+                            historyItems.forEach { command ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = command,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            fontFamily = FontFamily.Monospace,
+                                        )
+                                    },
+                                    onClick = {
+                                        input = command
+                                        historyOpen = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            // 粘贴：剪贴板内容追加到输入框（不自动发送）
+            IconButton(onClick = { pasteFromClipboard() }) {
                 Icon(
-                    imageVector = Icons.Default.KeyboardArrowUp,
-                    contentDescription = "历史命令",
+                    imageVector = Icons.Default.ContentPaste,
+                    contentDescription = "粘贴",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -640,56 +722,6 @@ fun TerminalScreen(
 // ---------------------------------------------------------------------------
 // 会话标签
 // ---------------------------------------------------------------------------
-
-/** 当前分支徽标（分支图标 + 名称 + 领先/落后计数；非仓库时由调用方隐藏）。 */
-@Composable
-private fun BranchBadge(
-    branch: String,
-    ahead: Int,
-    behind: Int,
-    detached: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val tint = MaterialTheme.colorScheme.onSurfaceVariant
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = modifier,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Default.AccountTree,
-                contentDescription = "当前分支",
-                tint = tint,
-                modifier = Modifier
-                    .padding(start = 6.dp)
-                    .size(12.dp),
-            )
-            Text(
-                text = if (detached) "HEAD ($branch)" else branch,
-                style = MaterialTheme.typography.labelSmall,
-                color = tint,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .padding(start = 4.dp, end = 6.dp)
-                    .widthIn(max = 110.dp),
-            )
-            if (ahead > 0 || behind > 0) {
-                Text(
-                    text = buildString {
-                        if (ahead > 0) append("↑$ahead")
-                        if (behind > 0) append(" ↓$behind")
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 1,
-                    modifier = Modifier.padding(end = 6.dp),
-                )
-            }
-        }
-    }
-}
 
 @Composable
 private fun TerminalTab(

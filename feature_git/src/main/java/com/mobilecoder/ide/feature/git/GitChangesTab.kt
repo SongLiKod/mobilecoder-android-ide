@@ -19,7 +19,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -38,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -57,14 +60,16 @@ private data class RestoreRequest(
 /**
  * 变更页（PRD 2.5：分组状态 + 暂存/取消暂存 + 提交 + Diff 查看器）。
  *
- * 分组：已暂存 / 未暂存 / 未跟踪 / 冲突 / 已忽略；
- * 行点击展开 Diff 查看器；顶部为提交区与工作区统计。
+ * 分组：已暂存 / 未暂存 / 未跟踪 / 已忽略；存在冲突时顶部展示可点击的
+ * 冲突提醒横幅（点击进入冲突处理子页）；行点击以全屏对话框展开 Diff 查看器；
+ * 顶部为提交区与工作区统计。
  * 「还原」需二次确认：未暂存组只丢弃工作区改动，已暂存组连同暂存一并回到 HEAD；
  * 未跟踪组提供「删除」（物理删除，同样二次确认——新增文件不在版本库中，无法还原）。
  */
 @Composable
 fun ChangesTab(
     modifier: Modifier = Modifier,
+    onOpenConflicts: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val status by GitController.status.collectAsStateWithLifecycle()
@@ -86,6 +91,14 @@ fun ChangesTab(
         conflicted.isEmpty() && ignored.isEmpty()
 
     Column(modifier = modifier.fillMaxSize()) {
+        // ---------------- 冲突提醒（点击进入冲突处理子页） ----------------
+        if (conflicted.isNotEmpty()) {
+            ConflictBanner(
+                count = conflicted.size,
+                onClick = onOpenConflicts,
+            )
+        }
+
         // ---------------- 提交区 ----------------
         Column(
             modifier = Modifier
@@ -206,18 +219,6 @@ fun ChangesTab(
             )
 
             changeGroup(
-                group = GitChangeGroup.CONFLICTED,
-                entries = conflicted,
-                actionLabel = null,
-                onAction = {},
-                expandedKey = expandedKey,
-                onToggle = { key ->
-                    expandedKey = if (expandedKey == key) "" else key
-                },
-                onPrimaryAction = null,
-            )
-
-            changeGroup(
                 group = GitChangeGroup.IGNORED,
                 entries = ignored,
                 actionLabel = null,
@@ -278,6 +279,49 @@ fun ChangesTab(
 }
 
 // ---------------------------------------------------------------------------
+// 冲突提醒横幅（点击进入冲突处理子页）
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun ConflictBanner(
+    count: Int,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .clickable(onClick = onClick),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Default.Warning,
+                contentDescription = null,
+                modifier = Modifier.padding(end = 10.dp),
+            )
+            Text(
+                text = "有 $count 处合并冲突需要处理",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowRight,
+                contentDescription = null,
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 分组渲染
 // ---------------------------------------------------------------------------
 
@@ -326,7 +370,7 @@ private fun LazyListScope.changeGroup(
 }
 
 // ---------------------------------------------------------------------------
-// 单行状态 + 展开的 Diff
+// 单行状态 + 全屏 Diff 对话框
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -395,10 +439,10 @@ private fun StatusRow(
         }
 
         if (expanded) {
-            DiffViewer(
+            DiffViewerDialog(
                 path = entry.path,
                 staged = group == GitChangeGroup.STAGED,
-                modifier = Modifier.padding(bottom = 8.dp),
+                onDismiss = { onToggle() },
             )
         }
     }

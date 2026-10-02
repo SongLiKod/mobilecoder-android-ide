@@ -1,6 +1,5 @@
 package com.mobilecoder.ide.feature.build
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,7 +16,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -51,17 +49,17 @@ import com.mobilecoder.ide.core.common.theme.LocalAppPalette
 import java.io.File
 
 /**
- * 软件市场页：软件卡片 + 一键安装 + 阶段进度 / 实时日志 / 取消。
+ * 软件市场（「环境中心」的软件市场分段）：软件卡片 + 一键安装 + 阶段进度 / 实时日志 / 取消。
  *
- * 执行在 [MarketInstaller] 单例里静默进行——离开本页（回构建页、切终端）
- * 安装不中断，返回后通过 [MarketInstaller.state] 继续观察同一任务；
+ * 本函数是嵌入式内容体：路由标题与「构建环境 / 软件市场」分段切换由 [EnvironmentScreen]
+ * 负责，因此**不自带**返回栏 / 页面大标题，也不接管系统返回键。
+ *
+ * 安装仍在 [MarketInstaller] 单例里静默进行——离开本分段（回构建环境、切终端、退出
+ * 环境中心）安装不中断，返回后通过 [MarketInstaller.state] 继续观察同一任务；
  * 同一时间只允许一个安装（单任务模型）。
  */
 @Composable
-fun MarketScreen(
-    onBack: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
+fun MarketScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val state by MarketInstaller.state.collectAsStateWithLifecycle()
@@ -71,37 +69,12 @@ fun MarketScreen(
     // 构建环境自带的 node shim 会遮蔽 /usr/local/bin/node（仅提示，不阻断）
     val nodeShimmed = remember { File(BuildEnvironment.binDir(context), "node").exists() }
 
-    BackHandler(onBack = onBack)
     LaunchedEffect(Unit) { MarketInstaller.refreshInstalled(context) }
     LaunchedEffect(state.activeId, state.message) {
         if (state.activeId == null) linuxReady = Proot.isReady(context)
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-
-        // ---------------- 顶栏：返回 + 标题 ----------------
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "软件市场",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
-                Text(
-                    text = "一键安装到 Linux 环境，无需命令行",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
 
         LazyColumn(
             modifier = Modifier
@@ -110,6 +83,13 @@ fun MarketScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            item(key = "intro") {
+                Text(
+                    text = "一键安装到 Linux 环境，无需命令行",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             if (!linuxReady) {
                 item(key = "linux-env") { LinuxEnvBanner() }
             }
