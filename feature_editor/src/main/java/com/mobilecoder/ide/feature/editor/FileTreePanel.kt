@@ -120,7 +120,16 @@ internal fun resolveDropTarget(pos: Offset, bounds: Map<String, Rect>, rows: Lis
     return if (row.isDirectory) row.path else row.node.file.parentFile?.path
 }
 
-private data class DragState(val path: String, val origin: Offset, val pos: Offset)
+/**
+ * 拖拽状态：[origin] 行左上角（root 坐标，用于把行内指针位置换算成 root 坐标），
+ * [pos] 当前指针位置，[startPos] 拖臂时刻的指针位置——两者相等即「原地长按」。
+ */
+private data class DragState(
+    val path: String,
+    val origin: Offset,
+    val pos: Offset,
+    val startPos: Offset,
+)
 
 private sealed interface NameDialog {
     val title: String
@@ -306,19 +315,25 @@ fun FileTreeDrawer(
                                 onMenu = { menuPath = row.path },
                                 onDragStart = { local ->
                                     val origin = bounds[row.path]?.topLeft ?: Offset.Zero
-                                    drag = DragState(row.path, origin, origin + local)
+                                    val arm = origin + local
+                                    drag = DragState(row.path, origin, arm, arm)
                                 },
                                 onDrag = { local ->
-                                    menuPath = null
                                     val origin = drag?.origin ?: return@TreeRowItem
-                                    drag = drag?.copy(pos = origin + local)
+                                    val pos = origin + local
+                                    // 零位移 move（手势注入器会原样回放同坐标）不算拖动：
+                                    // 不清菜单、不改落点，原地长按弹菜单不受干扰
+                                    if (pos != drag?.pos) {
+                                        menuPath = null
+                                        drag = drag?.copy(pos = pos)
+                                    }
                                 },
                                 onDragEnd = {
                                     val state = drag
                                     drag = null
-                                    // 原地长按（弹菜单、零位移）不构成拖放：直接忽略，
+                                    // 拖臂后零位移（原地长按弹菜单）不构成拖放：直接忽略，
                                     // 连落点解析都不做，杜绝按陈旧坐标误移动文件
-                                    if (state != null && state.pos != state.origin) {
+                                    if (state != null && state.pos != state.startPos) {
                                         val target = resolveDropTarget(state.pos, bounds, rows)
                                         if (target != null &&
                                             target != state.path &&
