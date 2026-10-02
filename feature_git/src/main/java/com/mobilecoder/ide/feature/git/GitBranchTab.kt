@@ -22,6 +22,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -62,6 +63,8 @@ fun BranchTab(
 
     var showCreate by rememberSaveable { mutableStateOf(false) }
     var newName by rememberSaveable { mutableStateOf("") }
+    /** 新建分支起始点："" = 从 HEAD 创建，否则为所选本地分支名。 */
+    var newSource by rememberSaveable { mutableStateOf("") }
     var mergeTarget by rememberSaveable { mutableStateOf("") }
     var deleteTarget by rememberSaveable { mutableStateOf("") }
     var checkoutTarget by rememberSaveable { mutableStateOf("") }
@@ -132,22 +135,57 @@ fun BranchTab(
             modifier = Modifier.imePadding(),
             title = { Text("新建分支") },
             text = {
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = { newName = it },
-                    label = { Text("分支名") },
-                    placeholder = { Text("feature/xxx") },
-                    singleLine = true,
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                )
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = { newName = it },
+                        label = { Text("分支名") },
+                        placeholder = { Text("feature/xxx") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    // 起始点：默认从 HEAD 创建；可改从任一本地分支创建（原生层接受任意
+                    // revspec，这里只暴露本地分支，覆盖「从哪个分支创建」的主场景）。
+                    Text(
+                        text = "从哪个分支创建",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FilterChip(
+                            selected = newSource.isEmpty(),
+                            onClick = { newSource = "" },
+                            label = { Text("当前 HEAD") },
+                        )
+                        branches.filter { !it.isRemote }.forEach { branch ->
+                            FilterChip(
+                                selected = newSource == branch.name,
+                                onClick = { newSource = branch.name },
+                                label = { Text(branchSourceLabel(branch)) },
+                            )
+                        }
+                    }
+                }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
                         val name = newName.trim()
+                        val start = newSource.trim()
                         showCreate = false
                         newName = ""
-                        scope.launch { runCatching { GitController.createBranch(name) } }
+                        newSource = ""
+                        scope.launch {
+                            runCatching { GitController.createBranch(name, start.ifBlank { null }) }
+                        }
                     },
                     enabled = newName.isNotBlank(),
                 ) { Text("创建") }
@@ -228,21 +266,19 @@ private fun HeadCard(head: GitHead?, merging: Boolean) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = head?.branch?.ifBlank { "（HEAD 尚未指向分支）" } ?: "（无 HEAD）",
+                    text = headTitle(head),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    // 游离态用错误色标出：此时没有「当前分支」，所有分支行都会显示「切换」。
+                    color = if (head?.detached == true) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                if (head?.detached == true) {
-                    Text(
-                        text = "分离 HEAD",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
             }
 
             Row(
@@ -250,8 +286,11 @@ private fun HeadCard(head: GitHead?, merging: Boolean) {
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
             ) {
                 if (head != null) {
-                    StatChip(label = "领先上游", value = "${head.ahead}", emphasize = head.ahead > 0)
-                    StatChip(label = "落后上游", value = "${head.behind}", emphasize = head.behind > 0)
+                    // 游离 HEAD 不在任何分支上，C 层也不会计算领先 / 落后（固定 0），不显示。
+                    if (!head.detached) {
+                        StatChip(label = "领先上游", value = "${head.ahead}", emphasize = head.ahead > 0)
+                        StatChip(label = "落后上游", value = "${head.behind}", emphasize = head.behind > 0)
+                    }
                     if (head.unborn) {
                         StatChip(label = "状态", value = "尚无提交", emphasize = true)
                     }
@@ -262,13 +301,29 @@ private fun HeadCard(head: GitHead?, merging: Boolean) {
             }
 
             Text(
-                text = "当前分支不可删除；点分支行可切换分支，点右侧 ⋮ 可合并 / 删除分支",
+                text = if (head?.detached == true) {
+                    "当前处于分离 HEAD（不在任何分支上），点下方任一分支可回到该分支"
+                } else {
+                    "当前分支不可删除；点分支行可切换分支，点右侧 ⋮ 可合并 / 删除分支"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
         }
     }
 }
+
+/** HeadCard 标题：附着 = 分支名；游离 = 分离 HEAD + 短提交号；未出生 / 无仓库给提示文案。 */
+internal fun headTitle(head: GitHead?): String = when {
+    head == null -> "（无 HEAD）"
+    head.detached -> "分离 HEAD · " + head.branch.ifBlank { "未知提交" }
+    head.branch.isBlank() -> "（HEAD 尚未指向分支）"
+    else -> head.branch
+}
+
+/** 新建分支起始点选项文案：当前分支追加「·当前」标记。 */
+internal fun branchSourceLabel(branch: GitBranch): String =
+    if (branch.isHead) "${branch.name} · 当前" else branch.name
 
 /** 单个分支行：行点击 = 切换分支（带确认），右侧 ⋮ 菜单 = 合并 / 删除。 */
 @Composable
