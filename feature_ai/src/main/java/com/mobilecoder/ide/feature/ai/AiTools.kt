@@ -100,8 +100,12 @@ object AiTools {
         val lines = ArrayList<String>()
         fun walk(current: File, prefix: String, remaining: Int) {
             if (lines.size >= 400 || remaining <= 0) return
+            // 子项相对项目根的深度：区分浅层 build 产物与深层 build 源码包（与树同口径）
+            val childDepth = current.absolutePath
+                .removePrefix(root.absolutePath)
+                .count { it == '/' || it == '\\' } + 1
             val children = FileRepository.listChildren(current, showHidden = false)
-                .filterNot { FileRepository.isIgnored(it.name) }
+                .filterNot { FileRepository.isIgnored(it.name, childDepth) }
             for (child in children) {
                 if (lines.size >= 400) return
                 if (child.isDirectory) {

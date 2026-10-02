@@ -67,6 +67,13 @@ object EditorController {
         val hits: List<FileRepository.SearchHit> = emptyList(),
     )
 
+    /** 快速打开文件面板状态（files = 相对项目根的路径，字典序）。 */
+    data class OpenPickerState(
+        val open: Boolean = false,
+        val loading: Boolean = false,
+        val files: List<String> = emptyList(),
+    )
+
     /** 撤销 / 重做可用状态（对应活动文件，供工具栏按钮点亮）。 */
     data class HistoryAvailability(val canUndo: Boolean, val canRedo: Boolean)
 
@@ -106,6 +113,9 @@ object EditorController {
 
     private val _search = MutableStateFlow(ProjectSearchState())
     val search: StateFlow<ProjectSearchState> = _search.asStateFlow()
+
+    private val _openPicker = MutableStateFlow(OpenPickerState())
+    val openPicker: StateFlow<OpenPickerState> = _openPicker.asStateFlow()
 
     private val _history = MutableStateFlow(HistoryAvailability(false, false))
     val history: StateFlow<HistoryAvailability> = _history.asStateFlow()
@@ -262,7 +272,8 @@ object EditorController {
         if (idx < 0 || hasChildrenLoaded(tree, idx)) return
         val dir = tree[idx]
         val children = withContext(Dispatchers.IO) {
-            FileRepository.listTreeChildren(dir.file).map { it.copy(depth = dir.depth + 1) }
+            FileRepository.listTreeChildren(dir.file, childDepth = dir.depth + 1)
+                .map { it.copy(depth = dir.depth + 1) }
         }
         _tree.value = withChildrenInserted(_tree.value, dirPath, children)
     }
@@ -382,6 +393,43 @@ object EditorController {
         } else if (!silent) {
             showMessage("保存失败，请检查存储权限")
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 快速打开（⋮ 菜单「打开文件」，不必经文件树逐层点开）
+    // ------------------------------------------------------------------
+
+    /** 开 / 关快速打开面板；打开时在 IO 线程刷新项目文件清单。 */
+    fun setOpenPicker(open: Boolean) {
+        if (!open) {
+            _openPicker.value = OpenPickerState()
+            return
+        }
+        val root = _projectRoot.value?.trimEnd('/', '\\')
+        if (root.isNullOrBlank()) {
+            _openPicker.value = OpenPickerState(open = true)
+            showMessage("请先在「项目」页打开一个项目")
+            return
+        }
+        _openPicker.value = OpenPickerState(open = true, loading = true)
+        scope.launch {
+            val files = withContext(Dispatchers.IO) {
+                runCatching { FileRepository.listOpenableFiles(File(root)) }
+                    .getOrDefault(emptyList())
+                    .map { it.path.removePrefix(root).trimStart('/', '\\') }
+            }
+            // 面板可能已被关掉（或重新打开过），只在仍打开时回填
+            if (_openPicker.value.open) {
+                _openPicker.value = OpenPickerState(open = true, loading = false, files = files)
+            }
+        }
+    }
+
+    /** 选中快速打开面板里的文件：关面板并打开。 */
+    fun openPickerFile(relativePath: String) {
+        val root = _projectRoot.value?.trimEnd('/', '\\') ?: return
+        setOpenPicker(false)
+        openFile(File(root, relativePath))
     }
 
     // ------------------------------------------------------------------

@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -31,8 +32,12 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
@@ -40,6 +45,7 @@ import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +54,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -84,7 +91,21 @@ fun EditorTabRow(
     onClose: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val listState = rememberLazyListState()
+    // 活动文件变化（新打开 / 切换 / 关闭后换挡）时把它的 Tab 滚进可视区：
+    // 多文件横排常超出一行宽度，打开文件后必须能看到「当前打开的是哪个 tab」。
+    LaunchedEffect(activePath, tabs) {
+        val index = tabs.indexOfFirst { it.path == activePath }
+        if (index < 0) return@LaunchedEffect
+        val info = listState.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.index == index }
+        val fullyVisible = item != null &&
+            item.offset >= info.viewportStartOffset &&
+            item.offset + item.size <= info.viewportEndOffset
+        if (!fullyVisible) listState.animateScrollToItem(index)
+    }
     LazyRow(
+        state = listState,
         modifier = modifier
             .fillMaxWidth()
             .height(44.dp),
@@ -619,6 +640,12 @@ fun EditorOptionsMenu(
     onDismiss: () -> Unit,
     canUndo: Boolean,
     canRedo: Boolean,
+    onOpenFile: () -> Unit,
+    onSearch: () -> Unit,
+    canSave: Boolean,
+    saveDirty: Boolean,
+    onSave: () -> Unit,
+    onBuild: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onGotoLine: () -> Unit,
@@ -631,6 +658,46 @@ fun EditorOptionsMenu(
     modifier: Modifier = Modifier,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss, modifier = modifier) {
+        // 常用动作（原工具行按钮收纳进 ⋮，见 EditorScreen 工具行）
+        DropdownMenuItem(
+            text = { Text("打开文件") },
+            leadingIcon = {
+                Icon(Icons.Default.FileOpen, contentDescription = null)
+            },
+            onClick = onOpenFile,
+        )
+        DropdownMenuItem(
+            text = { Text("搜索项目") },
+            leadingIcon = {
+                Icon(Icons.Default.Search, contentDescription = null)
+            },
+            onClick = onSearch,
+        )
+        DropdownMenuItem(
+            text = {
+                Text(
+                    text = "保存",
+                    color = if (saveDirty && canSave) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        Color.Unspecified
+                    },
+                )
+            },
+            leadingIcon = {
+                Icon(Icons.Default.Save, contentDescription = null)
+            },
+            enabled = canSave,
+            onClick = onSave,
+        )
+        DropdownMenuItem(
+            text = { Text("构建与运行") },
+            leadingIcon = {
+                Icon(Icons.Default.PlayArrow, contentDescription = null)
+            },
+            onClick = onBuild,
+        )
+        HorizontalDivider()
         DropdownMenuItem(
             text = { Text("撤销上一步") },
             leadingIcon = {

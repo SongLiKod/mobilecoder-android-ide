@@ -98,4 +98,60 @@ class FileRepositoryTreeTest {
         assertEquals(setOf(".circleci", "src"), shown.mapTo(HashSet()) { it.name })
         assertFalse(FileRepository.listTreeChildren(root).any { it.name == ".circleci" })
     }
+
+    @Test
+    fun `listOpenableFiles 列全部文本文件 - 跳过构建产物与二进制`() {
+        newFile("app", "Main.kt") // ✓
+        newFile("README.md") // ✓ 根直下
+        newFile("build", "output.txt") // 构建产物目录 → 过滤
+        newFile(".git", "config") // 隐藏目录 → 过滤
+        newFile("app", "res", "icon.png") // 二进制扩展名 → 过滤
+
+        val rels = FileRepository.listOpenableFiles(root).map {
+            it.path.removePrefix(root.path).trimStart('/', '\\').replace('\\', '/')
+        }
+
+        assertEquals(setOf("README.md", "app/Main.kt"), rels.toSet())
+        // 字典序（大小写不敏感），面板默认序可预期
+        assertEquals(rels.sortedBy { it.lowercase() }, rels)
+    }
+
+    @Test
+    fun `listOpenableFiles 有上限 - 超大项目不卡死`() {
+        repeat(30) { newFile("pkg", "F$it.kt") }
+
+        val files = FileRepository.listOpenableFiles(root, limit = 10)
+
+        assertEquals(10, files.size)
+    }
+
+    @Test
+    fun `listOpenableFiles 默认上限不截断后序模块 - DFS 早截断吃掉整个模块的回归锁`() {
+        // 真机回归：本仓库 third_party(mbedtls) 2400+ 文件排在 feature_* 之前，
+        // 旧默认上限 2000 在此截断 → 快速打开里 feature_editor 的文件全搜不到
+        repeat(2500) { newFile("aaa_vendored", "v$it.c") }
+        newFile("zzz_module", "Screen.kt")
+
+        val files = FileRepository.listOpenableFiles(root)
+
+        assertEquals(2501, files.size)
+        assertTrue(files.any { it.name == "Screen.kt" })
+    }
+
+    @Test
+    fun `同名 build 源码包不被误杀 - 仅浅层 build 算构建产物`() {
+        newFile("app", "build", "R.txt") // 模块产物（深度 2）→ 必须隐藏
+        val src = newFile(
+            "feature_build", "src", "main", "java", "com", "mobilecoder",
+            "ide", "feature", "build", "BuildScreen.kt",
+        ) // 源码包 build（深度 9）→ 曾被整包过滤，feature_build 模块源码全部消失
+
+        val paths = FileRepository.tree(root, maxDepth = 16).map { it.file.path }
+        assertFalse("模块 build 产物应隐藏", paths.contains(File(root, "app/build/R.txt").path))
+        assertTrue("源码包 build 下的文件必须在树里", paths.contains(src.path))
+
+        // 快速打开与全文检索同口径
+        assertTrue(FileRepository.listOpenableFiles(root).any { it.path == src.path })
+        assertTrue(FileRepository.search(root, "BuildScreen").any { it.file.path == src.path })
+    }
 }

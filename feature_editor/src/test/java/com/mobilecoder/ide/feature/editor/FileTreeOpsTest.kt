@@ -175,4 +175,42 @@ class FileTreeOpsTest {
         assertTrue(closed.none { it.path == uiFile.path })
         assertEquals(listOf(File(root, "app").path), closed.map { it.path })
     }
+
+    // ------------------------------------------------------------------
+    // filterOpenPaths：快速打开面板的匹配排序
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `文件名命中优先于仅目录命中`() {
+        val paths = listOf(
+            "app/src/main/App.kt",
+            "app/README.md",
+            "lib/AppHelper.kt",
+            "tools/Appfile",
+        )
+
+        // 「Appfile / AppHelper / App」文件名命中，「app/README.md」只有目录 app 命中 → 排最后
+        assertEquals(
+            listOf("tools/Appfile", "lib/AppHelper.kt", "app/src/main/App.kt", "app/README.md"),
+            filterOpenPaths(paths, "app"),
+        )
+    }
+
+    @Test
+    fun `不区分大小写的子串匹配 - 全路径命中且 limit 截断`() {
+        val paths = listOf("app/Main.kt", "README.md", "lib/util.kt")
+
+        assertEquals(listOf("app/Main.kt"), filterOpenPaths(paths, "MAIN"))
+        assertEquals(listOf("README.md"), filterOpenPaths(paths, "readme"))
+        assertEquals(paths.take(2), filterOpenPaths(paths, "", limit = 2))
+        assertEquals(emptyList<String>(), filterOpenPaths(paths, "zzz"))
+    }
+
+    @Test
+    fun `空查询按原序返回并截断 - 面板默认列出全部`() {
+        val paths = listOf("a/One.kt", "b/Two.kt", "c/Three.kt")
+
+        assertEquals(paths, filterOpenPaths(paths, "  "))
+        assertEquals(paths.take(2), filterOpenPaths(paths, "", limit = 2))
+    }
 }

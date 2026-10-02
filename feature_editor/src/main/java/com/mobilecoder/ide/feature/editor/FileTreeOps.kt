@@ -78,3 +78,27 @@ fun withChildrenInserted(
 /** [tree] 中全部目录的绝对路径（「全部折叠」的目标集合）。 */
 fun directoryPathsOf(tree: List<FileNode>): Set<String> =
     tree.filter { it.isDirectory }.mapTo(LinkedHashSet()) { it.file.path }
+
+/**
+ * 快速打开面板的匹配与排序（纯逻辑，JVM 可测，见 FileTreeOpsTest）。
+ *
+ * [query] 不区分大小写地子串匹配相对路径；**文件名**命中排在仅目录命中之前，
+ * 其次路径更短者优先（同前缀的短路径更可能是目标），同长按字典序。
+ * 空查询按原序返回（调用侧已按字典序）。最多返回 [limit] 条。
+ */
+fun filterOpenPaths(paths: List<String>, query: String, limit: Int = 500): List<String> {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return paths.take(limit)
+    fun nameOf(path: String): String =
+        path.substringAfterLast('/').substringAfterLast('\\').lowercase()
+    return paths
+        .asSequence()
+        .filter { it.lowercase().contains(q) }
+        .sortedWith(
+            compareByDescending<String> { nameOf(it).contains(q) }
+                .thenBy { it.length }
+                .thenBy { it.lowercase() },
+        )
+        .take(limit)
+        .toList()
+}

@@ -41,10 +41,13 @@ object FileRepository {
     /**
      * 项目树口径的目录直系子项：在 [listChildren] 之上再过滤构建产物 / VCS 内部目录。
      * `tree()` 与文件树「展开时按需补载」共用同一口径，保证两处列出的内容一致。
+     *
+     * [childDepth] = 子项相对项目根的深度（root 直下为 1），供 [isIgnored] 区分
+     * 「浅层 build 产物目录」与「深层 build 源码包名」。
      */
-    fun listTreeChildren(dir: File, showHidden: Boolean = false): List<FileNode> {
+    fun listTreeChildren(dir: File, showHidden: Boolean = false, childDepth: Int = 1): List<FileNode> {
         val children = listChildren(dir, showHidden)
-        return if (showHidden) children else children.filterNot { isIgnored(it.name) }
+        return if (showHidden) children else children.filterNot { isIgnored(it.name, childDepth) }
     }
 
     /** 递归构建项目树（到 [maxDepth] 层为止，自动跳过构建产物）。 */
@@ -52,7 +55,7 @@ object FileRepository {
         val out = ArrayList<FileNode>()
         fun walk(dir: File, depth: Int) {
             if (depth > maxDepth) return
-            for (child in listTreeChildren(dir, showHidden)) {
+            for (child in listTreeChildren(dir, showHidden, childDepth = depth)) {
                 out.add(child.copy(depth = depth))
                 if (child.isDirectory) walk(child.file, depth + 1)
             }
@@ -61,8 +64,49 @@ object FileRepository {
         return out
     }
 
-    /** 是否应被项目树隐藏（构建产物 / VCS 内部）。 */
-    fun isIgnored(name: String): Boolean = name in IGNORED_DIRS || name.startsWith(".")
+    /**
+     * 快速打开（编辑器 ⋮ 菜单「打开文件」）用：项目内全部可编辑文本文件。
+     *
+     * 与 [tree] 同口径跳过构建产物 / 隐藏目录，深度上限 24 层；
+     * 按路径字典序返回，最多 [limit] 个。
+     *
+     * **上限必须远大于真实项目规模**：DFS 按「目录优先 + 字典序」遍历，
+     * 截断会静默吃掉排序靠后的整个模块（本仓库 2000 条会在
+     * `core_native/.../third_party`（mbedtls，2400+ 文件）内截断，
+     * 导致 `feature_*` 全部搜不到 —— 真机回归锁见
+     * [listOpenableFiles 默认上限不截断后序模块]）。
+     */
+    fun listOpenableFiles(root: File, limit: Int = 50_000): List<File> {
+        val out = ArrayList<File>()
+        fun walk(dir: File, depth: Int) {
+            if (out.size >= limit || depth > 24) return
+            for (child in listTreeChildren(dir, showHidden = false, childDepth = depth)) {
+                if (out.size >= limit) return
+                if (child.isDirectory) {
+                    walk(child.file, depth + 1)
+                } else if (isTextFile(child.file)) {
+                    out.add(child.file)
+                }
+            }
+        }
+        walk(root, 1)
+        return out.sortedBy { it.path.lowercase() }
+    }
+
+    /**
+     * 是否应被树 / 检索 / 快速打开口径隐藏（构建产物 / VCS 内部）。
+     *
+     * [childDepth] = 被判定项相对项目根的深度（root 直下为 1）。
+     * **`build` 只在浅层（root/ 与模块根/，即深度 ≤ 2）算构建产物**：
+     * 深层同名目录是合法源码包名（如 `feature/build/`），按名字一刀切会让整个
+     * feature_build 模块的源码在树 / 检索 / 快速打开里全部消失（真机回归锁见
+     * FileRepositoryTreeTest「同名 build 源码包不被误杀」）。
+     */
+    fun isIgnored(name: String, childDepth: Int = 1): Boolean {
+        if (name.startsWith(".")) return true
+        if (name !in IGNORED_DIRS) return false
+        return name != "build" || childDepth <= 2
+    }
 
     private val IGNORED_DIRS = setOf(
         "build", ".gradle", ".idea", ".git", "node_modules", ".cxx", ".kotlin", "captures",
@@ -137,7 +181,7 @@ object FileRepository {
             if (hits.size >= limit || depth > 10) return
             for (child in listChildren(dir, showHidden = false)) {
                 if (hits.size >= limit) return
-                if (isIgnored(child.name)) continue
+                if (isIgnored(child.name, childDepth = depth)) continue
                 if (child.isDirectory) {
                     walk(child.file, depth + 1)
                     continue
