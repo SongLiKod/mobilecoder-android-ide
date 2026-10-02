@@ -38,13 +38,21 @@ object FileRepository {
             .toList()
     }
 
+    /**
+     * 项目树口径的目录直系子项：在 [listChildren] 之上再过滤构建产物 / VCS 内部目录。
+     * `tree()` 与文件树「展开时按需补载」共用同一口径，保证两处列出的内容一致。
+     */
+    fun listTreeChildren(dir: File, showHidden: Boolean = false): List<FileNode> {
+        val children = listChildren(dir, showHidden)
+        return if (showHidden) children else children.filterNot { isIgnored(it.name) }
+    }
+
     /** 递归构建项目树（到 [maxDepth] 层为止，自动跳过构建产物）。 */
     fun tree(root: File, maxDepth: Int = 6, showHidden: Boolean = false): List<FileNode> {
         val out = ArrayList<FileNode>()
         fun walk(dir: File, depth: Int) {
             if (depth > maxDepth) return
-            for (child in listChildren(dir, showHidden)) {
-                if (!showHidden && isIgnored(child.name)) continue
+            for (child in listTreeChildren(dir, showHidden)) {
                 out.add(child.copy(depth = depth))
                 if (child.isDirectory) walk(child.file, depth + 1)
             }
