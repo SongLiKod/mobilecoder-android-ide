@@ -149,7 +149,7 @@ class RootfsManagerTest {
         File(staging, "usr/libexec/proot/loader").writeText("loader64")
         File(staging, "usr/lib").mkdirs()
         File(staging, "usr/lib/libtalloc.so.2").writeText("talloc")
-        File(staging, "usr/lib/libtalloc.so.2.4.3").writeText("talloc-real")
+        File(staging, "usr/lib/libtalloc.so.2.5.0").writeText("talloc-real")
         // 应被忽略的目录
         File(staging, "usr/share/doc/proot").mkdirs()
         File(staging, "usr/share/doc/proot/copyright").writeText("license")
@@ -167,7 +167,7 @@ class RootfsManagerTest {
         assertEquals("proot-bin", File(linux, "bin/proot").readText())
         assertEquals("loader64", File(linux, "bin/loader").readText())
         assertEquals("talloc", File(linux, "lib/libtalloc.so.2").readText())
-        assertEquals("talloc-real", File(linux, "lib/libtalloc.so.2.4.3").readText())
+        assertEquals("talloc-real", File(linux, "lib/libtalloc.so.2.5.0").readText())
         assertFalse("usr/share 不应归位", File(linux, "lib/copyright").exists())
         assertFalse("usr/include 不应归位", File(linux, "lib/talloc.h").exists())
     }
