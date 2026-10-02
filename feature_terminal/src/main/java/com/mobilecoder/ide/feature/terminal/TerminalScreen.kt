@@ -38,9 +38,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
-import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -86,8 +84,10 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
@@ -121,6 +121,19 @@ private data class InlineHint(
     val durationMs: Long,
     val seq: Int,
 )
+
+/**
+ * 程序化改写输入框（粘贴 / 历史回填 / 换行键）的统一出口：
+ * 剥 `\r`、截 4000 字，并把光标钉在末尾。
+ *
+ * BasicTextField 外部改 String 值时内部光标不会跟着走（停在原位，多为 0），
+ * 用户接着打字会插到最前面（真机反馈）。改成 [TextFieldValue] 后由这里
+ * 显式指定 selection，保证粘贴 / 历史选择后光标在文本末尾。
+ */
+internal fun programmaticInput(next: String): TextFieldValue {
+    val text = next.filter { it != '\r' }.take(4000)
+    return TextFieldValue(text = text, selection = TextRange(text.length))
+}
 
 /**
  * PRD 2.3「内置终端」页面。
@@ -201,7 +214,10 @@ fun TerminalScreen(
     LaunchedEffect(active?.id, cols, rows) { active?.resize(cols, rows) }
 
     // ---- 输入框状态 ----
-    var input by rememberSaveable { mutableStateOf("") }
+    // TextFieldValue 承载光标/选区：程序化改值（粘贴 / 历史回填）时才能把光标钉到末尾
+    var input by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(""))
+    }
     var ctrlOn by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
 
@@ -234,8 +250,8 @@ fun TerminalScreen(
 
     fun submitLine() {
         val session = active ?: return
-        val text = input
-        input = ""
+        val text = input.text
+        input = TextFieldValue("")
         val exit = session.exitCode.value
         if (exit != null) {
             showInlineHint("会话已退出（code=$exit），请先点击标签上的重启按钮。", isError = true)
@@ -284,7 +300,8 @@ fun TerminalScreen(
             showInlineHint("剪贴板为空", durationMs = 2000L)
             return
         }
-        input = (input + text).filter { it != '\n' && it != '\r' }.take(4000)
+        // 换行保留（多行命令），只剥回车符
+        input = programmaticInput(input.text + text)
     }
 
     // ---- 溢出菜单 / 弹窗状态 ----
@@ -473,29 +490,9 @@ fun TerminalScreen(
                         ctrlOn = false
                     }
                     KeyButton("⌫") { active?.sendBackspace() }
-                }
-                // 键盘图标：键盘可见时收起；不可见时先聚焦输入框再拉起 ——
-                // 没有焦点时 LocalSoftwareKeyboardController.show() 是空操作，
-                // 所以必须先 focusRequester.requestFocus()，否则点了没反应。
-                IconButton(
-                    onClick = {
-                        if (imeVisible) {
-                            keyboard?.hide()
-                        } else {
-                            focusRequester.requestFocus()
-                            keyboard?.show()
-                        }
-                    },
-                ) {
-                    Icon(
-                        imageVector = if (imeVisible) {
-                            Icons.Default.KeyboardHide
-                        } else {
-                            Icons.Default.Keyboard
-                        },
-                        contentDescription = if (imeVisible) "隐藏键盘" else "显示键盘",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    // 换行：往输入框追加真实换行符（多行命令）。输入框不记录光标位置，
+                    // 追加到末尾 —— 与粘贴多行、物理回车的行为一致。
+                    KeyButton("换行") { input = programmaticInput(input.text + "\n") }
                 }
             }
         }
@@ -533,10 +530,14 @@ fun TerminalScreen(
         ) {
             // ↑ 历史命令：展开最近命令列表，点选回填输入框（不自动发送）
             Box {
-                IconButton(onClick = { historyOpen = true }) {
+                IconButton(
+                    onClick = { historyOpen = true },
+                    modifier = Modifier.size(40.dp),
+                ) {
                     Icon(
                         imageVector = Icons.Default.KeyboardArrowUp,
                         contentDescription = "历史命令",
+                        modifier = Modifier.size(20.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -573,14 +574,15 @@ fun TerminalScreen(
                                 DropdownMenuItem(
                                     text = {
                                         Text(
-                                            text = command,
+                                            // 多行记录：换行符显示成 ⏎，单行内看清块结构
+                                            text = command.replace("\n", " ⏎ "),
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                             fontFamily = FontFamily.Monospace,
                                         )
                                     },
                                     onClick = {
-                                        input = command
+                                        input = programmaticInput(command)
                                         historyOpen = false
                                     },
                                 )
@@ -590,17 +592,31 @@ fun TerminalScreen(
                 }
             }
             // 粘贴：剪贴板内容追加到输入框（不自动发送）
-            IconButton(onClick = { pasteFromClipboard() }) {
+            IconButton(
+                onClick = { pasteFromClipboard() },
+                modifier = Modifier.size(40.dp),
+            ) {
                 Icon(
                     imageVector = Icons.Default.ContentPaste,
                     contentDescription = "粘贴",
+                    modifier = Modifier.size(20.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             BasicTextField(
                 value = input,
                 onValueChange = { value ->
-                    input = value.filter { it != '\n' && it != '\r' }.take(4000)
+                    // 多行命令：\n 保留（换行键 / 粘贴 / 物理回车），只剥 \r；
+                    // 发送时整块交给 shell 逐行执行（见 TerminalSession.submitLine）。
+                    // 保留用户光标/选区，只清理文本并按清理后的长度收敛选区。
+                    val cleaned = value.text.filter { it != '\r' }.take(4000)
+                    input = value.copy(
+                        text = cleaned,
+                        selection = TextRange(
+                            value.selection.start.coerceIn(0, cleaned.length),
+                            value.selection.end.coerceIn(0, cleaned.length),
+                        ),
+                    )
                 },
                 modifier = Modifier
                     .weight(1f)
@@ -610,12 +626,13 @@ fun TerminalScreen(
                         RoundedCornerShape(8.dp),
                     )
                     .padding(horizontal = 12.dp, vertical = 10.dp)
-                    // 长命令软换行：约 4 行内自动换行，更长则在框内滚动，
+                    // 多行命令可视区：上限 120dp（约 6 行），超出在框内滚动，
                     // 不让输入框把上方终端区整个顶掉
-                    .heightIn(max = 80.dp)
+                    .heightIn(max = 120.dp)
                     .verticalScroll(rememberScrollState()),
-                // 关键：singleLine=true 会把文本压成一屏横向滚动，长命令看不见全貌。
-                // 换行靠软换行，真实换行符仍在 onValueChange 里被过滤掉（命令永远是单行）。
+                // 关键：singleLine=true 会把文本压成一屏横向滚动，多行命令看不见全貌。
+                // 换行来自「换行」键 / 粘贴 / 物理回车，onValueChange 只剥 \r，\n 保留；
+                // 回车（ImeAction.Send）= 把整块（含换行）发给 shell 逐行执行。
                 singleLine = false,
                 textStyle = TextStyle(
                     color = MaterialTheme.colorScheme.onSurface,
@@ -630,7 +647,7 @@ fun TerminalScreen(
                 keyboardActions = KeyboardActions(onSend = { submitLine() }),
                 decorationBox = { inner ->
                     Box {
-                        if (input.isEmpty()) {
+                        if (input.text.isEmpty()) {
                             Text(
                                 text = "输入命令，发送（回车）执行…",
                                 style = MaterialTheme.typography.bodyMedium,

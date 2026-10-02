@@ -24,6 +24,20 @@ import kotlinx.coroutines.launch
 enum class TerminalSpecialKey { ESC, TAB, UP, DOWN, LEFT, RIGHT, HOME, END, PAGE_UP, PAGE_DOWN }
 
 /**
+ * 多行提交块 → PTY 文本（逐行执行语义）：
+ *
+ *  - 行终止符统一为单个 `\r`（PTY 的 ICRNL 把它映射成 NL 提交一行，与本文件
+ *    其余 Enter 写入 BYTE_CR 一致）；**切勿用 `\r\n`** —— CR 已提交一行，
+ *    紧跟的 LF 会再提交一个空命令，导致每两行之间冒出多余提示符；
+ *  - 末行若无换行则补一个 `\r`；末尾已有换行时不重复补（split 语义下
+ *    末段为空串，天然不重复），避免凭空多执行一个空行。
+ */
+internal fun encodeMultilineSubmit(text: String): String {
+    val normalized = text.replace("\r\n", "\n").replace("\n", "\r")
+    return if (normalized.endsWith("\r")) normalized else normalized + "\r"
+}
+
+/**
  * 一个独立的终端会话（PRD 2.3「多终端窗口并行」）。
  *
  * 每个会话持有：独立 PTY（native 层 sessionId）、独立屏幕缓冲 [emulator]、
@@ -131,6 +145,13 @@ class TerminalSession(
 
     /** 提交一整行（来自底部命令输入框）：先走拦截器，再处理回车。 */
     fun submitLine(text: String) {
+        // 多行块（换行键 / 粘贴多行 / 物理回车）：整块直写 PTY，shell 按行执行
+        // （粘贴语义）。拦截器是单行状态机（本地回显 / 回滚按行），不参与多行；
+        // 因此进程内命令（git）拦截只对单行输入生效，多行块里的 git 交给 shell。
+        if (text.contains('\n')) {
+            writeText(encodeMultilineSubmit(text))
+            return
+        }
         if (text.isNotEmpty()) interceptor.feed(text)
         val intercepted = interceptor.enter()
         if (intercepted != null) runCli(intercepted)
