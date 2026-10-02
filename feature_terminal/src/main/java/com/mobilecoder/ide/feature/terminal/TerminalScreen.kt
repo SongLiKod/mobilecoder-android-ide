@@ -284,7 +284,8 @@ fun TerminalScreen(
             showInlineHint("剪贴板为空", durationMs = 2000L)
             return
         }
-        input = (input + text).filter { it != '\n' && it != '\r' }.take(4000)
+        // 换行保留（多行命令），只剥回车符
+        input = (input + text).filter { it != '\r' }.take(4000)
     }
 
     // ---- 溢出菜单 / 弹窗状态 ----
@@ -473,6 +474,9 @@ fun TerminalScreen(
                         ctrlOn = false
                     }
                     KeyButton("⌫") { active?.sendBackspace() }
+                    // 换行：往输入框追加真实换行符（多行命令）。输入框不记录光标位置，
+                    // 追加到末尾 —— 与粘贴多行、物理回车的行为一致。
+                    KeyButton("换行") { input = input + "\n" }
                 }
                 // 键盘图标：键盘可见时收起；不可见时先聚焦输入框再拉起 ——
                 // 没有焦点时 LocalSoftwareKeyboardController.show() 是空操作，
@@ -573,7 +577,8 @@ fun TerminalScreen(
                                 DropdownMenuItem(
                                     text = {
                                         Text(
-                                            text = command,
+                                            // 多行记录：换行符显示成 ⏎，单行内看清块结构
+                                            text = command.replace("\n", " ⏎ "),
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                             fontFamily = FontFamily.Monospace,
@@ -600,7 +605,9 @@ fun TerminalScreen(
             BasicTextField(
                 value = input,
                 onValueChange = { value ->
-                    input = value.filter { it != '\n' && it != '\r' }.take(4000)
+                    // 多行命令：\n 保留（换行键 / 粘贴 / 物理回车），只剥 \r；
+                    // 发送时整块交给 shell 逐行执行（见 TerminalSession.submitLine）
+                    input = value.filter { it != '\r' }.take(4000)
                 },
                 modifier = Modifier
                     .weight(1f)
@@ -610,12 +617,13 @@ fun TerminalScreen(
                         RoundedCornerShape(8.dp),
                     )
                     .padding(horizontal = 12.dp, vertical = 10.dp)
-                    // 长命令软换行：约 4 行内自动换行，更长则在框内滚动，
+                    // 多行命令可视区：上限 120dp（约 6 行），超出在框内滚动，
                     // 不让输入框把上方终端区整个顶掉
-                    .heightIn(max = 80.dp)
+                    .heightIn(max = 120.dp)
                     .verticalScroll(rememberScrollState()),
-                // 关键：singleLine=true 会把文本压成一屏横向滚动，长命令看不见全貌。
-                // 换行靠软换行，真实换行符仍在 onValueChange 里被过滤掉（命令永远是单行）。
+                // 关键：singleLine=true 会把文本压成一屏横向滚动，多行命令看不见全貌。
+                // 换行来自「换行」键 / 粘贴 / 物理回车，onValueChange 只剥 \r，\n 保留；
+                // 回车（ImeAction.Send）= 把整块（含换行）发给 shell 逐行执行。
                 singleLine = false,
                 textStyle = TextStyle(
                     color = MaterialTheme.colorScheme.onSurface,
