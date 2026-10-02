@@ -9,16 +9,19 @@
  */
 #define _GNU_SOURCE
 #include <jni.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 #include <pty.h>
 
@@ -397,6 +400,87 @@ Java_com_mobilecoder_ide_core_nativebridge_TerminalNative_setEnv(
 }
 
 /*
+ * ———————— 关闭会话清扫（孤儿进程兜底）————————
+ *
+ * 实测（Android 10 / EMUI）：app 进程 SigIgn 含 SIGHUP（继承自 zygote），
+ * fork 出的 proot、以及用户后台任务（如 sleep）同样继承 →
+ * `kill(pid, SIGHUP)` 永远打不死它们；而 forkpty 子进程 setsid() 自成会话，
+ * Android 按进程组杀进程也够不着 → 关闭会话后 proot/bash/后台任务全成
+ * 孤儿，读线程还会卡在 read() 永不回收 → 8 个会话槽位被泄漏后无法再建。
+ *
+ * 解法：destroy 时起一个分离线程按「会话号」全量清扫，先礼后兵：
+ *   1) 对会话内每个进程补一发 SIGHUP（bash 会捕获 →善后 history/作业）；
+ *   2) 500ms 宽限后 SIGKILL 会话内所有仍存活的同 uid 进程，残余再补刀。
+ * /proc/<pid>/stat 的第 6 字段（comm 之后第 4 个）即会话号；他 uid 的
+ * stat 读不到（EACCES）天然跳过，只会命中自己 fork 的进程。
+ */
+
+/** 读取 /proc/<pid>/stat 的会话号；返回 0 成功，-1 不可读/解析失败。 */
+static int mc_read_session(pid_t pid, pid_t *sid_out) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int) pid);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    char buf[1024];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+    /* comm 形如 " (proot)"，可能含空格/右括号 → 以最后一个 ')' 切字段：
+     * 其后为 " S ppid pgrp session …"，即 state、ppid、pgrp、session。 */
+    char *rp = strrchr(buf, ')');
+    if (rp == NULL) return -1;
+    char state;
+    int ppid, pgrp, sid;
+    if (sscanf(rp + 1, " %c %d %d %d", &state, &ppid, &pgrp, &sid) != 4) return -1;
+    (void) state;
+    (void) ppid;
+    (void) pgrp;
+    *sid_out = (pid_t) sid;
+    return 0;
+}
+
+/** 对会话 [sid] 内所有可读（同 uid）进程发 [sig]；返回命中数，-1 表示 /proc 不可遍历。 */
+static int mc_signal_session(pid_t sid, int sig) {
+    DIR *dir = opendir("/proc");
+    if (dir == NULL) return -1;
+    int hit = 0;
+    struct dirent *e;
+    while ((e = readdir(dir)) != NULL) {
+        if (e->d_name[0] < '1' || e->d_name[0] > '9') continue;
+        pid_t pid = (pid_t) atoi(e->d_name);
+        pid_t s = 0;
+        if (mc_read_session(pid, &s) != 0) continue;
+        if (s != sid) continue;
+        if (kill(pid, sig) == 0) hit++;
+    }
+    closedir(dir);
+    return hit;
+}
+
+/** 分离线程：关闭会话的收尾清扫（先 HUP 后 KILL，见上）。 */
+static void *mc_escalate_thread(void *arg) {
+    pid_t sid = (pid_t) (intptr_t) arg;
+    struct timespec ts;
+    ts.tv_sec = 0;
+
+    int n0 = mc_signal_session(sid, SIGHUP);   /* 礼：直接给全会话 HUP（bash 收到即善后） */
+    MC_LOGI("会话 pid=%d 清扫启动：HUP 命中 %d", (int) sid, n0);
+    ts.tv_nsec = 500 * 1000 * 1000L;
+    nanosleep(&ts, NULL);             /* 宽限：给 bash 收尾时间 */
+
+    for (int round = 1; round <= 3; round++) {   /* 兵：SIGKILL 补刀至净 */
+        int n = mc_signal_session(sid, SIGKILL);
+        MC_LOGI("会话 pid=%d 清扫第 %d 轮：SIGKILL 命中 %d", (int) sid, round, n);
+        if (n <= 0) break;
+        ts.tv_nsec = 200 * 1000 * 1000L;
+        nanosleep(&ts, NULL);
+    }
+    MC_LOGI("会话 pid=%d 清扫完成", (int) sid);
+    return NULL;
+}
+
+/*
  * Method:    destroy    Signature: (I)I
  */
 JNIEXPORT jint JNICALL
@@ -412,11 +496,19 @@ Java_com_mobilecoder_ide_core_nativebridge_TerminalNative_destroy(
     }
     t->state = MC_TERMINAL_CLOSING;
     pid_t pid = t->pid;
-    /* 主端 fd 交给读线程回收：kill SIGHUP 终止 shell → 从端关闭 →
-     * 主端 read 返回 EIO/EOF → 读线程清理并回调 onExit。 */
+    /* 主端 fd 交给读线程回收：shell 死亡 → 从端关闭 → 主端 read 返回
+     * EIO/EOF → 读线程清理并回调 onExit（同时回收会话槽位）。 */
     pthread_mutex_unlock(&g_terminal_lock);
 
     kill(pid, SIGHUP);
+    /* SIGHUP 在本环境被继承性忽略（见上方注释）→ 分离线程按会话号清扫兜底 */
+    pthread_t th;
+    int rc = pthread_create(&th, NULL, mc_escalate_thread, (void *) (intptr_t) pid);
+    if (rc == 0) {
+        pthread_detach(th);
+    } else {
+        MC_LOGE("会话 pid=%d 清扫线程创建失败 rc=%d", (int) pid, rc);
+    }
     MC_LOGI("终端会话 %d 已请求关闭", (int) id);
     return 0;
 }

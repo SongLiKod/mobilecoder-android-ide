@@ -76,14 +76,16 @@ object RootfsManager {
     /**
      * Termux 官方仓库的 proot 三件套（固定地址，随 [EnvSource] 不变，
      * **2026-10 实测六个 .deb（2 架构）均 HTTP 200 + ar 魔数**；
-     * proot 上游 2026-10-02 由 5.1.107.95 升至 5.1.107.96，旧地址已 404）。
+     * 上游 2026-10-02 连续升版：proot 5.1.107.95 → 5.1.107.96、
+     * libtalloc 2.4.3 → 2.5.0，旧地址均已 404 —— 后者由
+     * LiveRootfsVerificationTest 实测抓出）。
      */
     fun prootDebUrls(arch: String): List<String> {
         val tuxArch = if (arch == "aarch64") "aarch64" else "x86_64"
         val base = "https://packages.termux.dev/apt/termux-main/pool/main"
         return listOf(
             "$base/p/proot/proot_5.1.107.96_$tuxArch.deb",
-            "$base/libt/libtalloc/libtalloc_2.4.3_$tuxArch.deb",
+            "$base/libt/libtalloc/libtalloc_2.5.0_$tuxArch.deb",
             "$base/liba/libandroid-shmem/libandroid-shmem_0.7_$tuxArch.deb",
         )
     }
@@ -370,7 +372,7 @@ object RootfsManager {
      * 把 Termux deb 的解包产物归位到 `files/linux`：
      * `usr/bin/proot` → `bin/proot`，`usr/libexec/proot/loader[32]` → `bin/loader[32]`，
      * `usr/lib` 下的库 → `lib/`（只取库文件，跳过 include / share / pkgconfig）。
-     * 软链（`libtalloc.so.2 → libtalloc.so.2.4.3`）按目标内容复制成普通文件——
+     * 软链（`libtalloc.so.2 → libtalloc.so.2.5.0`）按目标内容复制成普通文件——
      * soname 文件名保留，动态链接器照常工作。
      *
      * @return 归位的文件数（0 = 包结构不对）

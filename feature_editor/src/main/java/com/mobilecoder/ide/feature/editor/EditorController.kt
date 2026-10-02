@@ -67,6 +67,13 @@ object EditorController {
         val hits: List<FileRepository.SearchHit> = emptyList(),
     )
 
+    /** 快速打开文件面板状态（files = 相对项目根的路径，字典序）。 */
+    data class OpenPickerState(
+        val open: Boolean = false,
+        val loading: Boolean = false,
+        val files: List<String> = emptyList(),
+    )
+
     /** 撤销 / 重做可用状态（对应活动文件，供工具栏按钮点亮）。 */
     data class HistoryAvailability(val canUndo: Boolean, val canRedo: Boolean)
 
@@ -90,6 +97,14 @@ object EditorController {
     private val _collapsedDirs = MutableStateFlow<Set<String>>(emptySet())
     val collapsedDirs: StateFlow<Set<String>> = _collapsedDirs.asStateFlow()
 
+    /** 定位目标：最近一次打开 / 切换到的文件（文件树据此展开 + 滚动 + 高亮）。 */
+    private val _locatePath = MutableStateFlow<String?>(null)
+    val locatePath: StateFlow<String?> = _locatePath.asStateFlow()
+
+    /** 定位脉冲：每次打开 / 切换文件 +1，文件树侧靠它（重新）触发滚动。 */
+    private val _locateTick = MutableStateFlow(0)
+    val locateTick: StateFlow<Int> = _locateTick.asStateFlow()
+
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
@@ -98,6 +113,9 @@ object EditorController {
 
     private val _search = MutableStateFlow(ProjectSearchState())
     val search: StateFlow<ProjectSearchState> = _search.asStateFlow()
+
+    private val _openPicker = MutableStateFlow(OpenPickerState())
+    val openPicker: StateFlow<OpenPickerState> = _openPicker.asStateFlow()
 
     private val _history = MutableStateFlow(HistoryAvailability(false, false))
     val history: StateFlow<HistoryAvailability> = _history.asStateFlow()
@@ -110,6 +128,11 @@ object EditorController {
 
     private var initialized = false
     private var settingsLoaded = false
+
+    /**
+     * 首次加载树后是否需要「默认全部折叠」（仅在 setProject 置位，refreshTree 消费）。
+     */
+    private var collapseByDefault = false
     private val analysisJobs = HashMap<String, Job>()
     private var saveJob: Job? = null
     private var findJob: Job? = null
@@ -158,11 +181,22 @@ object EditorController {
     // 项目 / 文件树
     // ------------------------------------------------------------------
 
+    /**
+     * 初始（eager）建树深度：第 8 层目录的子级不读盘，首次展开时由
+     * [loadChildrenOf] 按需补载。这是「目录树显示不完整」的根因修复点——
+     * `app/src/main/java/com/.../ui` 的文件在第 9 层，曾被 `maxDepth = 8` 整段截断。
+     */
+    private const val MAX_EAGER_DEPTH = 8
+
+    /** 「全部展开」整树重建的深度上限：真实源码路径远小于此值，同时给 IO 一个上界。 */
+    private const val MAX_EXPAND_DEPTH = 32
+
     /** 绑定当前项目（切换项目时关闭旧项目 Tab 并重建文件树）。 */
     fun setProject(path: String) {
         if (path.isBlank() || _projectRoot.value == path) return
         _projectRoot.value = path
         _collapsedDirs.value = emptySet()
+        collapseByDefault = true // 新项目树默认全部折叠（refreshTree 消费）
         _tabs.value = _tabs.value.filter { it.path.startsWith(path) }
         histories.keys.retainAll(_tabs.value.mapTo(HashSet()) { it.path })
         if (_tabs.value.none { it.path == _activePath.value }) {
@@ -177,19 +211,95 @@ object EditorController {
         scope.launch {
             val nodes = withContext(Dispatchers.IO) {
                 runCatching {
-                    FileRepository.tree(File(root), maxDepth = 8, showHidden = false)
+                    FileRepository.tree(File(root), maxDepth = MAX_EAGER_DEPTH, showHidden = false)
                 }.getOrDefault(emptyList())
             }
-            if (_projectRoot.value == root) _tree.value = nodes
+            if (_projectRoot.value != root) return@launch
+            _tree.value = nodes
+            val dirs = directoryPathsOf(nodes)
+            if (collapseByDefault) {
+                collapseByDefault = false
+                _collapsedDirs.value = dirs
+            } else {
+                // 普通刷新：保留用户展开状态，仅清掉已不存在目录的残留折叠项
+                _collapsedDirs.value = _collapsedDirs.value.intersect(dirs)
+            }
         }
     }
 
     fun toggleDirectory(path: String) {
-        _collapsedDirs.value = if (path in _collapsedDirs.value) {
-            _collapsedDirs.value - path
+        val collapsed = _collapsedDirs.value
+        if (path in collapsed) {
+            _collapsedDirs.value = collapsed - path
+            // 展开方向：深层子级可能还没读盘，按需补载（否则展开后是空目录）
+            scope.launch { loadChildrenOf(path) }
         } else {
-            _collapsedDirs.value + path
+            _collapsedDirs.value = collapsed + path
         }
+    }
+
+    /** 全部折叠：树内所有目录收起，只留顶层清单。 */
+    fun collapseAll() {
+        _collapsedDirs.value = directoryPathsOf(_tree.value)
+    }
+
+    /**
+     * 全部展开：清空折叠态，并把未物化的深层子级一次性补齐。
+     *
+     * 只清折叠态是不够的——eager 树到 [MAX_EAGER_DEPTH] 层为止，更深层目录
+     * 「展开却为空」（与单目录展开同理），故收尾用一次更深的整树重建（IO 异步）。
+     */
+    fun expandAll() {
+        _collapsedDirs.value = emptySet()
+        val root = _projectRoot.value ?: return
+        scope.launch {
+            val deep = withContext(Dispatchers.IO) {
+                runCatching {
+                    FileRepository.tree(File(root), maxDepth = MAX_EXPAND_DEPTH, showHidden = false)
+                }.getOrDefault(emptyList())
+            }
+            if (_projectRoot.value == root) _tree.value = deep
+        }
+    }
+
+    /**
+     * 补载 [dirPath] 的子级并按 DFS 不变式插入树中（幂等）。
+     * 目录节点不在树内（刷新未完成 / 树外路径）或子级已物化时为空操作。
+     */
+    private suspend fun loadChildrenOf(dirPath: String) {
+        val tree = _tree.value
+        val idx = tree.indexOfFirst { it.file.path == dirPath }
+        if (idx < 0 || hasChildrenLoaded(tree, idx)) return
+        val dir = tree[idx]
+        val children = withContext(Dispatchers.IO) {
+            FileRepository.listTreeChildren(dir.file, childDepth = dir.depth + 1)
+                .map { it.copy(depth = dir.depth + 1) }
+        }
+        _tree.value = withChildrenInserted(_tree.value, dirPath, children)
+    }
+
+    /**
+     * 打开 / 切换文件 → 目录定位（在目录树里找到该文件）：
+     *  1. 祖先分支全部展开（折叠集合里摘掉祖先链）；
+     *  2. 链式补载路径各级子级（第 9 层以下文件不在 eager 树里，不补载就无从定位）；
+     *  3. [locatePath] + [locateTick] 通知文件树滚动到目标行。
+     *
+     * 树外文件（root 为空或路径不在项目下）不定位。
+     */
+    private fun locateInTree(path: String) {
+        val root = _projectRoot.value?.trimEnd('/')
+        if (root.isNullOrEmpty()) return
+        if (!path.startsWith("$root/")) return
+        val ancestors = ancestorDirPaths(root, path)
+        if (ancestors.isNotEmpty()) {
+            _collapsedDirs.value = _collapsedDirs.value - ancestors.toSet()
+            scope.launch {
+                // 链式：先有父目录节点才能读它的子级，故按浅到深逐级补载
+                for (ancestor in ancestors) loadChildrenOf(ancestor)
+            }
+        }
+        _locatePath.value = path
+        _locateTick.value++
     }
 
     // ------------------------------------------------------------------
@@ -199,6 +309,7 @@ object EditorController {
     /** 打开文件（[targetLine] > 0 时打开后跳转到该行）。 */
     fun openFile(file: File, targetLine: Int = 0) {
         val path = file.absolutePath
+        locateInTree(path)
         val existing = _tabs.value.firstOrNull { it.path == path }
         if (existing != null) {
             _activePath.value = path
@@ -236,6 +347,7 @@ object EditorController {
     fun activate(path: String) {
         if (_tabs.value.any { it.path == path }) {
             _activePath.value = path
+            locateInTree(path)
             refreshHistory()
         }
     }
@@ -281,6 +393,43 @@ object EditorController {
         } else if (!silent) {
             showMessage("保存失败，请检查存储权限")
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 快速打开（⋮ 菜单「打开文件」，不必经文件树逐层点开）
+    // ------------------------------------------------------------------
+
+    /** 开 / 关快速打开面板；打开时在 IO 线程刷新项目文件清单。 */
+    fun setOpenPicker(open: Boolean) {
+        if (!open) {
+            _openPicker.value = OpenPickerState()
+            return
+        }
+        val root = _projectRoot.value?.trimEnd('/', '\\')
+        if (root.isNullOrBlank()) {
+            _openPicker.value = OpenPickerState(open = true)
+            showMessage("请先在「项目」页打开一个项目")
+            return
+        }
+        _openPicker.value = OpenPickerState(open = true, loading = true)
+        scope.launch {
+            val files = withContext(Dispatchers.IO) {
+                runCatching { FileRepository.listOpenableFiles(File(root)) }
+                    .getOrDefault(emptyList())
+                    .map { it.path.removePrefix(root).trimStart('/', '\\') }
+            }
+            // 面板可能已被关掉（或重新打开过），只在仍打开时回填
+            if (_openPicker.value.open) {
+                _openPicker.value = OpenPickerState(open = true, loading = false, files = files)
+            }
+        }
+    }
+
+    /** 选中快速打开面板里的文件：关面板并打开。 */
+    fun openPickerFile(relativePath: String) {
+        val root = _projectRoot.value?.trimEnd('/', '\\') ?: return
+        setOpenPicker(false)
+        openFile(File(root, relativePath))
     }
 
     // ------------------------------------------------------------------

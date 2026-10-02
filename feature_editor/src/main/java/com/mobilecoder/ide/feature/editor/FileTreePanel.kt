@@ -19,10 +19,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DriveFileMove
@@ -31,6 +33,8 @@ import androidx.compose.material.icons.filled.FileCopy
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.UnfoldLess
+import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -42,6 +46,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,6 +62,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -64,6 +72,7 @@ import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.SectionHeader
 import com.mobilecoder.ide.core.storage.FileNode
 import java.io.File
+import kotlinx.coroutines.delay
 
 /** 文件树可见行（含缩进层级与展开状态）。 */
 data class TreeRow(
@@ -97,18 +106,30 @@ fun buildTreeRows(tree: List<FileNode>, collapsed: Set<String>): List<TreeRow> {
     return rows
 }
 
-/** 拖拽落点解析：命中的行是目录则直接作为目标，是文件则取其所在目录。 */
-private fun resolveDropTarget(pos: Offset, bounds: Map<String, Rect>): String? {
-    for ((path, rect) in bounds) {
-        if (rect.contains(pos)) {
-            val file = File(path)
-            return if (file.isDirectory) path else file.parentFile?.path
-        }
-    }
-    return null
+/**
+ * 拖拽落点解析：命中的行是目录则直接作为目标，是文件则取其所在目录。
+ *
+ * 只按**当前行序列** [rows] 匹配（与拖拽高亮同源）：[bounds] 是坐标簿，
+ * 行离开组合即被清掉（TreeRowItem 的 DisposableEffect），避免陈旧 rect 让
+ * 拖拽按历史坐标把文件移动到看不见的目录。
+ *
+ * internal 仅为单测可见（DropTargetResolveTest 锁「陈旧坐标簿不参与解析」）。
+ */
+internal fun resolveDropTarget(pos: Offset, bounds: Map<String, Rect>, rows: List<TreeRow>): String? {
+    val row = rows.firstOrNull { r -> bounds[r.path]?.contains(pos) == true } ?: return null
+    return if (row.isDirectory) row.path else row.node.file.parentFile?.path
 }
 
-private data class DragState(val path: String, val origin: Offset, val pos: Offset)
+/**
+ * 拖拽状态：[origin] 行左上角（root 坐标，用于把行内指针位置换算成 root 坐标），
+ * [pos] 当前指针位置，[startPos] 拖臂时刻的指针位置——两者相等即「原地长按」。
+ */
+private data class DragState(
+    val path: String,
+    val origin: Offset,
+    val pos: Offset,
+    val startPos: Offset,
+)
 
 private sealed interface NameDialog {
     val title: String
@@ -128,8 +149,10 @@ private sealed interface NameDialog {
 
 /**
  * 项目文件树抽屉（PRD 2.2「项目树目录」）：
- * 点击打开 / 收起展开，长按弹出菜单（新建文件 / 新建目录 / 重命名 / 删除 / 移动），
+ * 点击打开 / 收起展开，长按弹出菜单（新建文件 / 新建目录 / 重命名 / 复制路径 / 删除 / 移动），
  * 长按拖拽移动文件到目标目录。
+ * 顶部提供「全部折叠 / 全部展开」切换（新项目默认全部折叠）；
+ * 打开 / 切换文件时按 [EditorController.locatePath] 展开祖先并滚动定位、高亮当前文件。
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -140,7 +163,33 @@ fun FileTreeDrawer(
     val tree by EditorController.tree.collectAsStateWithLifecycle()
     val collapsed by EditorController.collapsedDirs.collectAsStateWithLifecycle()
     val rootPath by EditorController.projectRoot.collectAsStateWithLifecycle()
+    val activePath by EditorController.activePath.collectAsStateWithLifecycle()
+    val locateTick by EditorController.locateTick.collectAsStateWithLifecycle()
     val rows = remember(tree, collapsed) { buildTreeRows(tree, collapsed) }
+    val listState = rememberLazyListState()
+    val clipboard = LocalClipboardManager.current
+    // 顶部「全部折叠 / 全部展开」按钮的目标态：树里还有展开着的目录即显示折叠按钮
+    val anyExpanded = remember(tree, collapsed) {
+        tree.any { it.isDirectory && it.file.path !in collapsed }
+    }
+
+    // 打开 / 切换文件 → 滚动定位到目标行。定位触发的补载是异步的（链式读盘），
+    // 所以每 50ms 重查一次树，直到目标行出现（约 2s 上限，找不到则静默放弃）。
+    LaunchedEffect(locateTick) {
+        val target = EditorController.locatePath.value ?: return@LaunchedEffect
+        repeat(40) {
+            val current = buildTreeRows(
+                EditorController.tree.value,
+                EditorController.collapsedDirs.value,
+            )
+            val idx = current.indexOfFirst { it.path == target }
+            if (idx >= 0) {
+                listState.scrollToItem(idx)
+                return@LaunchedEffect
+            }
+            delay(50)
+        }
+    }
 
     var menuPath by remember { mutableStateOf<String?>(null) }
     var createMenuOpen by remember { mutableStateOf(false) }
@@ -150,10 +199,7 @@ fun FileTreeDrawer(
     var drag by remember { mutableStateOf<DragState?>(null) }
     val bounds = remember { mutableStateMapOf<String, Rect>() }
 
-    val dropTargetPath = drag?.let { state ->
-        rows.firstOrNull { row -> bounds[row.path]?.contains(state.pos) == true }
-            ?.let { if (it.isDirectory) it.path else it.node.file.parentFile?.path }
-    }
+    val dropTargetPath = drag?.let { state -> resolveDropTarget(state.pos, bounds, rows) }
 
     Box(modifier = modifier.fillMaxSize()) {
         Box(
@@ -219,6 +265,23 @@ fun FileTreeDrawer(
                             )
                         }
                     }
+                    // 全部折叠 / 全部展开（互斥切换；新项目默认折叠态）
+                    IconButton(
+                        onClick = {
+                            if (anyExpanded) EditorController.collapseAll()
+                            else EditorController.expandAll()
+                        },
+                        modifier = Modifier.size(40.dp),
+                    ) {
+                        Icon(
+                            imageVector = if (anyExpanded) {
+                                Icons.Default.UnfoldLess
+                            } else {
+                                Icons.Default.UnfoldMore
+                            },
+                            contentDescription = if (anyExpanded) "全部折叠" else "全部展开",
+                        )
+                    }
                     IconButton(onClick = { EditorController.refreshTree() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "刷新")
                     }
@@ -233,13 +296,14 @@ fun FileTreeDrawer(
                         subtitle = "可长按空白处新建文件",
                     )
                 } else {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         items(rows, key = { it.path }) { row ->
                             TreeRowItem(
                                 row = row,
                                 bounds = bounds,
                                 drag = drag,
                                 dropTargetPath = dropTargetPath,
+                                highlighted = row.path == activePath,
                                 onTap = {
                                     if (row.isDirectory) {
                                         EditorController.toggleDirectory(row.path)
@@ -251,18 +315,26 @@ fun FileTreeDrawer(
                                 onMenu = { menuPath = row.path },
                                 onDragStart = { local ->
                                     val origin = bounds[row.path]?.topLeft ?: Offset.Zero
-                                    drag = DragState(row.path, origin, origin + local)
+                                    val arm = origin + local
+                                    drag = DragState(row.path, origin, arm, arm)
                                 },
                                 onDrag = { local ->
-                                    menuPath = null
                                     val origin = drag?.origin ?: return@TreeRowItem
-                                    drag = drag?.copy(pos = origin + local)
+                                    val pos = origin + local
+                                    // 零位移 move（手势注入器会原样回放同坐标）不算拖动：
+                                    // 不清菜单、不改落点，原地长按弹菜单不受干扰
+                                    if (pos != drag?.pos) {
+                                        menuPath = null
+                                        drag = drag?.copy(pos = pos)
+                                    }
                                 },
                                 onDragEnd = {
                                     val state = drag
                                     drag = null
-                                    if (state != null) {
-                                        val target = resolveDropTarget(state.pos, bounds)
+                                    // 拖臂后零位移（原地长按弹菜单）不构成拖放：直接忽略，
+                                    // 连落点解析都不做，杜绝按陈旧坐标误移动文件
+                                    if (state != null && state.pos != state.startPos) {
+                                        val target = resolveDropTarget(state.pos, bounds, rows)
                                         if (target != null &&
                                             target != state.path &&
                                             target != File(state.path).parentFile?.path
@@ -293,6 +365,12 @@ fun FileTreeDrawer(
 
                                         TreeAction.RENAME -> nameDialog =
                                             NameDialog.Rename(node.file.path, node.name)
+
+                                        TreeAction.COPY_PATH -> {
+                                            val path = node.file.absolutePath
+                                            clipboard.setText(AnnotatedString(path))
+                                            EditorController.showMessage("已复制路径到剪贴板")
+                                        }
 
                                         TreeAction.DELETE -> pendingDelete = node
                                         TreeAction.MOVE -> pendingMove = node
@@ -344,7 +422,7 @@ fun FileTreeDrawer(
     pendingMove?.let { node ->
         MoveDialog(
             node = node,
-            rows = rows,
+            tree = tree,
             rootPath = rootPath,
             onPick = { dir ->
                 pendingMove = null
@@ -355,7 +433,7 @@ fun FileTreeDrawer(
     }
 }
 
-private enum class TreeAction { NEW_FILE, NEW_DIRECTORY, RENAME, DELETE, MOVE }
+private enum class TreeAction { NEW_FILE, NEW_DIRECTORY, RENAME, COPY_PATH, DELETE, MOVE }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -364,6 +442,7 @@ private fun TreeRowItem(
     bounds: MutableMap<String, Rect>,
     drag: DragState?,
     dropTargetPath: String?,
+    highlighted: Boolean,
     onTap: () -> Unit,
     onMenu: () -> Unit,
     onDragStart: (Offset) -> Unit,
@@ -375,6 +454,12 @@ private fun TreeRowItem(
 ) {
     val isDragging = drag?.path == row.path
     val isTarget = !isDragging && dropTargetPath == row.path && row.isDirectory
+
+    // 行离开组合（折叠 / 刷新 / 滚出视口）时同步清掉坐标簿里的旧 rect，
+    // 否则拖拽落点会按历史坐标解析到看不见的目录（曾把 ui 目录误移动到 app/ 下）。
+    DisposableEffect(row.path) {
+        onDispose { bounds.remove(row.path) }
+    }
 
     Box(
         modifier = Modifier
@@ -397,6 +482,8 @@ private fun TreeRowItem(
                 when {
                     isTarget -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
                     isDragging -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                    // 当前打开的文件：淡主色底，便于在树里一眼定位
+                    highlighted -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f)
                     else -> Color.Transparent
                 },
             )
@@ -472,6 +559,11 @@ private fun TreeRowItem(
                 onClick = { onMenuItem(TreeAction.MOVE) },
             )
             DropdownMenuItem(
+                text = { Text("复制路径") },
+                leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
+                onClick = { onMenuItem(TreeAction.COPY_PATH) },
+            )
+            DropdownMenuItem(
                 text = { Text("删除") },
                 leadingIcon = {
                     Icon(
@@ -520,22 +612,22 @@ private fun NameInputDialog(
     )
 }
 
-/** 移动目标目录选择。 */
+/** 移动目标目录选择（取全量树而非可见行：默认折叠时可见行几乎只有顶层）。 */
 @Composable
 private fun MoveDialog(
     node: FileNode,
-    rows: List<TreeRow>,
+    tree: List<FileNode>,
     rootPath: String?,
     onPick: (FileNode) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val candidates = remember(rows, rootPath) {
+    val candidates = remember(tree, rootPath) {
         buildList {
             rootPath?.let { root ->
                 add(FileNode(File(root).name, File(root), true, 0L, 0))
             }
-            rows.filter { it.isDirectory && it.path != node.file.path }.forEach {
-                add(it.node)
+            tree.filter { it.isDirectory && it.file.path != node.file.path }.forEach {
+                add(it)
             }
         }
     }

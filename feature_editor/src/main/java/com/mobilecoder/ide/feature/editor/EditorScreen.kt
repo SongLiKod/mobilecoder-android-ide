@@ -23,9 +23,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -90,6 +87,7 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
     val find by EditorController.find.collectAsStateWithLifecycle()
     val message by EditorController.message.collectAsStateWithLifecycle()
     val history by EditorController.history.collectAsStateWithLifecycle()
+    val openPicker by EditorController.openPicker.collectAsStateWithLifecycle()
     val palette = LocalAppPalette.current
     val colors = remember(palette) { highlightColorsOf(palette) }
 
@@ -116,7 +114,8 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
     val matchCount = remember(text, find.query) { findMatchesOf(text, find.query).size }
 
     Column(modifier = modifier.fillMaxSize()) {
-        // ---------------- 工具行：文件树开关 + Tab + 查找 / 检索 / 保存 / 设置 ----------------
+        // ---------------- 工具行：文件树开关 + Tab + ⋮ 菜单 ----------------
+        // 打开文件 / 搜索 / 保存 / 构建已收纳进 ⋮（触控目标窄，动作归一处）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -145,43 +144,11 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                 },
                 modifier = Modifier.weight(1f),
             )
-            IconButton(onClick = {
-                searchOpen = true
-                EditorController.setSearchOpen(true)
-            }) {
-                Icon(
-                    imageVector = Icons.Default.Search,
-                    contentDescription = "检索",
-                    tint = if (searchOpen) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
-                )
-            }
-            IconButton(onClick = { EditorController.saveActive() }, enabled = activeTab != null) {
-                Icon(
-                    imageVector = Icons.Default.Save,
-                    contentDescription = "保存",
-                    tint = if (activeTab?.dirty == true) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
-            }
-            IconButton(onClick = onOpenBuild) {
-                Icon(
-                    imageVector = Icons.Default.PlayArrow,
-                    contentDescription = "构建与运行",
-                    tint = MaterialTheme.colorScheme.onSurface,
-                )
-            }
             Box {
                 IconButton(onClick = { menuOpen = true }) {
                     Icon(
                         imageVector = Icons.Default.MoreVert,
-                        contentDescription = "编辑器设置",
+                        contentDescription = "更多操作",
                         tint = MaterialTheme.colorScheme.onSurface,
                     )
                 }
@@ -191,6 +158,25 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                     onDismiss = { menuOpen = false },
                     canUndo = history.canUndo,
                     canRedo = history.canRedo,
+                    onOpenFile = {
+                        menuOpen = false
+                        EditorController.setOpenPicker(true)
+                    },
+                    onSearch = {
+                        menuOpen = false
+                        searchOpen = true
+                        EditorController.setSearchOpen(true)
+                    },
+                    canSave = activeTab != null,
+                    saveDirty = activeTab?.dirty == true,
+                    onSave = {
+                        menuOpen = false
+                        EditorController.saveActive()
+                    },
+                    onBuild = {
+                        menuOpen = false
+                        onOpenBuild()
+                    },
                     onUndo = {
                         menuOpen = false
                         activeTab?.let { EditorController.undo(it.path) }
@@ -234,7 +220,7 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
             when {
                 activeTab == null -> EmptyState(
                     title = "没有打开的文件",
-                    subtitle = "点按左上角文件树图标浏览项目，或用检索查找文件",
+                    subtitle = "点按左上角文件树浏览项目，或用右上角 ⋮ 菜单「打开文件」按名称打开",
                     modifier = Modifier.align(Alignment.Center),
                 )
 
@@ -280,6 +266,13 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                             EditorController.setFindOpen(true)
                         }
                     },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+
+            if (openPicker.open) {
+                OpenFileOverlay(
+                    onDismiss = { EditorController.setOpenPicker(false) },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -725,6 +718,102 @@ private fun ProjectSearchOverlay(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 快速打开文件（⋮ 菜单「打开文件」，不必经文件树逐层点开）
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun OpenFileOverlay(
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val picker by EditorController.openPicker.collectAsStateWithLifecycle()
+    var query by remember { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+    val matched = remember(picker.files, query) { filterOpenPaths(picker.files, query) }
+
+    Column(modifier = modifier.background(MaterialTheme.colorScheme.background)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                placeholder = { Text("输入文件名，快速打开项目文件") },
+                textStyle = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(focusRequester),
+            )
+            IconButton(onClick = onDismiss) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "关闭",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        // 自动聚焦：面板一开即可直接输入
+        LaunchedEffect(Unit) {
+            runCatching { focusRequester.requestFocus() }
+        }
+
+        when {
+            picker.loading -> EmptyState(title = "正在加载文件列表…")
+
+            picker.files.isEmpty() -> EmptyState(
+                title = "没有可打开的文件",
+                subtitle = "项目里没有可编辑的文本文件",
+            )
+
+            matched.isEmpty() -> EmptyState(title = "没有匹配的文件")
+
+            else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                items(matched) { relPath ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { EditorController.openPickerFile(relPath) }
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.InsertDriveFile,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 10.dp),
+                        ) {
+                            Text(
+                                text = relPath.substringAfterLast('/'),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = relPath,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }
