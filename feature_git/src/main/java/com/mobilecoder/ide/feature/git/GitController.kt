@@ -705,16 +705,26 @@ object GitController {
 
     // ---------------- 分支 ----------------
 
-    suspend fun createBranch(name: String): Boolean = withRepo(false) {
+    /**
+     * 创建分支。
+     *
+     * @param start 起始点 revspec（本地 / 远程分支、标签、提交号）；null / 空表示从
+     *   HEAD 创建（HEAD 游离时即从游离提交创建）。
+     */
+    suspend fun createBranch(name: String, start: String? = null): Boolean = withRepo(false) {
         if (!ensureOpen()) return@withRepo false
         if (name.isBlank()) {
             postError("分支名不能为空")
             return@withRepo false
         }
-        val ok = runCatching { GitNative.createBranch(name.trim(), null) }.getOrDefault(false)
+        val from = start?.trim()?.takeIf { it.isNotEmpty() }
+        val ok = runCatching { GitNative.createBranch(name.trim(), from) }.getOrDefault(false)
         if (ok) {
             refreshLocked(all = true)
-            postInfo("已创建分支 " + name.trim())
+            postInfo(
+                if (from != null) "已创建分支 ${name.trim()}（从 $from）"
+                else "已创建分支 ${name.trim()}"
+            )
         } else {
             postError("创建分支失败：" + nativeError("分支可能已存在"))
         }
