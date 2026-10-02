@@ -84,8 +84,10 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
@@ -119,6 +121,19 @@ private data class InlineHint(
     val durationMs: Long,
     val seq: Int,
 )
+
+/**
+ * 程序化改写输入框（粘贴 / 历史回填 / 换行键）的统一出口：
+ * 剥 `\r`、截 4000 字，并把光标钉在末尾。
+ *
+ * BasicTextField 外部改 String 值时内部光标不会跟着走（停在原位，多为 0），
+ * 用户接着打字会插到最前面（真机反馈）。改成 [TextFieldValue] 后由这里
+ * 显式指定 selection，保证粘贴 / 历史选择后光标在文本末尾。
+ */
+internal fun programmaticInput(next: String): TextFieldValue {
+    val text = next.filter { it != '\r' }.take(4000)
+    return TextFieldValue(text = text, selection = TextRange(text.length))
+}
 
 /**
  * PRD 2.3「内置终端」页面。
@@ -199,7 +214,10 @@ fun TerminalScreen(
     LaunchedEffect(active?.id, cols, rows) { active?.resize(cols, rows) }
 
     // ---- 输入框状态 ----
-    var input by rememberSaveable { mutableStateOf("") }
+    // TextFieldValue 承载光标/选区：程序化改值（粘贴 / 历史回填）时才能把光标钉到末尾
+    var input by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(""))
+    }
     var ctrlOn by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
 
@@ -232,8 +250,8 @@ fun TerminalScreen(
 
     fun submitLine() {
         val session = active ?: return
-        val text = input
-        input = ""
+        val text = input.text
+        input = TextFieldValue("")
         val exit = session.exitCode.value
         if (exit != null) {
             showInlineHint("会话已退出（code=$exit），请先点击标签上的重启按钮。", isError = true)
@@ -283,7 +301,7 @@ fun TerminalScreen(
             return
         }
         // 换行保留（多行命令），只剥回车符
-        input = (input + text).filter { it != '\r' }.take(4000)
+        input = programmaticInput(input.text + text)
     }
 
     // ---- 溢出菜单 / 弹窗状态 ----
@@ -474,7 +492,7 @@ fun TerminalScreen(
                     KeyButton("⌫") { active?.sendBackspace() }
                     // 换行：往输入框追加真实换行符（多行命令）。输入框不记录光标位置，
                     // 追加到末尾 —— 与粘贴多行、物理回车的行为一致。
-                    KeyButton("换行") { input = input + "\n" }
+                    KeyButton("换行") { input = programmaticInput(input.text + "\n") }
                 }
             }
         }
@@ -512,10 +530,14 @@ fun TerminalScreen(
         ) {
             // ↑ 历史命令：展开最近命令列表，点选回填输入框（不自动发送）
             Box {
-                IconButton(onClick = { historyOpen = true }) {
+                IconButton(
+                    onClick = { historyOpen = true },
+                    modifier = Modifier.size(40.dp),
+                ) {
                     Icon(
                         imageVector = Icons.Default.KeyboardArrowUp,
                         contentDescription = "历史命令",
+                        modifier = Modifier.size(20.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -560,7 +582,7 @@ fun TerminalScreen(
                                         )
                                     },
                                     onClick = {
-                                        input = command
+                                        input = programmaticInput(command)
                                         historyOpen = false
                                     },
                                 )
@@ -570,10 +592,14 @@ fun TerminalScreen(
                 }
             }
             // 粘贴：剪贴板内容追加到输入框（不自动发送）
-            IconButton(onClick = { pasteFromClipboard() }) {
+            IconButton(
+                onClick = { pasteFromClipboard() },
+                modifier = Modifier.size(40.dp),
+            ) {
                 Icon(
                     imageVector = Icons.Default.ContentPaste,
                     contentDescription = "粘贴",
+                    modifier = Modifier.size(20.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -581,8 +607,16 @@ fun TerminalScreen(
                 value = input,
                 onValueChange = { value ->
                     // 多行命令：\n 保留（换行键 / 粘贴 / 物理回车），只剥 \r；
-                    // 发送时整块交给 shell 逐行执行（见 TerminalSession.submitLine）
-                    input = value.filter { it != '\r' }.take(4000)
+                    // 发送时整块交给 shell 逐行执行（见 TerminalSession.submitLine）。
+                    // 保留用户光标/选区，只清理文本并按清理后的长度收敛选区。
+                    val cleaned = value.text.filter { it != '\r' }.take(4000)
+                    input = value.copy(
+                        text = cleaned,
+                        selection = TextRange(
+                            value.selection.start.coerceIn(0, cleaned.length),
+                            value.selection.end.coerceIn(0, cleaned.length),
+                        ),
+                    )
                 },
                 modifier = Modifier
                     .weight(1f)
@@ -613,7 +647,7 @@ fun TerminalScreen(
                 keyboardActions = KeyboardActions(onSend = { submitLine() }),
                 decorationBox = { inner ->
                     Box {
-                        if (input.isEmpty()) {
+                        if (input.text.isEmpty()) {
                             Text(
                                 text = "输入命令，发送（回车）执行…",
                                 style = MaterialTheme.typography.bodyMedium,
