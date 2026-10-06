@@ -135,6 +135,7 @@ import com.mobilecoder.ide.feature.ai.AiScreen
 import com.mobilecoder.ide.feature.build.BuildScreen
 import com.mobilecoder.ide.feature.build.EnvironmentScreen
 import com.mobilecoder.ide.feature.history.HistoryScreen
+import com.mobilecoder.ide.feature.editor.EditorController
 import com.mobilecoder.ide.feature.editor.EditorScreen
 import com.mobilecoder.ide.feature.git.GitController
 import com.mobilecoder.ide.feature.git.GitHead
@@ -425,7 +426,15 @@ fun AppRoot(
                 composable(AppDestination.AI.route) {
                     SubPage(AppDestination.AI, onBack = { navController.popBackStack() }) {
                         ProjectGuard(onGoHome = { navController.navigateTo(AppDestination.HOME.route) }) { path ->
-                            AiScreen(projectPath = path)
+                            AiScreen(
+                                projectPath = path,
+                                currentFilePath = EditorController.activePath
+                                    .collectAsStateWithLifecycle().value,
+                                onOpenFile = { rel, _ ->
+                                    EditorController.openFile(File(path, rel))
+                                    navController.navigateTo(AppDestination.EDITOR.route)
+                                },
+                            )
                         }
                     }
                 }

@@ -168,6 +168,14 @@ class AppPreferences(
 
     // ---------------- AI 助手（OpenAI 兼容接口：/chat/completions） ----------------
 
+    /**
+     * 多接口配置 JSON（原样读写；结构与加密由 feature_ai 的 AiProviderStore 负责，
+     * 其中 apiKey 字段以 CryptoBox 密文保存）。null = 从未配置过（读取时触发旧单配置迁移）。
+     */
+    suspend fun aiProvidersJson(): String? = get(KEY_AI_PROVIDERS)
+    suspend fun setAiProvidersJson(value: String) = set(KEY_AI_PROVIDERS, value)
+
+    /** 旧版单接口配置（仅用于迁移进多接口结构，UI 不再读取）。 */
     suspend fun aiBaseUrl(): String = get(KEY_AI_BASE_URL) ?: "https://api.openai.com/v1"
     suspend fun setAiBaseUrl(value: String) = set(KEY_AI_BASE_URL, value.trim())
 
@@ -178,6 +186,21 @@ class AppPreferences(
     suspend fun aiApiKey(): String = decryptOrEmpty(get(KEY_AI_KEY))
     suspend fun setAiApiKey(value: String) =
         set(KEY_AI_KEY, if (value.isEmpty()) "" else crypto.encryptToString(value))
+
+    /**
+     * AI 每轮写入前弹确认（默认关；`delete_path` 永远确认，与本开关无关）。
+     * 确认拒绝后仅跳过本轮写类操作，其余读/列操作照常执行。
+     */
+    suspend fun aiConfirmWrites(): Boolean = get(KEY_AI_CONFIRM_WRITES) == "1"
+    suspend fun setAiConfirmWrites(value: Boolean) =
+        set(KEY_AI_CONFIRM_WRITES, if (value) "1" else "0")
+
+    /**
+     * 自定义 system prompt（"" = 使用内置默认）。支持 `{project}`（项目根绝对路径）与
+     * `{projectName}`（项目目录名）占位符，发送前由 AiController 替换。
+     */
+    suspend fun aiSystemPrompt(): String = get(KEY_AI_SYSTEM_PROMPT) ?: ""
+    suspend fun setAiSystemPrompt(value: String) = set(KEY_AI_SYSTEM_PROMPT, value)
 
     // ---------------- 内部 ----------------
 
@@ -236,5 +259,8 @@ class AppPreferences(
         private val KEY_AI_BASE_URL = stringPreferencesKey("ai_base_url")
         private val KEY_AI_MODEL = stringPreferencesKey("ai_model")
         private val KEY_AI_KEY = stringPreferencesKey("ai_api_key_enc")
+        private val KEY_AI_PROVIDERS = stringPreferencesKey("ai_providers_json")
+        private val KEY_AI_CONFIRM_WRITES = stringPreferencesKey("ai_confirm_writes")
+        private val KEY_AI_SYSTEM_PROMPT = stringPreferencesKey("ai_system_prompt")
     }
 }

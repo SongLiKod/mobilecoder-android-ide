@@ -22,6 +22,20 @@ object AiTools {
     private const val DEFAULT_READ_LINES = 400
     private const val MAX_READ_LINES = 2000
 
+    /** 工具中文名（确认弹窗 / 事件行共用）。 */
+    fun displayName(name: String): String = when (name) {
+        "list_files" -> "列出"
+        "read_file" -> "读取"
+        "write_file" -> "写入"
+        "search_replace" -> "替换"
+        "delete_path" -> "删除"
+        else -> name
+    }
+
+    /** 会改写项目文件的工具（需快照保护；delete 恒需确认）。 */
+    fun isMutating(name: String): Boolean =
+        name == "write_file" || name == "search_replace" || name == "delete_path"
+
     /** OpenAI function-calling 工具 schema。 */
     fun schemas(): JSONArray = JSONArray(
         listOf(
