@@ -1,7 +1,8 @@
-package com.mobilecoder.ide.feature.ai
+﻿package com.mobilecoder.ide.feature.ai
 
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -12,15 +13,13 @@ import org.json.JSONObject
  * OpenAI 兼容接口客户端（`POST {baseUrl}/chat/completions`，SSE 流式）。
  *
  * 纯 `HttpURLConnection` 实现（项目不引入 OkHttp），支持：
- *  - `stream=true`：逐 delta 回调 [onDelta]，同时累积 `tool_calls`；
+ *  - `stream=true`：走 delta 回调 [onDelta]，同时累积 `tool_calls`；
  *  - 非标准服务端：若响应没有 SSE 行，整包按普通 JSON completion 解析（容错）；
- *  - 错误：状态码 + 服务端 message → 中文提示（401/404/429/5xx 分类）；
+ *  - **结构化错误**：一律抛 [AiApiException]（含 [AiErrorKind] / 状态码 / 是否可重试），
+ *    供 AiController 做额度用尽 → 自动切换接口与模型的容灾决策；
  *  - 取消：[cancelActive] 断开连接，阻塞读立即失败并结束本轮。
  */
 object AiClient {
-
-    /** 一次回复：完整文本 + 工具调用（按 index 归并）。 */
-    data class Reply(val content: String, val toolCalls: List<ApiToolCall>)
 
     @Volatile
     private var active: HttpURLConnection? = null
@@ -33,30 +32,20 @@ object AiClient {
     /**
      * 发起一次流式对话。
      *
-     * @param config   接口配置
+     * @param endpoint 目标接口（地址 + 模型 + Key）
      * @param messages 完整上下文（含 system / user / assistant / tool）
      * @param tools    工具 schema 数组；空数组则不传 tools 字段
      * @param onDelta  文本增量回调（IO 线程）
+     * @throws AiApiException 分类后的失败（额度 / Key / 模型 / 超时 / 网络 / 服务端）
      */
     suspend fun chat(
-        config: AiConfig,
+        endpoint: AiEndpoint,
         messages: List<ApiMessage>,
         tools: JSONArray,
         onDelta: (String) -> Unit,
-    ): Reply = withContext(Dispatchers.IO) {
-        val payload = buildRequest(config, messages, tools)
-        val conn = (URL(config.endpoint).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            connectTimeout = 30_000
-            readTimeout = 300_000
-            setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            setRequestProperty("Accept", "text/event-stream, application/json")
-            if (config.apiKey.isNotBlank()) {
-                setRequestProperty("Authorization", "Bearer ${config.apiKey}")
-            }
-        }
-        active = conn
+    ): AiReply = withContext(Dispatchers.IO) {
+        val payload = buildRequest(endpoint, messages, tools)
+        val conn = open(endpoint)
         try {
             conn.outputStream.use { out ->
                 out.write(payload.toByteArray(Charsets.UTF_8))
@@ -67,9 +56,72 @@ object AiClient {
                 val body = runCatching {
                     conn.errorStream?.bufferedReader()?.use { it.readText() }
                 }.getOrNull().orEmpty()
-                throw IOException(humanError(code, body))
+                throw httpError(code, body)
             }
             parseResponse(conn, onDelta)
+        } catch (e: AiApiException) {
+            throw e
+        } catch (e: SocketTimeoutException) {
+            throw AiApiException(AiErrorKind.TIMEOUT, 0, "连接超时（${endpoint.label}）", retryable = true, cause = e)
+        } catch (e: IOException) {
+            // 取消（disconnect）与真实网络故障都表现为 IOException，
+            // 取消由 AiController 的 cancelling 标志兜底，这里按可重试网络错误分类。
+            throw AiApiException(
+                AiErrorKind.NETWORK,
+                0,
+                "网络错误：${e.message ?: "连接失败"}",
+                retryable = true,
+                cause = e,
+            )
+        } finally {
+            runCatching { conn.disconnect() }
+            if (active === conn) active = null
+        }
+    }
+
+    /**
+     * 连通性测试：发一条 `max_tokens=1` 的最短非流式请求。
+     *
+     * @return 成功时返回服务端回显的简短结果（如 `ok`），失败抛 [AiApiException]。
+     */
+    suspend fun test(endpoint: AiEndpoint): String = withContext(Dispatchers.IO) {
+        val payload = JSONObject()
+            .put("model", endpoint.model)
+            .put("stream", false)
+            .put("max_tokens", 1)
+            .put("messages", JSONArray(listOf(JSONObject().put("role", "user").put("content", "hi"))))
+            .toString()
+        val conn = open(endpoint, stream = false)
+        try {
+            conn.outputStream.use { out ->
+                out.write(payload.toByteArray(Charsets.UTF_8))
+                out.flush()
+            }
+            val code = conn.responseCode
+            val body = runCatching {
+                (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader()?.use { it.readText() }
+            }.getOrNull().orEmpty()
+            if (code !in 200..299) throw httpError(code, body)
+            val json = runCatching { JSONObject(body) }.getOrElse {
+                throw AiApiException(AiErrorKind.PARSE, code, "响应不是合法 JSON", retryable = false, cause = it)
+            }
+            if (json.has("error")) {
+                throw AiApiException(AiErrorKind.PARSE, code, errorText(json), retryable = false)
+            }
+            "连接正常"
+        } catch (e: AiApiException) {
+            throw e
+        } catch (e: SocketTimeoutException) {
+            throw AiApiException(AiErrorKind.TIMEOUT, 0, "连接超时", retryable = true, cause = e)
+        } catch (e: IOException) {
+            throw AiApiException(
+                AiErrorKind.NETWORK,
+                0,
+                "网络错误：${e.message ?: "连接失败"}",
+                retryable = true,
+                cause = e,
+            )
         } finally {
             runCatching { conn.disconnect() }
             if (active === conn) active = null
@@ -77,16 +129,35 @@ object AiClient {
     }
 
     // ------------------------------------------------------------------
-    // 请求体
+    // 连接与请求体
     // ------------------------------------------------------------------
 
+    private fun open(endpoint: AiEndpoint, stream: Boolean = true): HttpURLConnection {
+        val conn = (URL(endpoint.endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            connectTimeout = 30_000
+            readTimeout = 300_000
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty(
+                "Accept",
+                if (stream) "text/event-stream, application/json" else "application/json",
+            )
+            if (endpoint.apiKey.isNotBlank()) {
+                setRequestProperty("Authorization", "Bearer ${endpoint.apiKey}")
+            }
+        }
+        active = conn
+        return conn
+    }
+
     private fun buildRequest(
-        config: AiConfig,
+        endpoint: AiEndpoint,
         messages: List<ApiMessage>,
         tools: JSONArray,
     ): String {
         val root = JSONObject()
-            .put("model", config.model)
+            .put("model", endpoint.model)
             .put("stream", true)
             .put("temperature", 0.2)
             .put("messages", JSONArray(messages.map { toJson(it) }))
@@ -136,7 +207,7 @@ object AiClient {
     // 响应解析
     // ------------------------------------------------------------------
 
-    private fun parseResponse(conn: HttpURLConnection, onDelta: (String) -> Unit): Reply {
+    private fun parseResponse(conn: HttpURLConnection, onDelta: (String) -> Unit): AiReply {
         val content = StringBuilder()
         val calls = java.util.TreeMap<Int, CallAcc>()
         var sawSse = false
@@ -158,7 +229,7 @@ object AiClient {
             // 容错：服务端未按 SSE 返回 → 整包当普通 completion 解析
             return parsePlainBody(raw.toString(), onDelta)
         }
-        return Reply(content.toString(), calls.values.map { it.build() })
+        return AiReply(content.toString(), calls.values.map { it.build() })
     }
 
     private fun handleSseChunk(
@@ -169,15 +240,18 @@ object AiClient {
     ) {
         val json = runCatching { JSONObject(data) }.getOrNull() ?: return
         if (json.has("error")) {
-            throw IOException("接口返回错误：${errorText(json)}")
+            throw aiErrorFromPayload(json)
         }
         val choices = json.optJSONArray("choices") ?: return
         if (choices.length() == 0) return
         val delta = choices.getJSONObject(0).optJSONObject("delta") ?: return
 
-        delta.optString("content").takeIf { it.isNotEmpty() }?.let {
-            content.append(it)
-            onDelta(it)
+        // 注意：工具轮常见 `"content": null`，optString 会把 JSON null 变成字符串 "null"，
+        // 必须只接受真实 String，否则回复被污染成 "null"/"nullnull"。
+        val deltaContent = delta.opt("content")
+        if (deltaContent is String && deltaContent.isNotEmpty()) {
+            content.append(deltaContent)
+            onDelta(deltaContent)
         }
         val toolCalls = delta.optJSONArray("tool_calls") ?: return
         for (i in 0 until toolCalls.length()) {
@@ -192,19 +266,27 @@ object AiClient {
     }
 
     /** 非流式 JSON 响应解析（兼容不支持 stream 的代理/服务）。 */
-    private fun parsePlainBody(body: String, onDelta: (String) -> Unit): Reply {
+    private fun parsePlainBody(body: String, onDelta: (String) -> Unit): AiReply {
         val json = runCatching { JSONObject(body) }.getOrNull()
-            ?: throw IOException("无法解析接口响应（既不是 SSE 也不是 JSON）")
-        if (json.has("error")) throw IOException("接口返回错误：${errorText(json)}")
+            ?: throw AiApiException(
+                AiErrorKind.PARSE,
+                0,
+                "无法解析接口响应（既不是 SSE 也不是 JSON）",
+                retryable = false,
+            )
+        if (json.has("error")) throw aiErrorFromPayload(json)
         val choices = json.optJSONArray("choices")
-            ?: throw IOException("接口响应缺少 choices 字段")
-        if (choices.length() == 0) throw IOException("接口返回空 choices")
+            ?: throw AiApiException(AiErrorKind.PARSE, 0, "接口响应缺少 choices 字段", retryable = false)
+        if (choices.length() == 0) {
+            throw AiApiException(AiErrorKind.PARSE, 0, "接口响应空 choices", retryable = false)
+        }
         val message = choices.getJSONObject(0).optJSONObject("message")
-            ?: throw IOException("接口响应缺少 message 字段")
-        val text = message.optString("content")
+            ?: throw AiApiException(AiErrorKind.PARSE, 0, "接口响应缺少 message 字段", retryable = false)
+        // 同 handleSseChunk：content 为 JSON null 时 optString 会返回 "null"，只接受真实文本
+        val text = (message.opt("content") as? String).orEmpty()
         if (text.isNotEmpty()) onDelta(text)
         val calls = ArrayList<ApiToolCall>()
-        val arr = message.optJSONArray("tool_calls") ?: return Reply(text, calls)
+        val arr = message.optJSONArray("tool_calls") ?: return AiReply(text, calls)
         for (i in 0 until arr.length()) {
             val item = arr.getJSONObject(i)
             val fn = item.optJSONObject("function") ?: continue
@@ -216,11 +298,11 @@ object AiClient {
                 ),
             )
         }
-        return Reply(text, calls)
+        return AiReply(text, calls)
     }
 
     // ------------------------------------------------------------------
-    // 错误
+    // 错误分类（容灾轮换的决策依据）
     // ------------------------------------------------------------------
 
     private fun errorText(json: JSONObject): String {
@@ -228,20 +310,74 @@ object AiClient {
         return err.optString("message").ifBlank { err.toString() }
     }
 
-    private fun humanError(code: Int, body: String): String {
-        val detail = runCatching { JSONObject(body) }.getOrNull()?.let { errorText(it) }
-            ?: body.take(300)
-        val hint = when (code) {
-            401, 403 -> "API Key 无效或无权限（检查设置里的 API Key）"
-            404 -> "接口地址或模型不存在（Base URL 需含 /v1，并确认模型名）"
-            408, 429 -> "请求过于频繁或额度不足（稍后再试）"
-            in 500..599 -> "服务端错误（稍后再试）"
-            else -> "请求失败"
-        }
-        return "HTTP $code：$hint${if (detail.isNotBlank()) "；$detail" else ""}"
+    /** 服务端 error 对象（含 type/code 字段）→ 结构化异常。 */
+    private fun aiErrorFromPayload(json: JSONObject): AiApiException {
+        val err = json.optJSONObject("error")
+        val message = errorText(json)
+        val type = (err?.optString("type").orEmpty() + " " + err?.optString("code").orEmpty()).lowercase()
+        val kind = classifyText(message.lowercase() + " " + type)
+        return AiApiException(kind, 0, message, retryable = kind == AiErrorKind.RATE_LIMIT)
     }
 
-    /** `tool_calls` 的流式累积器。 */
+    /** HTTP 状态码 + 响应体 → 结构化异常。 */
+    internal fun httpError(code: Int, body: String): AiApiException {
+        val detail = runCatching { JSONObject(body) }.getOrNull()
+            ?.let { runCatching { errorText(it) }.getOrNull() }
+            ?: body.take(300)
+        val kind: AiErrorKind = when (code) {
+            401, 403 -> AiErrorKind.AUTH
+            402 -> AiErrorKind.QUOTA
+            429 -> if (classifyText(detail.lowercase()) == AiErrorKind.QUOTA) {
+                AiErrorKind.QUOTA
+            } else {
+                AiErrorKind.RATE_LIMIT
+            }
+
+            404 -> AiErrorKind.NOT_FOUND
+            408 -> AiErrorKind.TIMEOUT
+            in 500..599 -> AiErrorKind.SERVER
+            else -> classifyText(detail.lowercase())
+        }
+        return AiApiException(kind, code, humanMessage(code, kind, detail), retryable = retryable(kind))
+    }
+
+    /** 纯文本（无状态码）关键词分类，兜底 UNKNOWN。 */
+    internal fun classifyText(text: String): AiErrorKind = when {
+        "insufficient_quota" in text || "quota" in text -> AiErrorKind.QUOTA
+        "rate limit" in text || "rate_limit" in text || "too many requests" in text -> AiErrorKind.RATE_LIMIT
+        "api key" in text || "unauthorized" in text || "authentication" in text || "permission" in text ->
+            AiErrorKind.AUTH
+
+        "model" in text && ("not found" in text || "does not exist" in text || "invalid" in text) ->
+            AiErrorKind.NOT_FOUND
+
+        "context" in text && "length" in text -> AiErrorKind.CONTEXT
+        else -> AiErrorKind.UNKNOWN
+    }
+
+    /** 同一候选是否允许原地重试（超时/网络/服务端/限流）。 */
+    private fun retryable(kind: AiErrorKind): Boolean = when (kind) {
+        AiErrorKind.TIMEOUT, AiErrorKind.NETWORK, AiErrorKind.SERVER, AiErrorKind.RATE_LIMIT -> true
+        else -> false
+    }
+
+    private fun humanMessage(code: Int, kind: AiErrorKind, detail: String): String {
+        val hint = when (kind) {
+            AiErrorKind.AUTH -> "API Key 无效或无权限（检查该接口的 Key）"
+            AiErrorKind.QUOTA -> "额度已用完（该接口/模型的配额耗尽）"
+            AiErrorKind.RATE_LIMIT -> "请求过于频繁（稍后自动重试）"
+            AiErrorKind.NOT_FOUND -> "接口地址或模型不存在（Base URL 需含 /v1，并确认模型名）"
+            AiErrorKind.TIMEOUT -> "请求超时"
+            AiErrorKind.SERVER -> "服务端错误（稍后再试）"
+            AiErrorKind.CONTEXT -> "上下文过长（请新开会话或缩短输入）"
+            AiErrorKind.NETWORK -> "网络连接失败"
+            AiErrorKind.PARSE, AiErrorKind.UNKNOWN -> "请求失败"
+        }
+        val extra = if (detail.isNotBlank()) "：$detail" else ""
+        return "HTTP $code：$hint$extra"
+    }
+
+    /** `tool_calls` 的流式累加器。 */
     private class CallAcc {
         var id: String = ""
         var name: String = ""
@@ -252,4 +388,52 @@ object AiClient {
             arguments = arguments.toString(),
         )
     }
+}
+
+/**
+ * 结构化接口异常：供容灾轮换分类决策。
+ *
+ * @param kind     错误类别（额度 / Key / 模型 / 超时 / 网络 / 服务端 / 上下文）
+ * @param status   HTTP 状态码（0 = 非 HTTP 层错误，如解析失败）
+ * @param retryable 同一候选是否允许原地重试一次
+ */
+class AiApiException(
+    val kind: AiErrorKind,
+    val status: Int,
+    override val message: String,
+    val retryable: Boolean = false,
+    cause: Throwable? = null,
+) : IOException(message, cause)
+
+/** 接口错误类别（决定「重试 / 换模型 / 换接口 / 直接报错」）。 */
+enum class AiErrorKind {
+    /** 401/403：Key 无效 → 该接口全部模型标记失效。 */
+    AUTH,
+
+    /** 配额耗尽（402 / insufficient_quota）→ 该模型标记失效。 */
+    QUOTA,
+
+    /** 限流（429 短时）→ 可原地重试一次，仍失败标记该模型。 */
+    RATE_LIMIT,
+
+    /** 404 模型或路径不存在 → 该模型标记失效。 */
+    NOT_FOUND,
+
+    /** 超时 → 可重试，不标记。 */
+    TIMEOUT,
+
+    /** 网络中断 → 可重试，不标记。 */
+    NETWORK,
+
+    /** 5xx → 可重试，不标记。 */
+    SERVER,
+
+    /** 上下文超长 → 换模型也难解决，直接报错提示。 */
+    CONTEXT,
+
+    /** 响应解析失败 → 换候选重试。 */
+    PARSE,
+
+    /** 未分类 → 换候选重试一次。 */
+    UNKNOWN,
 }
