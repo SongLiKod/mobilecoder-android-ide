@@ -107,11 +107,29 @@ data class AiEndpoint(
     val label: String get() = "$providerName / $model"
 }
 
-/** 接口预设（设置页一键填写）。 */
+/** 预设分组（设置页分两行展示）。 */
+enum class PresetGroup {
+    /** 国内直连（无需特殊网络环境）。 */
+    DOMESTIC,
+
+    /** 海外平台（需自行解决网络环境）。 */
+    OVERSEAS,
+}
+
+/**
+ * 接口预设（设置页一键填写）。
+ *
+ * @param group 展示分组（国内直连 / 海外）
+ * @param freeTag 是否有免费模型（UI 显示「免费」标记；仅为引导，不承诺永久免费）
+ * @param note 一行备注（注册方式 / 网络提示等）
+ */
 data class AiProviderPreset(
     val name: String,
     val baseUrl: String,
     val models: List<String>,
+    val group: PresetGroup = PresetGroup.DOMESTIC,
+    val freeTag: Boolean = false,
+    val note: String = "",
 )
 
 /**
