@@ -59,6 +59,29 @@ class AppPreferences(
     suspend fun editorAutoSave(): Boolean = get(KEY_EDITOR_AUTOSAVE) != "0"
     suspend fun setEditorAutoSave(value: Boolean) = set(KEY_EDITOR_AUTOSAVE, if (value) "1" else "0")
 
+    /** 文件树是否显示以 `.` 开头的文件 / 目录（.gitignore、.github、.env …），默认显示。 */
+    suspend fun editorShowHiddenFiles(): Boolean = get(KEY_EDITOR_SHOW_HIDDEN) != "0"
+    suspend fun setEditorShowHiddenFiles(value: Boolean) =
+        set(KEY_EDITOR_SHOW_HIDDEN, if (value) "1" else "0")
+
+    /**
+     * 「不显示」的文件 / 目录名（按名称匹配任意层级，默认构建产物三件套）。
+     * 键不存在 = 用默认值；用户清空后写入 `[]`，读出空列表（= 全部显示）。
+     */
+    suspend fun editorHiddenNames(): List<String> {
+        val raw = get(KEY_EDITOR_HIDDEN_NAMES) ?: return DEFAULT_HIDDEN_NAMES
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList { for (i in 0 until array.length()) add(array.getString(i)) }
+        }.getOrDefault(DEFAULT_HIDDEN_NAMES)
+    }
+
+    suspend fun setEditorHiddenNames(names: List<String>) {
+        val array = JSONArray()
+        names.forEach { array.put(it) }
+        set(KEY_EDITOR_HIDDEN_NAMES, array.toString())
+    }
+
     // ---------------- 终端 ----------------
 
     suspend fun terminalFontSize(): Int = getInt(KEY_TERM_FONT, 13)
@@ -181,6 +204,9 @@ class AppPreferences(
     }
 
     companion object {
+        /** 「不显示」名称的内置默认（用户可改，见 [editorHiddenNames]）。 */
+        val DEFAULT_HIDDEN_NAMES = FileRepository.DEFAULT_HIDDEN_NAMES.toList()
+
         private val KEY_LAST_PROJECT = stringPreferencesKey("last_project_path")
         private val KEY_GIT_NAME = stringPreferencesKey("git_user_name")
         private val KEY_GIT_EMAIL = stringPreferencesKey("git_user_email")
@@ -190,6 +216,8 @@ class AppPreferences(
         private val KEY_EDITOR_LINENUM = stringPreferencesKey("editor_line_numbers")
         private val KEY_EDITOR_WRAP = stringPreferencesKey("editor_word_wrap")
         private val KEY_EDITOR_AUTOSAVE = stringPreferencesKey("editor_autosave")
+        private val KEY_EDITOR_SHOW_HIDDEN = stringPreferencesKey("editor_show_hidden_files")
+        private val KEY_EDITOR_HIDDEN_NAMES = stringPreferencesKey("editor_hidden_names")
         private val KEY_TERM_FONT = intPreferencesKey("terminal_font_size")
         private val KEY_TERM_HISTORY = stringPreferencesKey("terminal_history")
         private val KEY_HISTORY = stringPreferencesKey("history_records")

@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,7 +14,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -37,11 +40,13 @@ import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.AlertDialog
@@ -165,6 +170,7 @@ fun FileTreeDrawer(
     val rootPath by EditorController.projectRoot.collectAsStateWithLifecycle()
     val activePath by EditorController.activePath.collectAsStateWithLifecycle()
     val locateTick by EditorController.locateTick.collectAsStateWithLifecycle()
+    val settings by EditorController.settings.collectAsStateWithLifecycle()
     val rows = remember(tree, collapsed) { buildTreeRows(tree, collapsed) }
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
@@ -196,6 +202,7 @@ fun FileTreeDrawer(
     var nameDialog by remember { mutableStateOf<NameDialog?>(null) }
     var pendingDelete by remember { mutableStateOf<FileNode?>(null) }
     var pendingMove by remember { mutableStateOf<FileNode?>(null) }
+    var hiddenNamesDialogOpen by remember { mutableStateOf(false) }
     var drag by remember { mutableStateOf<DragState?>(null) }
     val bounds = remember { mutableStateMapOf<String, Rect>() }
 
@@ -294,9 +301,10 @@ fun FileTreeDrawer(
                     EmptyState(
                         title = "项目暂无文件",
                         subtitle = "可长按空白处新建文件",
+                        modifier = Modifier.weight(1f),
                     )
                 } else {
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(state = listState, modifier = Modifier.weight(1f)) {
                         items(rows, key = { it.path }) { row ->
                             TreeRowItem(
                                 row = row,
@@ -380,6 +388,39 @@ fun FileTreeDrawer(
                         }
                     }
                 }
+
+                // 显示隐藏文件开关：点开后 .gitignore / .github / .env 等点开头文件、目录可见；
+                // 「自定义…」维护「不显示」名单（默认 build / node_modules / captures）
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "显示隐藏文件",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = { hiddenNamesDialogOpen = true },
+                        modifier = Modifier.height(32.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text(
+                            text = "自定义…",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                        )
+                    }
+                    Switch(
+                        checked = settings.showHiddenFiles,
+                        onCheckedChange = { EditorController.toggleShowHiddenFiles() },
+                    )
+                }
             }
         }
     }
@@ -431,9 +472,67 @@ fun FileTreeDrawer(
             onDismiss = { pendingMove = null },
         )
     }
+
+    if (hiddenNamesDialogOpen) {
+        HiddenNamesDialog(
+            initial = settings.hiddenNames,
+            onConfirm = { names ->
+                hiddenNamesDialogOpen = false
+                EditorController.setHiddenNames(names)
+            },
+            onDismiss = { hiddenNamesDialogOpen = false },
+        )
+    }
 }
 
 private enum class TreeAction { NEW_FILE, NEW_DIRECTORY, RENAME, COPY_PATH, DELETE, MOVE }
+
+/**
+ * 「不显示」名单编辑弹窗：每行（或逗号）一个名称，按名匹配任意层级的文件 / 目录。
+ * 保存后经 [EditorController.setHiddenNames] 注入过滤口径并重建树。
+ */
+@Composable
+private fun HiddenNamesDialog(
+    initial: List<String>,
+    onConfirm: (List<String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf(initial.joinToString("\n")) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("不显示的文件 / 目录") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "每行一个名称（也可用逗号分隔），匹配任意层级的同名文件或目录；" +
+                        "留空则全部显示。默认隐藏构建产物 build / node_modules / captures。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 140.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(parseHiddenNames(text)) }) { Text("保存") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/** 名单解析：按行 / 逗号 / 分号切分，去掉路径与空白并去重。 */
+private fun parseHiddenNames(raw: String): List<String> = raw
+    .split('\n', '\r', ',', '，', ';', '；', '、')
+    .map { it.trim().substringAfterLast('/').substringAfterLast('\\') }
+    .filter { it.isNotEmpty() }
+    .distinct()
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

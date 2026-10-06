@@ -50,6 +50,9 @@ object EditorController {
         val lineNumbers: Boolean = true,
         val wordWrap: Boolean = false,
         val autoSave: Boolean = true,
+        val showHiddenFiles: Boolean = true,
+        /** 文件树「不显示」的文件 / 目录名（按名匹配任意层级），默认构建产物三件套。 */
+        val hiddenNames: List<String> = FileRepository.DEFAULT_HIDDEN_NAMES.toList(),
     )
 
     /** 文件内查找状态。 */
@@ -158,13 +161,27 @@ object EditorController {
     private fun loadSettings() {
         scope.launch {
             val prefs = preferencesOrNull() ?: return@launch
-            _settings.value = EditorSettings(
+            val loaded = EditorSettings(
                 fontSize = runCatching { prefs.editorFontSize() }.getOrDefault(14),
                 lineNumbers = runCatching { prefs.editorLineNumbers() }.getOrDefault(true),
                 wordWrap = runCatching { prefs.editorWordWrap() }.getOrDefault(false),
                 autoSave = runCatching { prefs.editorAutoSave() }.getOrDefault(true),
+                showHiddenFiles = runCatching { prefs.editorShowHiddenFiles() }.getOrDefault(true),
+                hiddenNames = runCatching { prefs.editorHiddenNames() }
+                    .getOrDefault(FileRepository.DEFAULT_HIDDEN_NAMES.toList()),
             )
+            val showHiddenChanged = loaded.showHiddenFiles != _settings.value.showHiddenFiles
+            val hiddenNamesChanged = loaded.hiddenNames != _settings.value.hiddenNames
+            _settings.value = loaded
+            applyHiddenNames(loaded.hiddenNames)
+            // 持久化的「显示隐藏文件 / 不显示名单」偏好晚于首次建树加载完成时，按它重建一次
+            if (showHiddenChanged || hiddenNamesChanged) refreshTree()
         }
+    }
+
+    /** 把「不显示」名单注入 [FileRepository]（树 / 检索 / 快速打开 / AI 工具同源生效）。 */
+    private fun applyHiddenNames(names: List<String>) {
+        FileRepository.customHiddenNames = names.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
     }
 
     private fun preferencesOrNull(): AppPreferences? =
@@ -208,10 +225,11 @@ object EditorController {
 
     fun refreshTree() {
         val root = _projectRoot.value ?: return
+        val showHidden = _settings.value.showHiddenFiles
         scope.launch {
             val nodes = withContext(Dispatchers.IO) {
                 runCatching {
-                    FileRepository.tree(File(root), maxDepth = MAX_EAGER_DEPTH, showHidden = false)
+                    FileRepository.tree(File(root), maxDepth = MAX_EAGER_DEPTH, showHidden = showHidden)
                 }.getOrDefault(emptyList())
             }
             if (_projectRoot.value != root) return@launch
@@ -252,10 +270,11 @@ object EditorController {
     fun expandAll() {
         _collapsedDirs.value = emptySet()
         val root = _projectRoot.value ?: return
+        val showHidden = _settings.value.showHiddenFiles
         scope.launch {
             val deep = withContext(Dispatchers.IO) {
                 runCatching {
-                    FileRepository.tree(File(root), maxDepth = MAX_EXPAND_DEPTH, showHidden = false)
+                    FileRepository.tree(File(root), maxDepth = MAX_EXPAND_DEPTH, showHidden = showHidden)
                 }.getOrDefault(emptyList())
             }
             if (_projectRoot.value == root) _tree.value = deep
@@ -272,8 +291,11 @@ object EditorController {
         if (idx < 0 || hasChildrenLoaded(tree, idx)) return
         val dir = tree[idx]
         val children = withContext(Dispatchers.IO) {
-            FileRepository.listTreeChildren(dir.file, childDepth = dir.depth + 1)
-                .map { it.copy(depth = dir.depth + 1) }
+            FileRepository.listTreeChildren(
+                dir.file,
+                showHidden = _settings.value.showHiddenFiles,
+                childDepth = dir.depth + 1,
+            ).map { it.copy(depth = dir.depth + 1) }
         }
         _tree.value = withChildrenInserted(_tree.value, dirPath, children)
     }
@@ -608,6 +630,24 @@ object EditorController {
         val value = !_settings.value.autoSave
         _settings.value = _settings.value.copy(autoSave = value)
         persist { it.setEditorAutoSave(value) }
+    }
+
+    /** 文件树「显示隐藏文件」开关：切换后按新口径重建树（保留用户展开状态）。 */
+    fun toggleShowHiddenFiles() {
+        val value = !_settings.value.showHiddenFiles
+        _settings.value = _settings.value.copy(showHiddenFiles = value)
+        persist { it.setEditorShowHiddenFiles(value) }
+        refreshTree()
+    }
+
+    /** 自定义「不显示」的文件 / 目录名：注入过滤口径后重建树（保留用户展开状态）。 */
+    fun setHiddenNames(names: List<String>) {
+        val cleaned = names.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (cleaned == _settings.value.hiddenNames) return
+        _settings.value = _settings.value.copy(hiddenNames = cleaned)
+        applyHiddenNames(cleaned)
+        persist { it.setEditorHiddenNames(cleaned) }
+        refreshTree()
     }
 
     // ------------------------------------------------------------------

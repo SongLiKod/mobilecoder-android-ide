@@ -39,16 +39,18 @@ object FileRepository {
     }
 
     /**
-     * 项目树口径的目录直系子项：在 [listChildren] 之上再过滤构建产物 / VCS 内部目录。
+     * 项目树口径的目录直系子项：在 [listChildren] 之上再过滤构建产物 / 依赖目录。
      * `tree()` 与文件树「展开时按需补载」共用同一口径，保证两处列出的内容一致。
      *
-     * [childDepth] = 子项相对项目根的深度（root 直下为 1），供 [isIgnored] 区分
+     * [showHidden] = true 时保留以 `.` 开头的文件与目录（.gitignore / .github / .env …），
+     * 但「不显示」名单内的条目（[isArtifact]，默认 [DEFAULT_HIDDEN_NAMES]、可自定义）
+     * **任何口径都过滤**——它们是噪音（build/node_modules 体量极大，eager 建树扫进去会拖垮刷新）。
+     *
+     * [childDepth] = 子项相对项目根的深度（root 直下为 1），供 [isArtifact] 区分
      * 「浅层 build 产物目录」与「深层 build 源码包名」。
      */
-    fun listTreeChildren(dir: File, showHidden: Boolean = false, childDepth: Int = 1): List<FileNode> {
-        val children = listChildren(dir, showHidden)
-        return if (showHidden) children else children.filterNot { isIgnored(it.name, childDepth) }
-    }
+    fun listTreeChildren(dir: File, showHidden: Boolean = false, childDepth: Int = 1): List<FileNode> =
+        listChildren(dir, showHidden).filterNot { isArtifact(it.name, childDepth) }
 
     /** 递归构建项目树（到 [maxDepth] 层为止，自动跳过构建产物）。 */
     fun tree(root: File, maxDepth: Int = 6, showHidden: Boolean = false): List<FileNode> {
@@ -94,23 +96,42 @@ object FileRepository {
     }
 
     /**
-     * 是否应被树 / 检索 / 快速打开口径隐藏（构建产物 / VCS 内部）。
+     * 是否应被树（默认口径）/ 检索 / 快速打开 / AI 工具隐藏：
+     * 以 `.` 开头的隐藏项 + 「不显示」名单（[isArtifact]）。
      *
-     * [childDepth] = 被判定项相对项目根的深度（root 直下为 1）。
+     * 文件树的「显示隐藏文件」开关打开时走 [isArtifact] 而非本口径，
+     * 以便 .gitignore / .github / .env 等可见（见 [listTreeChildren]）。
+     */
+    fun isIgnored(name: String, childDepth: Int = 1): Boolean =
+        name.startsWith(".") || isArtifact(name, childDepth)
+
+    /**
+     * 「不显示」的文件 / 目录名：与「隐藏项」无关，**任何口径（含 showHidden=true）都过滤**。
+     *
+     * 名单 = [customHiddenNames]（用户自定义，由 EditorController 从设置注入；
+     * **null = 未注入用默认，空集 = 用户清空即全部显示**），未注入时取 [DEFAULT_HIDDEN_NAMES]。
+     *
      * **`build` 只在浅层（root/ 与模块根/，即深度 ≤ 2）算构建产物**：
      * 深层同名目录是合法源码包名（如 `feature/build/`），按名字一刀切会让整个
      * feature_build 模块的源码在树 / 检索 / 快速打开里全部消失（真机回归锁见
      * FileRepositoryTreeTest「同名 build 源码包不被误杀」）。
      */
-    fun isIgnored(name: String, childDepth: Int = 1): Boolean {
-        if (name.startsWith(".")) return true
-        if (name !in IGNORED_DIRS) return false
+    fun isArtifact(name: String, childDepth: Int = 1): Boolean {
+        val names = customHiddenNames ?: DEFAULT_HIDDEN_NAMES
+        if (name !in names) return false
         return name != "build" || childDepth <= 2
     }
 
-    private val IGNORED_DIRS = setOf(
-        "build", ".gradle", ".idea", ".git", "node_modules", ".cxx", ".kotlin", "captures",
-    )
+    /** 内置默认的「不显示」名称（构建产物 / 依赖目录），用户可在设置中自定义。 */
+    val DEFAULT_HIDDEN_NAMES = setOf("build", "node_modules", "captures")
+
+    /**
+     * 用户自定义的「不显示」名称（文件 / 目录名，按名匹配任意层级）。
+     * 由 [com.mobilecoder.ide.feature.editor.EditorController] 从偏好注入（进程级）；
+     * 其余调用方（检索 / 快速打开 / AI 工具）经 [isIgnored]、[isArtifact] 自动同源生效。
+     */
+    @Volatile
+    var customHiddenNames: Set<String>? = null
 
     fun isTextFile(file: File): Boolean {
         val ext = file.extension.lowercase()
