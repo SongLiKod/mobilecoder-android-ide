@@ -87,6 +87,10 @@ class AppPreferences(
     suspend fun terminalFontSize(): Int = getInt(KEY_TERM_FONT, 13)
     suspend fun setTerminalFontSize(value: Int) = setInt(KEY_TERM_FONT, value.coerceIn(9, 24))
 
+    /** 终端「常亮屏幕」：开启后终端页不熄屏、不进锁屏（跑长任务时用），默认关。 */
+    suspend fun terminalScreenOn(): Boolean = get(KEY_TERM_SCREEN_ON) == "1"
+    suspend fun setTerminalScreenOn(value: Boolean) = set(KEY_TERM_SCREEN_ON, if (value) "1" else "0")
+
     /** 旧版终端命令历史（仅用于迁移进 [HistoryStore]，新写入已停用）。 */
     suspend fun terminalHistory(): List<String> = jsonArray(KEY_TERM_HISTORY)
 
@@ -219,6 +223,7 @@ class AppPreferences(
         private val KEY_EDITOR_SHOW_HIDDEN = stringPreferencesKey("editor_show_hidden_files")
         private val KEY_EDITOR_HIDDEN_NAMES = stringPreferencesKey("editor_hidden_names")
         private val KEY_TERM_FONT = intPreferencesKey("terminal_font_size")
+        private val KEY_TERM_SCREEN_ON = stringPreferencesKey("terminal_screen_on")
         private val KEY_TERM_HISTORY = stringPreferencesKey("terminal_history")
         private val KEY_HISTORY = stringPreferencesKey("history_records")
         private val KEY_BUILD_VARIANT = stringPreferencesKey("build_variant")
