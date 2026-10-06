@@ -30,6 +30,7 @@ class FileRepositoryTreeTest {
 
     @After
     fun tearDown() {
+        FileRepository.customHiddenNames = null // 不让用例间的进程级注入互相污染
         root.deleteRecursively()
     }
 
@@ -97,6 +98,52 @@ class FileRepositoryTreeTest {
 
         assertEquals(setOf(".circleci", "src"), shown.mapTo(HashSet()) { it.name })
         assertFalse(FileRepository.listTreeChildren(root).any { it.name == ".circleci" })
+    }
+
+    @Test
+    fun `showHidden 模式显示点开头文件与目录 - 但仍过滤构建产物`() {
+        newDir(".circleci")
+        newFile(".gitignore")
+        newDir("src")
+        newDir("build") // 构建产物：任何口径都不进树
+        newDir("node_modules")
+
+        val shown = FileRepository.listTreeChildren(root, showHidden = true)
+        assertEquals(listOf(".circleci", "src", ".gitignore"), shown.map { it.name })
+
+        val nodes = FileRepository.tree(root, maxDepth = 4, showHidden = true)
+        assertTrue("隐藏目录应在树内", nodes.any { it.name == ".circleci" })
+        assertTrue("隐藏文件应在树内", nodes.any { it.name == ".gitignore" })
+        assertTrue("build 不进树", nodes.none { it.name == "build" })
+        assertTrue("node_modules 不进树", nodes.none { it.name == "node_modules" })
+    }
+
+    @Test
+    fun `customHiddenNames 用户自定义名单替换默认 - 只过滤名单内名称`() {
+        newDir("gen")
+        newDir("build")
+        newFile(".gitignore")
+
+        FileRepository.customHiddenNames = setOf("gen", "build")
+        val shown = FileRepository.listTreeChildren(root, showHidden = true)
+        assertEquals(listOf(".gitignore"), shown.map { it.name })
+
+        // 名单是全量替换：清空 = 全部显示（连 build 也显示）
+        FileRepository.customHiddenNames = emptySet()
+        val all = FileRepository.listTreeChildren(root, showHidden = true)
+        assertEquals(listOf("build", "gen", ".gitignore"), all.map { it.name })
+    }
+
+    @Test
+    fun `customHiddenNames 未注入时用内置默认 - 构建产物仍隐藏`() {
+        newDir("build")
+        newDir("node_modules")
+        newDir("src")
+
+        val shown = FileRepository.listTreeChildren(root, showHidden = true)
+
+        assertEquals(listOf("src"), shown.map { it.name })
+        assertEquals(setOf("build", "node_modules", "captures"), FileRepository.DEFAULT_HIDDEN_NAMES)
     }
 
     @Test
