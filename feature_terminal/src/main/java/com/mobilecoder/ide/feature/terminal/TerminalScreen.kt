@@ -1,5 +1,7 @@
 package com.mobilecoder.ide.feature.terminal
 
+import android.app.Activity
+import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -36,6 +38,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -54,6 +57,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -75,8 +79,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -147,7 +153,7 @@ internal fun programmaticInput(next: String): TextFieldValue {
  *  - 长按选中复制（SelectionContainer）、scrollback 竖向滚动 + 自动贴底；
  *  - 鼠标报告模式（TUI 开 `?1000/1002/1006`）下触摸转滚轮/点击发给程序，
  *    双指竖滑仍滚本地历史；未开启时手势行为不变；
- *  - 溢出菜单：重命名 / 清屏 / 导出日志 / 关闭全部 / 显示或隐藏按键行。
+ *  - 溢出菜单：重命名 / 清屏 / 导出日志 / 关闭全部 / 常亮屏幕（不熄屏不锁屏）/ 显示或隐藏按键行。
  */
 @Composable
 fun TerminalScreen(
@@ -170,6 +176,33 @@ fun TerminalScreen(
     var fontSize by remember { mutableIntStateOf(13) }
     LaunchedEffect(Unit) {
         runCatching { fontSize = AppStorage.preferences.terminalFontSize() }
+    }
+
+    // ---- 常亮屏幕（AppPreferences 持久化；开关在溢出菜单）----
+    // 开启：FLAG_KEEP_SCREEN_ON 不自动熄屏（也就不会超时进锁屏）；
+    //      FLAG_DISMISS_KEYGUARD 尝试撤销非安全锁屏（滑动锁有效，PIN/图案系统不允许撤销）。
+    // 标志打在 Activity 窗口上，离开终端页（DisposableEffect onDispose）必须清掉。
+    var screenOn by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        runCatching { screenOn = AppStorage.preferences.terminalScreenOn() }
+    }
+    val screenOnFlags = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+        WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+    val context = LocalContext.current
+    val hostView = LocalView.current
+    DisposableEffect(screenOn) {
+        val window = (context as? Activity)?.window
+        if (screenOn) {
+            hostView.keepScreenOn = true
+            window?.addFlags(screenOnFlags)
+        } else {
+            hostView.keepScreenOn = false
+            window?.clearFlags(screenOnFlags)
+        }
+        onDispose {
+            hostView.keepScreenOn = false
+            window?.clearFlags(screenOnFlags)
+        }
     }
 
     // ---- 终端度量：字符宽 / 行高 → cols/rows ----
@@ -394,6 +427,24 @@ fun TerminalScreen(
                     },
                 )
                 HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("常亮屏幕") },
+                    trailingIcon = {
+                        if (screenOn) {
+                            Icon(
+                                Icons.Default.Check,
+                                contentDescription = "已开启",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    },
+                    onClick = {
+                        // 菜单保持展开：勾选状态即时可见（与「按键行」项一致）
+                        screenOn = !screenOn
+                        val next = screenOn
+                        scope.launch { runCatching { AppStorage.preferences.setTerminalScreenOn(next) } }
+                    },
+                )
                 DropdownMenuItem(
                     text = { Text(if (showKeys) "隐藏按键行" else "显示按键行") },
                     onClick = { keysForced = !showKeys },
