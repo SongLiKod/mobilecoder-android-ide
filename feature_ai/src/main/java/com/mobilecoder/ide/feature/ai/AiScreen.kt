@@ -51,6 +51,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -100,6 +101,7 @@ fun AiScreen(
     val providers by AiController.providers.collectAsStateWithLifecycle()
     val confirmWrites by AiController.confirmWrites.collectAsStateWithLifecycle()
     val systemPrompt by AiController.systemPrompt.collectAsStateWithLifecycle()
+    val roundLimit by AiController.roundLimit.collectAsStateWithLifecycle()
 
     var input by rememberSaveable { mutableStateOf("") }
     var settingsView by rememberSaveable { mutableStateOf(false) }
@@ -145,10 +147,12 @@ fun AiScreen(
             config = providers,
             confirmWrites = confirmWrites,
             systemPrompt = systemPrompt,
+            roundLimit = roundLimit,
             onBack = { settingsView = false },
             onSave = { cfg -> scope.launch { AiController.saveProviders(cfg) } },
             onConfirmWritesChange = { v -> scope.launch { AiController.setConfirmWrites(v) } },
             onSaveSystemPrompt = { v -> scope.launch { AiController.saveSystemPrompt(v) } },
+            onSaveRoundLimit = { v -> scope.launch { AiController.setRoundLimit(v) } },
             onTest = { endpoint -> AiController.test(endpoint) },
             modifier = modifier,
         )
@@ -281,26 +285,31 @@ private fun ChatView(
         messages.sumOf { m -> m.events.count { it.ok && AiTools.isMutating(it.name) } }
     }
 
-    // 贴底跟随：用户停留在最后一条附近时才强制滚动（P1-8）
+    // 贴底跟随：在底部（或距底仅差一条）时新内容自动滚最新；用户上滑离开底部则不打扰。
+    // 判据取 total-2 而非 total-1：新 item 刚加入、尚未进入视口时 last.index 为 total-2，
+    // 若按 total-1 判会误判「不在底部」导致新回复不跟随。
     val nearBottom = remember {
         derivedStateOf {
             val info = listState.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull()
-            last == null || last.index >= info.totalItemsCount - 1
+            last == null || last.index >= info.totalItemsCount - 2
         }
     }
     val showJump = remember {
         derivedStateOf {
             val info = listState.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull()
-            last != null && last.index < info.totalItemsCount - 1
+            last != null && info.totalItemsCount > 0 && last.index < info.totalItemsCount - 2
         }
     }
     LaunchedEffect(messages.size, mine?.stage, mine?.text) {
-        val total = listState.layoutInfo.totalItemsCount
-        if (total > 0 && nearBottom.value) {
-            // 大 offset 让末条对齐到底部（滚动到列表末端）
-            listState.scrollToItem(total - 1, scrollOffset = 100_000)
+        withFrameNanos { } // 等新内容完成一帧布局，避免读到上一帧的 layoutInfo
+        if (nearBottom.value) {
+            val total = listState.layoutInfo.totalItemsCount
+            if (total > 0) {
+                // 大 offset 让末条对齐到底部（滚动到列表末端）
+                listState.scrollToItem(total - 1, scrollOffset = 100_000)
+            }
         }
     }
 
