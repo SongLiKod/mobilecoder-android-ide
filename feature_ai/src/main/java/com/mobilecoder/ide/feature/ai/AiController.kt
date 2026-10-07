@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -92,8 +93,12 @@ object AiController {
     val confirmWrites: StateFlow<Boolean> = _confirmWrites.asStateFlow()
 
     /** 单次发送的最大工具调用轮数（0 = 不限制），来自 AppPreferences。 */
-    private val _roundLimit = MutableStateFlow(DEFAULT_ROUND_LIMIT)
+    private val _roundLimit = MutableStateFlow(100_000)
     val roundLimit: StateFlow<Int> = _roundLimit.asStateFlow()
+
+    /** 上下文两级压缩配置（可在设置里自定义），来自 AppPreferences。 */
+    private val _compression = MutableStateFlow(AiCompressionConfig())
+    val compression: StateFlow<AiCompressionConfig> = _compression.asStateFlow()
 
     private val _sessions = MutableStateFlow<List<AiSession>>(emptyList())
     val sessions: StateFlow<List<AiSession>> = _sessions.asStateFlow()
@@ -162,12 +167,43 @@ object AiController {
         if (_currentId.value == null) _currentId.value = parsed.firstOrNull()?.id
     }
 
-    /** 读取多接口配置（含旧单配置迁移）、「写入前确认」开关、自定义 system prompt 与轮数上限。 */
+    /** 读取多接口配置（含旧单配置迁移）、「写入前确认」开关、自定义 system prompt、轮数与压缩配置。 */
     suspend fun refreshConfig() {
         _providers.value = runCatching { AiProviderStore.load() }.getOrDefault(AiProvidersConfig())
         _confirmWrites.value = runCatching { AppStorage.preferences.aiConfirmWrites() }.getOrDefault(false)
         _systemPrompt.value = runCatching { AppStorage.preferences.aiSystemPrompt() }.getOrDefault("")
         _roundLimit.value = runCatching { AppStorage.preferences.aiRoundLimit() }.getOrDefault(DEFAULT_ROUND_LIMIT)
+        _compression.value = runCatching { loadCompression() }.getOrDefault(AiCompressionConfig())
+    }
+
+    private suspend fun loadCompression(): AiCompressionConfig {
+        val defaults = AiCompressionConfig()
+        val prompt = AppStorage.preferences.aiCompactPrompt()
+        return AiCompressionConfig(
+            budgetTokens = AppStorage.preferences.aiContextBudget(),
+            toolKeepRecent = AppStorage.preferences.aiToolKeepRecent(),
+            keepUserSegments = AppStorage.preferences.aiKeepUserSegments(),
+            timeoutSec = AppStorage.preferences.aiCompactTimeoutSec(),
+            summaryMaxChars = AppStorage.preferences.aiCompactSummaryChars(),
+            systemPrompt = prompt.ifBlank { defaults.systemPrompt },
+        )
+    }
+
+    /** 保存上下文压缩配置（逐项落盘 + 生效）。 */
+    suspend fun saveCompression(cfg: AiCompressionConfig) {
+        runCatching {
+            AppStorage.preferences.setAiContextBudget(cfg.budgetTokens)
+            AppStorage.preferences.setAiToolKeepRecent(cfg.toolKeepRecent)
+            AppStorage.preferences.setAiKeepUserSegments(cfg.keepUserSegments)
+            AppStorage.preferences.setAiCompactTimeoutSec(cfg.timeoutSec)
+            AppStorage.preferences.setAiCompactSummaryChars(cfg.summaryMaxChars)
+            val defaults = AiCompressionConfig()
+            AppStorage.preferences.setAiCompactPrompt(
+                cfg.systemPrompt.trim().takeIf { it.isNotBlank() && it != defaults.systemPrompt } ?: "",
+            )
+        }
+        val defaults = AiCompressionConfig()
+        _compression.value = cfg.copy(systemPrompt = cfg.systemPrompt.trim().ifBlank { defaults.systemPrompt })
     }
 
     /** 保存单次发送最大工具调用轮数（0 = 不限制）。 */
@@ -314,11 +350,6 @@ object AiController {
                 }
                 appendMessage(sessionId, AiMessage("user", trimmed))
 
-                // 协议上下文：system + 落盘消息回放（含 tool_calls / tool 结果）
-                val working = ArrayList<ApiMessage>()
-                working += ApiMessage("system", systemPrompt(File(projectRoot)))
-                rebuildContext(sessionId, working)
-
                 val root = File(projectRoot)
                 var successRounds = 0
                 var attempts = 0
@@ -327,6 +358,9 @@ object AiController {
                 val failures = ArrayList<String>()
                 var fatal: String? = null
                 val roundLimit = _roundLimit.value
+
+                // 协议上下文：system [+历史摘要] + 回放（超预算时两级压缩：占位 → 摘要）
+                val working = buildProtocol(sessionId, root, endpoints[ci])
 
                 sendLoop@ while (
                     (roundLimit == 0 || successRounds < roundLimit) &&
@@ -594,15 +628,17 @@ object AiController {
      *
      * 同一条 assistant 消息若带 tool_calls，则按序补上每条调用的回传；
      * 缺失的回传（旧数据 / 中途取消）用占位文本补齐，保证协议合法。
+     * [fromIndex] 之前的前缀已由压缩摘要替代（见 [buildProtocol]），跳过回放。
      */
-    private fun rebuildContext(sessionId: String, working: ArrayList<ApiMessage>) {
-        sessionById(sessionId)?.messages?.forEach { m ->
+    private fun rebuildContext(sessionId: String, working: ArrayList<ApiMessage>, fromIndex: Int = 0) {
+        sessionById(sessionId)?.messages?.forEachIndexed { index, m ->
+            if (index < fromIndex) return@forEachIndexed
             if (m.role == "user") {
                 working += ApiMessage("user", m.content)
-                return@forEach
+                return@forEachIndexed
             }
             // 旧数据里存在“纯工具轮”落盘为空 content 的 assistant 消息：跳过（无 tool_calls 不可单发）
-            if (m.content.isBlank() && m.toolCalls.isEmpty()) return@forEach
+            if (m.content.isBlank() && m.toolCalls.isEmpty()) return@forEachIndexed
             working += ApiMessage(
                 role = "assistant",
                 content = m.content.ifBlank { null },
@@ -617,6 +653,93 @@ object AiController {
                 )
             }
         }
+    }
+
+    /**
+     * 构造发送协议：system [+ 历史压缩摘要] + 回放 [AiSession.compactionUpto] 之后的消息。
+     *
+     * 两级压缩（落盘全量不动，只改本次发送的协议视图，配置见 [AiCompressionConfig]）：
+     *  1. 第一级：较早的工具回传占位（零成本，通常是大头）；
+     *  2. 第二级：仍超预算时，把更早对话压成摘要，
+     *     成功则缓存到会话（下次直接复用），失败降级为占位版、不阻断发送。
+     *  预算为 0 时关闭压缩，全量回放。
+     */
+    private suspend fun buildProtocol(
+        sessionId: String,
+        projectRoot: File,
+        endpoint: AiEndpoint,
+    ): ArrayList<ApiMessage> {
+        var upto = sessionById(sessionId)?.compactionUpto ?: 0
+        var summary = sessionById(sessionId)?.compactionSummary ?: ""
+
+        fun assemble(): ArrayList<ApiMessage> {
+            val working = ArrayList<ApiMessage>()
+            working += ApiMessage("system", systemPrompt(projectRoot))
+            if (summary.isNotBlank()) {
+                working += ApiMessage("assistant", "[上下文摘要]\n$summary")
+            }
+            rebuildContext(sessionId, working, fromIndex = upto)
+            return working
+        }
+
+        val cfg = _compression.value
+        if (cfg.budgetTokens <= 0) return assemble()
+
+        var working = ArrayList(placeholderOldTools(assemble(), cfg.toolKeepRecent))
+        if (estimateProtocol(working) <= cfg.budgetTokens) return working
+
+        // 第二级：摘要（保留最近 keepUserSegments 个 user 段原文）
+        val messages = sessionById(sessionId)?.messages.orEmpty()
+        val cut = compactionCutIndex(messages, upto, cfg.keepUserSegments)
+        if (cut > upto) {
+            _progress.value = AiProgress(
+                sessionId = sessionId,
+                stage = AiStage.REQUESTING,
+                detail = "压缩上下文",
+                round = 1,
+            )
+            val digest = buildString {
+                if (summary.isNotBlank()) append("[更早摘要]\n").append(summary).append('\n')
+                append("[待压缩对话]\n")
+                append(digestText(messages, upto, cut))
+            }
+            val reply = runCatching {
+                withTimeout(cfg.timeoutSec * 1_000L) {
+                    AiClient.chat(
+                        endpoint = endpoint,
+                        messages = listOf(
+                            ApiMessage("system", cfg.systemPrompt),
+                            ApiMessage("user", digest),
+                        ),
+                        tools = JSONArray(),
+                    ) { }
+                }
+            }.getOrNull()
+            val newSummary = reply?.content?.trim()?.take(cfg.summaryMaxChars).orEmpty()
+            if (newSummary.isNotBlank()) {
+                // 旧摘要已并入 digest 输入，直接替换即可
+                upto = cut
+                summary = newSummary
+                updateSessionCompaction(sessionId, upto, summary)
+                working = ArrayList(placeholderOldTools(assemble(), cfg.toolKeepRecent))
+            }
+        }
+        return working
+    }
+
+    /** 落盘压缩状态（摘要缓存；协议视图下次直接复用）。 */
+    private fun updateSessionCompaction(sessionId: String, upto: Int, summary: String) {
+        val list = _sessions.value
+        val sIndex = list.indexOfFirst { it.id == sessionId }
+        if (sIndex < 0) return
+        _sessions.value = list.toMutableList().also {
+            it[sIndex] = it[sIndex].copy(
+                compactionUpto = upto,
+                compactionSummary = summary,
+                updatedAt = System.currentTimeMillis(),
+            )
+        }
+        scope.launch { runCatching { persist() } }
     }
 
     private fun pathOf(call: ApiToolCall): String = runCatching {
@@ -765,6 +888,8 @@ object AiController {
                     .put("id", session.id)
                     .put("title", session.title)
                     .put("updatedAt", session.updatedAt)
+                    .put("compactionUpto", session.compactionUpto)
+                    .put("compactionSummary", session.compactionSummary)
                     .put("messages", messages),
             )
         }
@@ -818,6 +943,8 @@ object AiController {
             title = json.optString("title", "会话"),
             updatedAt = json.optLong("updatedAt", 0L),
             messages = messages,
+            compactionUpto = json.optInt("compactionUpto", 0),
+            compactionSummary = json.optString("compactionSummary").cleanJsonNullArtifact(),
         )
     }
 }
@@ -828,3 +955,51 @@ object AiController {
  */
 internal fun String.cleanJsonNullArtifact(): String =
     if (trim().matches(Regex("^(?:null)+$"))) "" else this
+
+// ---------------------------------------------------------------------------
+// 上下文压缩（两级：旧工具回传占位 → 旧对话摘要）
+// ---------------------------------------------------------------------------
+
+/** 估算 token（中英混合按 ~3.5 字符/token 保守折算）。 */
+internal fun estimateTokens(text: String): Int = text.length * 2 / 7 + 1
+
+/** 旧工具回传的占位文本（第一级压缩替换内容）。 */
+internal const val TOOL_OMITTED =
+    "（较早的工具结果已省略以节省上下文，需要时可重新调用工具获取）"
+
+/**
+ * 第一级：协议列表中较早的 role=tool 回传替换为占位文本。
+ * 只换 content，消息结构（role / toolCallId 配对）原样保留，协议始终合法。
+ */
+internal fun placeholderOldTools(messages: List<ApiMessage>, keepRecent: Int): List<ApiMessage> {
+    val toolIdx = messages.indices.filter { messages[it].role == "tool" }
+    if (toolIdx.size <= keepRecent) return messages
+    val omit = toolIdx.take(toolIdx.size - keepRecent).toHashSet()
+    return messages.mapIndexed { i, m -> if (i in omit) m.copy(content = TOOL_OMITTED) else m }
+}
+
+/** 协议总 token 估算（content + 工具调用参数）。 */
+internal fun estimateProtocol(messages: List<ApiMessage>): Int = messages.sumOf { m ->
+    estimateTokens(m.content.orEmpty()) + m.toolCalls.sumOf { estimateTokens(it.arguments) }
+}
+
+/**
+ * 第二级切分点：保留最近 [keepUserSegs] 个 user 段原文，更早的压成摘要。
+ * 返回进摘要的消息下标；无新内容可压时返回 [minUpto]。
+ */
+internal fun compactionCutIndex(messages: List<AiMessage>, minUpto: Int, keepUserSegs: Int): Int {
+    val userIdxs = messages.indices.filter { messages[it].role == "user" }
+    if (userIdxs.size <= keepUserSegs) return minUpto
+    return maxOf(userIdxs[userIdxs.size - 1 - keepUserSegs], minUpto)
+}
+
+/** 摘要请求的输入：落盘消息 [from, to) 压成一行式文本（工具细节不展开，防爆长）。 */
+internal fun digestText(messages: List<AiMessage>, from: Int, to: Int): String =
+    messages.subList(from.coerceAtLeast(0), to.coerceAtMost(messages.size))
+        .joinToString("\n") { m ->
+            val body = m.content.replace(Regex("\\s+"), " ").trim().take(800)
+            val role = if (m.role == "user") "用户" else "助手"
+            val tools = if (m.toolCalls.isNotEmpty()) "（调用工具 ${m.toolCalls.size} 次）" else ""
+            "$role：$body$tools"
+        }
+        .take(24_000)

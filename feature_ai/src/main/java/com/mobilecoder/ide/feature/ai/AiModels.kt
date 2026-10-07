@@ -231,6 +231,10 @@ data class AiSession(
     val title: String,
     val updatedAt: Long,
     val messages: List<AiMessage> = emptyList(),
+    /** 上下文压缩：已压缩的消息前缀长度（0 = 未压缩；[0, compactionUpto) 由摘要替代回放）。 */
+    val compactionUpto: Int = 0,
+    /** 已压缩前缀的摘要正文（空 = 无摘要）。 */
+    val compactionSummary: String = "",
 )
 
 /** 协议层：发给模型的原始消息。 */
@@ -241,6 +245,36 @@ data class ApiMessage(
     val toolCalls: List<ApiToolCall> = emptyList(),
     /** role=tool 时对应 tool_call id。 */
     val toolCallId: String = "",
+)
+
+// ---------------------------------------------------------------------------
+// 上下文压缩配置（可在 AI 设置界面自定义；默认值参照业界 auto-compact）
+// ---------------------------------------------------------------------------
+
+/** 默认摘要系统提示（参照 Claude Code compact：保留目标/修改/决策/进度/未完成项）。 */
+internal const val DEFAULT_COMPACT_PROMPT =
+    "你是对话历史压缩器。把给出的对话记录压缩成简明中文摘要，必须保留：用户的目标与要求、已完成的修改（文件与要点）、关键决策、当前进度、未完成事项。只输出摘要正文，不要开场白。"
+
+/**
+ * 上下文两级压缩配置。
+ *
+ * 默认值参照业界（Claude Code 在窗口 ~92% 触发 compact、Cline/Roo 默认窗口 80% 可配）：
+ * 移动端免费模型窗口多为 32k~128k，且接口不回报窗口大小，按 32k 窗口留 25% 余量
+ * 取 24000 token 预算；摘要保留最近 2 个用户段、较早的工具回传保留最近 8 条。
+ */
+data class AiCompressionConfig(
+    /** 触发两级压缩的 token 预算（估算）；0 = 关闭压缩（不占位、不摘要）。 */
+    val budgetTokens: Int = 24_000,
+    /** 第一级：保留原文的最近工具回传条数（更早的占位）。 */
+    val toolKeepRecent: Int = 8,
+    /** 第二级：摘要后保留原文的最近 user 段数。 */
+    val keepUserSegments: Int = 2,
+    /** 第二级摘要请求超时（秒）。 */
+    val timeoutSec: Int = 30,
+    /** 摘要正文字数上限。 */
+    val summaryMaxChars: Int = 4_000,
+    /** 摘要生成系统提示（空 = 恢复 [DEFAULT_COMPACT_PROMPT]）。 */
+    val systemPrompt: String = DEFAULT_COMPACT_PROMPT,
 )
 
 /** 模型返回的一次工具调用。 */

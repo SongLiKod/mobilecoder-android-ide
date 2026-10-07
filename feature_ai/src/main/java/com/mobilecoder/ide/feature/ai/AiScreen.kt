@@ -102,6 +102,7 @@ fun AiScreen(
     val confirmWrites by AiController.confirmWrites.collectAsStateWithLifecycle()
     val systemPrompt by AiController.systemPrompt.collectAsStateWithLifecycle()
     val roundLimit by AiController.roundLimit.collectAsStateWithLifecycle()
+    val compression by AiController.compression.collectAsStateWithLifecycle()
 
     var input by rememberSaveable { mutableStateOf("") }
     var settingsView by rememberSaveable { mutableStateOf(false) }
@@ -148,11 +149,13 @@ fun AiScreen(
             confirmWrites = confirmWrites,
             systemPrompt = systemPrompt,
             roundLimit = roundLimit,
+            compression = compression,
             onBack = { settingsView = false },
             onSave = { cfg -> scope.launch { AiController.saveProviders(cfg) } },
             onConfirmWritesChange = { v -> scope.launch { AiController.setConfirmWrites(v) } },
             onSaveSystemPrompt = { v -> scope.launch { AiController.saveSystemPrompt(v) } },
             onSaveRoundLimit = { v -> scope.launch { AiController.setRoundLimit(v) } },
+            onSaveCompression = { c -> scope.launch { AiController.saveCompression(c) } },
             onTest = { endpoint -> AiController.test(endpoint) },
             modifier = modifier,
         )

@@ -206,6 +206,33 @@ class AppPreferences(
     suspend fun aiRoundLimit(): Int = getInt(KEY_AI_ROUND_LIMIT, 100_000)
     suspend fun setAiRoundLimit(value: Int) = setInt(KEY_AI_ROUND_LIMIT, value.coerceIn(0, 1_000_000))
 
+    // ---- 上下文压缩（默认值与 feature_ai 的 AiCompressionConfig 保持一致）----
+
+    /** 触发压缩的 token 预算（0 = 关闭压缩），默认 24000。 */
+    suspend fun aiContextBudget(): Int = getInt(KEY_AI_CONTEXT_BUDGET, 24_000)
+    suspend fun setAiContextBudget(value: Int) = setInt(KEY_AI_CONTEXT_BUDGET, value.coerceIn(0, 1_000_000))
+
+    /** 保留原文的最近工具回传条数，默认 8。 */
+    suspend fun aiToolKeepRecent(): Int = getInt(KEY_AI_TOOL_KEEP_RECENT, 8)
+    suspend fun setAiToolKeepRecent(value: Int) = setInt(KEY_AI_TOOL_KEEP_RECENT, value.coerceIn(0, 100))
+
+    /** 摘要后保留原文的最近 user 段数，默认 2。 */
+    suspend fun aiKeepUserSegments(): Int = getInt(KEY_AI_KEEP_USER_SEGMENTS, 2)
+    suspend fun setAiKeepUserSegments(value: Int) = setInt(KEY_AI_KEEP_USER_SEGMENTS, value.coerceIn(1, 50))
+
+    /** 摘要请求超时（秒），默认 30。 */
+    suspend fun aiCompactTimeoutSec(): Int = getInt(KEY_AI_COMPACT_TIMEOUT_SEC, 30)
+    suspend fun setAiCompactTimeoutSec(value: Int) = setInt(KEY_AI_COMPACT_TIMEOUT_SEC, value.coerceIn(5, 300))
+
+    /** 摘要正文字数上限，默认 4000。 */
+    suspend fun aiCompactSummaryChars(): Int = getInt(KEY_AI_COMPACT_SUMMARY_CHARS, 4_000)
+    suspend fun setAiCompactSummaryChars(value: Int) =
+        setInt(KEY_AI_COMPACT_SUMMARY_CHARS, value.coerceIn(500, 50_000))
+
+    /** 摘要系统提示（空 = 内置默认）。 */
+    suspend fun aiCompactPrompt(): String = get(KEY_AI_COMPACT_PROMPT) ?: ""
+    suspend fun setAiCompactPrompt(value: String) = set(KEY_AI_COMPACT_PROMPT, value)
+
     // ---------------- 内部 ----------------
 
     private suspend fun get(key: Preferences.Key<String>): String? = dataStore.data.first()[key]
@@ -267,5 +294,11 @@ class AppPreferences(
         private val KEY_AI_CONFIRM_WRITES = stringPreferencesKey("ai_confirm_writes")
         private val KEY_AI_SYSTEM_PROMPT = stringPreferencesKey("ai_system_prompt")
         private val KEY_AI_ROUND_LIMIT = intPreferencesKey("ai_round_limit")
+        private val KEY_AI_CONTEXT_BUDGET = intPreferencesKey("ai_context_budget")
+        private val KEY_AI_TOOL_KEEP_RECENT = intPreferencesKey("ai_tool_keep_recent")
+        private val KEY_AI_KEEP_USER_SEGMENTS = intPreferencesKey("ai_keep_user_segments")
+        private val KEY_AI_COMPACT_TIMEOUT_SEC = intPreferencesKey("ai_compact_timeout_sec")
+        private val KEY_AI_COMPACT_SUMMARY_CHARS = intPreferencesKey("ai_compact_summary_chars")
+        private val KEY_AI_COMPACT_PROMPT = stringPreferencesKey("ai_compact_prompt")
     }
 }

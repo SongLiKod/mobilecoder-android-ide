@@ -80,11 +80,13 @@ fun ProviderSettingsView(
     confirmWrites: Boolean,
     systemPrompt: String,
     roundLimit: Int,
+    compression: AiCompressionConfig,
     onBack: () -> Unit,
     onSave: (AiProvidersConfig) -> Unit,
     onConfirmWritesChange: (Boolean) -> Unit,
     onSaveSystemPrompt: (String) -> Unit,
     onSaveRoundLimit: (Int) -> Unit,
+    onSaveCompression: (AiCompressionConfig) -> Unit,
     onTest: suspend (AiEndpoint) -> Result<String>,
     modifier: Modifier = Modifier,
 ) {
@@ -415,6 +417,97 @@ fun ProviderSettingsView(
                             textStyle = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.width(96.dp),
                         )
+                    }
+                }
+            }
+
+            // ---------- 上下文压缩（两级：旧工具回传占位 → 旧对话摘要）----------
+            item {
+                var local by remember(compression) { mutableStateOf(compression) }
+                fun commit(transform: (AiCompressionConfig) -> AiCompressionConfig) {
+                    local = transform(local)
+                    onSaveCompression(local)
+                }
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "上下文压缩",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "超预算时先省略较早的工具回传，仍超再把更早对话压成摘要（参照 Claude Code/Cline 的 auto-compact）；预算 0 = 关闭压缩",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                        CompressionNumberRow(
+                            label = "上下文预算（token）",
+                            value = local.budgetTokens.toString(),
+                        ) { s ->
+                            commit { it.copy(budgetTokens = s.toIntOrNull() ?: 0) }
+                        }
+                        CompressionNumberRow(
+                            label = "工具回传保留最近（条）",
+                            value = local.toolKeepRecent.toString(),
+                        ) { s ->
+                            commit { it.copy(toolKeepRecent = s.toIntOrNull() ?: 0) }
+                        }
+                        CompressionNumberRow(
+                            label = "摘要保留对话（段）",
+                            value = local.keepUserSegments.toString(),
+                        ) { s ->
+                            commit { it.copy(keepUserSegments = (s.toIntOrNull() ?: 1).coerceAtLeast(1)) }
+                        }
+                        CompressionNumberRow(
+                            label = "摘要超时（秒）",
+                            value = local.timeoutSec.toString(),
+                        ) { s ->
+                            commit { it.copy(timeoutSec = (s.toIntOrNull() ?: 5).coerceAtLeast(5)) }
+                        }
+                        CompressionNumberRow(
+                            label = "摘要字数上限",
+                            value = local.summaryMaxChars.toString(),
+                        ) { s ->
+                            commit { it.copy(summaryMaxChars = s.toIntOrNull() ?: 500) }
+                        }
+                        Spacer(modifier = Modifier.size(8.dp))
+                        Text(
+                            text = "摘要提示词",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        var promptText by rememberSaveable(compression.systemPrompt) {
+                            mutableStateOf(local.systemPrompt)
+                        }
+                        OutlinedTextField(
+                            value = promptText,
+                            onValueChange = { v ->
+                                promptText = v
+                                commit { it.copy(systemPrompt = v) }
+                            },
+                            minLines = 2,
+                            maxLines = 5,
+                            textStyle = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            TextButton(onClick = {
+                                val d = AiCompressionConfig()
+                                promptText = d.systemPrompt
+                                commit { it.copy(systemPrompt = d.systemPrompt) }
+                            }) {
+                                Text("恢复默认提示词", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            }
+                        }
                     }
                 }
             }
@@ -1085,6 +1178,39 @@ private fun ModelRow(
                 )
             }
         }
+    }
+}
+
+/** 压缩设置数字行：label + 窄数字输入（仅数字，改动即调 [onChange]）。 */
+@Composable
+private fun CompressionNumberRow(
+    label: String,
+    value: String,
+    onChange: (String) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(modifier = Modifier.size(8.dp))
+        OutlinedTextField(
+            value = value,
+            onValueChange = { s -> onChange(s.filter { it.isDigit() }.take(7)) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            textStyle = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(88.dp),
+        )
     }
 }
 
