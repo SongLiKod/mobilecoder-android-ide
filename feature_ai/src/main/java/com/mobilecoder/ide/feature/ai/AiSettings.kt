@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
@@ -78,10 +79,12 @@ fun ProviderSettingsView(
     config: AiProvidersConfig,
     confirmWrites: Boolean,
     systemPrompt: String,
+    roundLimit: Int,
     onBack: () -> Unit,
     onSave: (AiProvidersConfig) -> Unit,
     onConfirmWritesChange: (Boolean) -> Unit,
     onSaveSystemPrompt: (String) -> Unit,
+    onSaveRoundLimit: (Int) -> Unit,
     onTest: suspend (AiEndpoint) -> Result<String>,
     modifier: Modifier = Modifier,
 ) {
@@ -367,6 +370,51 @@ fun ProviderSettingsView(
                             )
                         }
                         Switch(checked = confirmWrites, onCheckedChange = onConfirmWritesChange)
+                    }
+                }
+            }
+
+            // ---------- 工具轮数上限 ----------
+            item {
+                var roundLimitText by rememberSaveable(roundLimit) { mutableStateOf(roundLimit.toString()) }
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "单次最大工具调用轮数",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "一次发送内 AI 连续调用工具的上限；0 = 不限制（默认 100000）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(modifier = Modifier.size(8.dp))
+                        OutlinedTextField(
+                            value = roundLimitText,
+                            onValueChange = { raw ->
+                                val digits = raw.filter { it.isDigit() }.take(7)
+                                roundLimitText = digits
+                                if (digits.isNotEmpty()) {
+                                    onSaveRoundLimit(digits.toIntOrNull() ?: 0)
+                                } else {
+                                    onSaveRoundLimit(0)
+                                }
+                            },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.width(96.dp),
+                        )
                     }
                 }
             }

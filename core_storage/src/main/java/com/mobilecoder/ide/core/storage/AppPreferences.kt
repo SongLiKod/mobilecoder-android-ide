@@ -202,6 +202,10 @@ class AppPreferences(
     suspend fun aiSystemPrompt(): String = get(KEY_AI_SYSTEM_PROMPT) ?: ""
     suspend fun setAiSystemPrompt(value: String) = set(KEY_AI_SYSTEM_PROMPT, value)
 
+    /** 单次发送最大工具调用轮数（0 = 不限制），默认 100000。 */
+    suspend fun aiRoundLimit(): Int = getInt(KEY_AI_ROUND_LIMIT, 100_000)
+    suspend fun setAiRoundLimit(value: Int) = setInt(KEY_AI_ROUND_LIMIT, value.coerceIn(0, 1_000_000))
+
     // ---------------- 内部 ----------------
 
     private suspend fun get(key: Preferences.Key<String>): String? = dataStore.data.first()[key]
@@ -262,5 +266,6 @@ class AppPreferences(
         private val KEY_AI_PROVIDERS = stringPreferencesKey("ai_providers_json")
         private val KEY_AI_CONFIRM_WRITES = stringPreferencesKey("ai_confirm_writes")
         private val KEY_AI_SYSTEM_PROMPT = stringPreferencesKey("ai_system_prompt")
+        private val KEY_AI_ROUND_LIMIT = intPreferencesKey("ai_round_limit")
     }
 }

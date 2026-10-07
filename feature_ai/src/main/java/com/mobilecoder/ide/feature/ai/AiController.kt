@@ -31,17 +31,22 @@ import org.json.JSONObject
  *     **同一份协议上下文原样重发**（上下文不丢、已执行工具不重复）；
  *  4. 返回 `tool_calls`：（必要时）用户确认 → 快照备份 → 逐个执行项目工具，
  *     结果以 role=tool 回传；事件与回放数据挂到该条 assistant 消息上；
- *  5. 循环直到纯文本回复（最多 12 轮）或全部候选失效 / 被取消。
+ *  5. 循环直到纯文本回复（轮数上限可在设置里自定义，默认 10 万、0 = 不限制）
+ *     或全部候选失效 / 被取消。
  *
  * 所有状态都是 StateFlow，UI（AiScreen）只负责订阅与输入。
  */
 object AiController {
 
-    /** 单次发送允许的最大工具调用轮数。 */
-    private const val MAX_ROUNDS = 12
+    /** 单次发送允许的最大工具调用轮数默认值（0 = 不限制，可在设置里改）。 */
+    private const val DEFAULT_ROUND_LIMIT = 100_000
 
-    /** 单次发送的最大请求数（含失败重试与切换），防失控。 */
+    /** 单次发送的最大请求数基础上限（含失败重试与切换，防失控）。 */
     private const val MAX_ATTEMPTS = 30
+
+    /** 实际请求上限：随轮数上限放大（轮数 0 = 不限制时不限请求数）。 */
+    private fun attemptCap(roundLimit: Int): Int =
+        if (roundLimit == 0) Int.MAX_VALUE else (roundLimit * 2 + MAX_ATTEMPTS).coerceAtLeast(MAX_ATTEMPTS)
 
     /** 额度/Key/模型失效的冷却时长（额度会重置，到期自动恢复）。 */
     private const val FAIL_COOLDOWN_MS = 10 * 60_000L
@@ -85,6 +90,10 @@ object AiController {
     /** 「写入前确认」开关（delete_path 恒确认），来自 AppPreferences。 */
     private val _confirmWrites = MutableStateFlow(false)
     val confirmWrites: StateFlow<Boolean> = _confirmWrites.asStateFlow()
+
+    /** 单次发送的最大工具调用轮数（0 = 不限制），来自 AppPreferences。 */
+    private val _roundLimit = MutableStateFlow(DEFAULT_ROUND_LIMIT)
+    val roundLimit: StateFlow<Int> = _roundLimit.asStateFlow()
 
     private val _sessions = MutableStateFlow<List<AiSession>>(emptyList())
     val sessions: StateFlow<List<AiSession>> = _sessions.asStateFlow()
@@ -153,11 +162,18 @@ object AiController {
         if (_currentId.value == null) _currentId.value = parsed.firstOrNull()?.id
     }
 
-    /** 读取多接口配置（含旧单配置迁移）、「写入前确认」开关与自定义 system prompt。 */
+    /** 读取多接口配置（含旧单配置迁移）、「写入前确认」开关、自定义 system prompt 与轮数上限。 */
     suspend fun refreshConfig() {
         _providers.value = runCatching { AiProviderStore.load() }.getOrDefault(AiProvidersConfig())
         _confirmWrites.value = runCatching { AppStorage.preferences.aiConfirmWrites() }.getOrDefault(false)
         _systemPrompt.value = runCatching { AppStorage.preferences.aiSystemPrompt() }.getOrDefault("")
+        _roundLimit.value = runCatching { AppStorage.preferences.aiRoundLimit() }.getOrDefault(DEFAULT_ROUND_LIMIT)
+    }
+
+    /** 保存单次发送最大工具调用轮数（0 = 不限制）。 */
+    suspend fun setRoundLimit(value: Int) {
+        runCatching { AppStorage.preferences.setAiRoundLimit(value) }
+        _roundLimit.value = value.coerceIn(0, 1_000_000)
     }
 
     /** 保存自定义 system prompt（空 = 恢复内置默认）。 */
@@ -310,8 +326,13 @@ object AiController {
                 var retriedSame = false
                 val failures = ArrayList<String>()
                 var fatal: String? = null
+                val roundLimit = _roundLimit.value
 
-                sendLoop@ while (successRounds < MAX_ROUNDS && attempts < MAX_ATTEMPTS && !cancelling) {
+                sendLoop@ while (
+                    (roundLimit == 0 || successRounds < roundLimit) &&
+                    attempts < attemptCap(roundLimit) &&
+                    !cancelling
+                ) {
                     attempts++
                     val endpoint = endpoints[ci]
                     Log.d("AiSend", "attempt=$attempts round=${successRounds + 1} -> ${endpoint.label}")
@@ -394,8 +415,8 @@ object AiController {
                 }
 
                 fatal?.let { _error.value = it }
-                if (fatal == null && successRounds >= MAX_ROUNDS && !cancelling) {
-                    _error.value = "已达单次最大工具调用轮数（$MAX_ROUNDS），如需继续请再次发送"
+                if (fatal == null && roundLimit != 0 && successRounds >= roundLimit && !cancelling) {
+                    _error.value = "已达单次最大工具调用轮数（$roundLimit），如需继续请再次发送"
                 }
                 if (cancelling) _notice.value = "已停止"
             } catch (c: CancellationException) {
