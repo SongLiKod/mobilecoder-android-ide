@@ -54,6 +54,10 @@ object EditorController {
         val showHiddenFiles: Boolean = true,
         /** 文件树「不显示」的文件 / 目录名（按名匹配任意层级），默认构建产物三件套。 */
         val hiddenNames: List<String> = FileRepository.DEFAULT_HIDDEN_NAMES.toList(),
+        /** 「不支持在编辑器里打开」的扩展名（小写、不带点），打开前拦截以防卡死。 */
+        val unopenableExts: List<String> = FileRepository.DEFAULT_UNOPENABLE_EXTS.toList(),
+        /** 单个文件可打开的大小上限（MB），超过即提示不支持预览/编辑，默认 10。 */
+        val maxOpenMb: Int = 10,
     )
 
     /** 文件内查找状态。 */
@@ -174,11 +178,19 @@ object EditorController {
                 showHiddenFiles = runCatching { prefs.editorShowHiddenFiles() }.getOrDefault(true),
                 hiddenNames = runCatching { prefs.editorHiddenNames() }
                     .getOrDefault(FileRepository.DEFAULT_HIDDEN_NAMES.toList()),
+                unopenableExts = normalizeExts(
+                    runCatching { prefs.editorUnopenableExts() }
+                        .getOrDefault(FileRepository.DEFAULT_UNOPENABLE_EXTS.toList()),
+                ),
+                maxOpenMb = runCatching { prefs.editorMaxOpenMb() }.getOrDefault(10)
+                    .coerceIn(1, 1024),
             )
             val showHiddenChanged = loaded.showHiddenFiles != _settings.value.showHiddenFiles
             val hiddenNamesChanged = loaded.hiddenNames != _settings.value.hiddenNames
             _settings.value = loaded
             applyHiddenNames(loaded.hiddenNames)
+            applyUnopenableExts(loaded.unopenableExts)
+            applyMaxOpenMb(loaded.maxOpenMb)
             // 持久化的「显示隐藏文件 / 不显示名单」偏好晚于首次建树加载完成时，按它重建一次
             if (showHiddenChanged || hiddenNamesChanged) refreshTree()
         }
@@ -187,6 +199,22 @@ object EditorController {
     /** 把「不显示」名单注入 [FileRepository]（树 / 检索 / 快速打开 / AI 工具同源生效）。 */
     private fun applyHiddenNames(names: List<String>) {
         FileRepository.customHiddenNames = names.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    }
+
+    /** 扩展名名单归一化：去空白、去前导点、转小写、去重。 */
+    private fun normalizeExts(exts: List<String>): List<String> = exts
+        .map { it.trim().removePrefix(".").lowercase() }
+        .filter { it.isNotEmpty() }
+        .distinct()
+
+    /** 把「不支持打开」的扩展名注入 [FileRepository]（openFile 读盘前拦截）。 */
+    private fun applyUnopenableExts(exts: List<String>) {
+        FileRepository.customUnopenableExts = exts.toSet()
+    }
+
+    /** 把单文件打开大小上限（MB → 字节）注入 [FileRepository]（openFile 读盘前拦截）。 */
+    private fun applyMaxOpenMb(mb: Int) {
+        FileRepository.customMaxOpenBytes = mb.coerceIn(1, 1024) * 1024L * 1024L
     }
 
     private fun preferencesOrNull(): AppPreferences? =
@@ -336,18 +364,28 @@ object EditorController {
     /** 打开文件（[targetLine] > 0 时打开后跳转到该行）。 */
     fun openFile(file: File, targetLine: Int = 0) {
         val path = file.absolutePath
-        locateInTree(path)
         val existing = _tabs.value.firstOrNull { it.path == path }
         if (existing != null) {
+            locateInTree(path)
             _activePath.value = path
             refreshHistory()
             if (targetLine > 1) jumpTo(path, targetLine, 1)
             return
         }
         scope.launch {
-            val text = withContext(Dispatchers.IO) { FileRepository.readText(file) }
-            val editable = text != null
-            val content = text ?: ""
+            // 读盘前拦截：不支持打开的类型 / 过大 / 二进制（如 .apk）会把 UI 卡死，
+            // 只提示不支持在线预览或编辑，不加载内容。
+            val reason = withContext(Dispatchers.IO) { FileRepository.unopenableReason(file) }
+            if (reason != null) {
+                showMessage("$reason：${file.name}")
+                return@launch
+            }
+            locateInTree(path)
+            val content = withContext(Dispatchers.IO) { FileRepository.readText(file) }
+            if (content == null) {
+                showMessage("文件读取失败，不支持在线预览或编辑：${file.name}")
+                return@launch
+            }
             val root = _projectRoot.value
             val relative = if (root != null && path.startsWith(root)) {
                 path.removePrefix(root).removePrefix("/")
@@ -362,7 +400,7 @@ object EditorController {
                 language = Language.of(file.name),
                 value = TextFieldValue(content, TextRange(offset.coerceIn(0, content.length))),
                 savedText = content,
-                editable = editable,
+                editable = true,
             )
             _tabs.value = _tabs.value + tab
             _activePath.value = path
@@ -653,6 +691,27 @@ object EditorController {
         applyHiddenNames(cleaned)
         persist { it.setEditorHiddenNames(cleaned) }
         refreshTree()
+    }
+
+    /**
+     * 自定义「不支持在编辑器里打开」的扩展名：注入拦截口径后立即生效。
+     * 清空 = 全部尝试打开（大小 / 二进制嗅探两道兜底仍拦截，防卡死）。
+     */
+    fun setUnopenableExts(exts: List<String>) {
+        val cleaned = normalizeExts(exts)
+        if (cleaned == _settings.value.unopenableExts) return
+        _settings.value = _settings.value.copy(unopenableExts = cleaned)
+        applyUnopenableExts(cleaned)
+        persist { it.setEditorUnopenableExts(cleaned) }
+    }
+
+    /** 自定义单文件打开大小上限（MB）：立即生效，下次打开文件即按新上限拦截。 */
+    fun setMaxOpenMb(value: Int) {
+        val mb = value.coerceIn(1, 1024)
+        if (mb == _settings.value.maxOpenMb) return
+        _settings.value = _settings.value.copy(maxOpenMb = mb)
+        applyMaxOpenMb(mb)
+        persist { it.setEditorMaxOpenMb(mb) }
     }
 
     // ------------------------------------------------------------------

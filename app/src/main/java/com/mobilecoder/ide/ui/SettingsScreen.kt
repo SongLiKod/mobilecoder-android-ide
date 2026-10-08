@@ -1,5 +1,6 @@
 package com.mobilecoder.ide.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,15 +14,19 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -112,16 +117,131 @@ fun SettingsScreen(
                 modifier = Modifier.padding(top = 4.dp),
             )
         }
+
+        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+
+        // ---------------- 文件打开 ----------------
+        var unopenableDialogOpen by remember { mutableStateOf(false) }
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            SectionHeader(title = "文件打开")
+            Spacer(modifier = Modifier.padding(top = 4.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "不支持打开的文件类型",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "${editorSettings.unopenableExts.size} 项",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.width(56.dp),
+                )
+                TextButton(
+                    onClick = { unopenableDialogOpen = true },
+                    modifier = Modifier.heightIn(min = 40.dp),
+                ) {
+                    Text(text = "自定义…", style = MaterialTheme.typography.labelLarge)
+                }
+            }
+            Text(
+                text = "这些扩展名的文件在编辑器里点击时只提示「不支持在线预览或编辑」，不加载内容，" +
+                    "避免大文件 / 二进制把界面卡死；超过大小上限或二进制内容的文件始终会被拦截。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            FontSizeRow(
+                title = "单个文件打开上限",
+                value = editorSettings.maxOpenMb,
+                range = 1..1024,
+                unit = "MB",
+                onChange = { EditorController.setMaxOpenMb(it) },
+            )
+            Text(
+                text = "点击超过该大小的文件只提示不支持预览或编辑，防止整读大文件卡死界面（默认 10MB）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+
+        if (unopenableDialogOpen) {
+            UnopenableExtsDialog(
+                initial = editorSettings.unopenableExts,
+                onConfirm = { exts ->
+                    unopenableDialogOpen = false
+                    EditorController.setUnopenableExts(exts)
+                },
+                onDismiss = { unopenableDialogOpen = false },
+            )
+        }
     }
 }
 
-/** 字号调节行：标题 + 数值 + 减 / 加（触达 ≥40dp，按钮在范围端点自动禁用）。 */
+/**
+ * 「不支持打开的文件类型」编辑弹窗：每行（或逗号）一个扩展名，可带可不带点。
+ * 保存经 [EditorController.setUnopenableExts] 归一化（小写、去点）后注入拦截口径。
+ */
+@Composable
+private fun UnopenableExtsDialog(
+    initial: List<String>,
+    onConfirm: (List<String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf(initial.joinToString("\n")) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("不支持打开的文件类型") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "每行一个扩展名（也可用逗号分隔，带不带点均可）。这些文件在编辑器里点击时" +
+                        "会提示不支持预览或编辑；留空则全部尝试打开，但仍会拦截二进制与超过大小上限的文件。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 160.dp),
+                    placeholder = { Text("apk\njar\nso\nzip") },
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(parseExts(text)) }) { Text("保存") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/** 扩展名名单解析：按行 / 逗号 / 分号切分，去点、转小写并去重。 */
+private fun parseExts(raw: String): List<String> = raw
+    .split('\n', '\r', ',', '，', ';', '；', '、', ' ')
+    .map { it.trim().removePrefix(".").lowercase() }
+    .filter { it.isNotEmpty() }
+    .distinct()
+
+/** 数值调节行：标题 + 数值 + 减 / 加（触达 ≥40dp，按钮在范围端点自动禁用）。 */
 @Composable
 private fun FontSizeRow(
     title: String,
     value: Int,
     range: IntRange,
     onChange: (Int) -> Unit,
+    unit: String = "sp",
 ) {
     Row(
         modifier = Modifier
@@ -136,11 +256,11 @@ private fun FontSizeRow(
             modifier = Modifier.weight(1f),
         )
         Text(
-            text = "$value sp",
+            text = "$value $unit",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
-            modifier = Modifier.width(48.dp),
+            modifier = Modifier.width(64.dp),
         )
         IconButton(
             onClick = { onChange(value - 1) },
