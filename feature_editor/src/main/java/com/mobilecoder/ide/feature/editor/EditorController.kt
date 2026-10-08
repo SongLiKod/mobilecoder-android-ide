@@ -1,6 +1,7 @@
 package com.mobilecoder.ide.feature.editor
 
 import android.content.Context
+import android.net.Uri
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.mobilecoder.ide.core.storage.AppPreferences
@@ -132,6 +133,9 @@ object EditorController {
     private var initialized = false
     private var settingsLoaded = false
 
+    /** 应用上下文（[ensureInit] 注入），供导出等无界面 IO 使用。 */
+    private var appContext: Context? = null
+
     /**
      * 首次加载树后是否需要「默认全部折叠」（仅在 setProject 置位，refreshTree 消费）。
      */
@@ -150,6 +154,7 @@ object EditorController {
     fun ensureInit(context: Context) {
         if (!initialized) {
             initialized = true
+            appContext = context.applicationContext
             runCatching { AppStorage.init(context.applicationContext) }
         }
         if (!settingsLoaded) {
@@ -717,6 +722,50 @@ object EditorController {
             if (_activePath.value == path) _activePath.value = movedPath
         },
     )
+
+    /**
+     * 导出 [path]（文件，或目录连同其内容递归）到 [treeUri] 指向的系统目录。
+     *
+     * 目标目录由文件树 / 项目卡片长按菜单「导出到…」经 SAF 选择；导出前先落盘未保存的编辑，
+     * 免得导出的是旧版本。目标位于源内部（导出到自身子目录）会拒绝，否则无限递归。
+     * [onResult] 在完成时回调（首页没有 MessageBar，靠它本地提示）。
+     */
+    fun exportTo(path: String, treeUri: Uri, onResult: (Boolean) -> Unit = {}) {
+        val context = appContext
+        if (context == null) {
+            showMessage("导出失败：存储未初始化")
+            onResult(false)
+            return
+        }
+        scope.launch {
+            val src = File(path)
+            val name = src.name
+            if (!withContext(Dispatchers.IO) { src.exists() }) {
+                showMessage("导出失败：源不存在")
+                onResult(false)
+                return@launch
+            }
+            // 导出落盘版本：编辑器里未保存的改动先写盘
+            if (_tabs.value.any { it.path == path && it.dirty }) saveNow(path, silent = true)
+            val inside = withContext(Dispatchers.IO) {
+                runCatching { FileExporter.isTargetInside(treeUri, src) }.getOrDefault(false)
+            }
+            if (inside) {
+                showMessage("导出失败：不能导出到自身目录内")
+                onResult(false)
+                return@launch
+            }
+            showMessage("正在导出「$name」…")
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    FileExporter.takePersistablePermission(context, treeUri)
+                    FileExporter.export(context, src, treeUri)
+                }.getOrDefault(false)
+            }
+            showMessage(if (ok) "已导出「$name」" else "导出失败：目标目录不可写")
+            onResult(ok)
+        }
+    }
 
     private fun fileOp(label: String, block: () -> Boolean, after: () -> Unit = {}) {
         if (_projectRoot.value == null) return

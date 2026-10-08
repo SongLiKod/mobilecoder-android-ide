@@ -161,22 +161,18 @@ class ProjectRepository(
         return ProjectTemplate.EMPTY
     }
 
-    suspend fun rename(relativePath: String, newName: String): Boolean {
+    /** 重命名项目（目录 + 索引同步改），返回改后的元信息；失败返回 null。 */
+    suspend fun rename(relativePath: String, newName: String): ProjectMeta? {
         val metas = list()
-        val target = metas.firstOrNull { it.relativePath == relativePath } ?: return false
+        val target = metas.firstOrNull { it.relativePath == relativePath } ?: return null
         val newRelative = sanitize(newName)
-        if (newRelative.isBlank() || metas.any { it.relativePath == newRelative }) return false
+        if (newRelative.isBlank() || metas.any { it.relativePath == newRelative }) return null
         val from = File(paths.projects, relativePath)
         val to = File(paths.projects, newRelative)
-        if (!from.renameTo(to)) return false
-        persist(
-            metas.map {
-                if (it.relativePath == relativePath) {
-                    it.copy(name = newName.trim(), relativePath = newRelative)
-                } else it
-            },
-        )
-        return true
+        if (!from.renameTo(to)) return null
+        val updated = target.copy(name = newName.trim(), relativePath = newRelative)
+        persist(metas.map { if (it.relativePath == relativePath) updated else it })
+        return updated
     }
 
     suspend fun delete(relativePath: String): Boolean {
