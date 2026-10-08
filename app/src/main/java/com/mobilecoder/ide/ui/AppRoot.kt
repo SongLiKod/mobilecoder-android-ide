@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.expandVertically
@@ -49,7 +51,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Folder
@@ -144,6 +148,7 @@ import com.mobilecoder.ide.feature.git.GitScreen
 import com.mobilecoder.ide.feature.ssh.SshScreen
 import com.mobilecoder.ide.feature.terminal.TerminalScreen
 import java.io.File
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** 全局导航目的地（app 负责全局导航：TECH.md 7）。 */
@@ -749,6 +754,31 @@ private fun HomeScreen(
     var pendingDelete by remember { mutableStateOf<ProjectMeta?>(null) }
     val gitBusy by GitController.busy.collectAsStateWithLifecycle()
     val gitProgress by GitController.progress.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    // 待导出 / 待重命名项目 + 结果提示（首页没有编辑器的 MessageBar，这里本地提示）
+    var pendingExport by remember { mutableStateOf<ProjectMeta?>(null) }
+    var pendingRename by remember { mutableStateOf<ProjectMeta?>(null) }
+    var homeNotice by remember { mutableStateOf<String?>(null) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { treeUri ->
+        val meta = pendingExport
+        pendingExport = null
+        if (treeUri != null && meta != null) {
+            val path = meta.absolutePathOf(AppStorage.projects.projectsRoot).path
+            EditorController.exportTo(path, treeUri) { ok ->
+                homeNotice = if (ok) "已导出「${meta.name}」" else "导出失败：目标目录不可写"
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) { runCatching { EditorController.ensureInit(context) } }
+    LaunchedEffect(homeNotice) {
+        if (homeNotice != null) {
+            delay(3000)
+            homeNotice = null
+        }
+    }
 
     LaunchedEffect(Unit) {
         projects = runCatching { AppStorage.projects.list() }.getOrDefault(emptyList())
@@ -774,6 +804,16 @@ private fun HomeScreen(
             IconButton(onClick = { showCreate = true }) {
                 Icon(Icons.Default.Add, contentDescription = "新建项目")
             }
+        }
+
+        // 导出 / 重命名结果提示（首页没有编辑器的 MessageBar，这里本地提示）
+        homeNotice?.let { text ->
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+            )
         }
 
         if (projects.isEmpty()) {
@@ -813,6 +853,11 @@ private fun HomeScreen(
                             }
                         },
                         onDelete = { pendingDelete = meta },
+                        onExport = {
+                            pendingExport = meta
+                            exportLauncher.launch(null)
+                        },
+                        onRename = { pendingRename = meta },
                     )
                 }
             }
@@ -932,15 +977,44 @@ private fun HomeScreen(
             onDismiss = { pendingDelete = null },
         )
     }
+
+    pendingRename?.let { meta ->
+        RenameProjectDialog(
+            meta = meta,
+            onConfirm = { value ->
+                pendingRename = null
+                scope.launch {
+                    val renamed = runCatching {
+                        AppStorage.projects.rename(meta.relativePath, value)
+                    }.getOrNull()
+                    homeNotice = if (renamed != null) {
+                        "已重命名为「${renamed.name}」"
+                    } else {
+                        "重命名失败：名称可能已存在"
+                    }
+                    if (renamed != null &&
+                        AppState.project.value?.relativePath == meta.relativePath
+                    ) {
+                        // 重命名的正是当前打开的项目：同步全局状态，编辑器按新路径重建树
+                        AppState.open(renamed)
+                    }
+                    projects = AppStorage.projects.list()
+                }
+            },
+            onDismiss = { pendingRename = null },
+        )
+    }
 }
 
-/** 项目卡片：整卡打开，长按弹出菜单（打开 / 删除）——删除不再占常驻图标位。 */
+/** 项目卡片：整卡打开，长按弹出菜单（打开 / 重命名 / 导出 / 删除）——删除不再占常驻图标位。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ProjectCard(
     meta: ProjectMeta,
     onOpen: () -> Unit,
     onDelete: () -> Unit,
+    onExport: () -> Unit,
+    onRename: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
@@ -1004,6 +1078,24 @@ private fun ProjectCard(
                     onClick = {
                         menuOpen = false
                         onOpen()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("重命名") },
+                    leadingIcon = {
+                        Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null)
+                    },
+                    onClick = {
+                        menuOpen = false
+                        onRename()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("导出到…") },
+                    leadingIcon = { Icon(Icons.Default.FileDownload, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        onExport()
                     },
                 )
                 DropdownMenuItem(
@@ -1181,6 +1273,38 @@ private fun CreateProjectDialog(
                 onClick = { onCreate(name.trim().ifBlank { "未命名项目" }, template) },
                 enabled = name.isNotBlank(),
             ) { Text("创建") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/** 重命名项目输入弹窗（项目卡片长按菜单「重命名」）。 */
+@Composable
+private fun RenameProjectDialog(
+    meta: ProjectMeta,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember { mutableStateOf(meta.name) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名项目") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("项目名称") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(name.trim()) },
+                enabled = name.isNotBlank(),
+            ) { Text("确定") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }

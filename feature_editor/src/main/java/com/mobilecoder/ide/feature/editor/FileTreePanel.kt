@@ -1,5 +1,7 @@
 package com.mobilecoder.ide.feature.editor
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FileCopy
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Refresh
@@ -154,7 +157,7 @@ private sealed interface NameDialog {
 
 /**
  * 项目文件树抽屉（PRD 2.2「项目树目录」）：
- * 点击打开 / 收起展开，长按弹出菜单（新建文件 / 新建目录 / 重命名 / 复制路径 / 删除 / 移动），
+ * 点击打开 / 收起展开，长按弹出菜单（新建文件 / 新建目录 / 重命名 / 移动 / 复制路径 / 导出 / 删除），
  * 长按拖拽移动文件到目标目录。
  * 顶部提供「全部折叠 / 全部展开」切换（新项目默认全部折叠）；
  * 打开 / 切换文件时按 [EditorController.locatePath] 展开祖先并滚动定位、高亮当前文件。
@@ -202,9 +205,20 @@ fun FileTreeDrawer(
     var nameDialog by remember { mutableStateOf<NameDialog?>(null) }
     var pendingDelete by remember { mutableStateOf<FileNode?>(null) }
     var pendingMove by remember { mutableStateOf<FileNode?>(null) }
+    // 待导出条目：先记下（选择器期间行可能被折叠 / 刷新掉），拿到目标目录后再执行
+    var pendingExport by remember { mutableStateOf<FileNode?>(null) }
     var hiddenNamesDialogOpen by remember { mutableStateOf(false) }
     var drag by remember { mutableStateOf<DragState?>(null) }
     val bounds = remember { mutableStateMapOf<String, Rect>() }
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { treeUri ->
+        val node = pendingExport
+        pendingExport = null
+        if (treeUri != null && node != null) {
+            EditorController.exportTo(node.file.path, treeUri)
+        }
+    }
 
     val dropTargetPath = drag?.let { state -> resolveDropTarget(state.pos, bounds, rows) }
 
@@ -235,7 +249,7 @@ fun FileTreeDrawer(
                         title = rootPath?.let { File(it).name } ?: "文件",
                         modifier = Modifier.weight(1f),
                     )
-                    // 新建（与长按菜单共用同一套创建流程；重命名/删除/移动仍为长按专属）
+                    // 新建（与长按菜单共用同一套创建流程；重命名 / 移动 / 导出 / 删除仍为长按专属）
                     Box {
                         IconButton(
                             onClick = { createMenuOpen = true },
@@ -380,6 +394,11 @@ fun FileTreeDrawer(
                                             EditorController.showMessage("已复制路径到剪贴板")
                                         }
 
+                                        TreeAction.EXPORT -> {
+                                            pendingExport = node
+                                            exportLauncher.launch(null)
+                                        }
+
                                         TreeAction.DELETE -> pendingDelete = node
                                         TreeAction.MOVE -> pendingMove = node
                                     }
@@ -485,7 +504,15 @@ fun FileTreeDrawer(
     }
 }
 
-private enum class TreeAction { NEW_FILE, NEW_DIRECTORY, RENAME, COPY_PATH, DELETE, MOVE }
+private enum class TreeAction {
+    NEW_FILE,
+    NEW_DIRECTORY,
+    RENAME,
+    COPY_PATH,
+    EXPORT,
+    DELETE,
+    MOVE,
+}
 
 /**
  * 「不显示」名单编辑弹窗：每行（或逗号）一个名称，按名匹配任意层级的文件 / 目录。
@@ -661,6 +688,11 @@ private fun TreeRowItem(
                 text = { Text("复制路径") },
                 leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
                 onClick = { onMenuItem(TreeAction.COPY_PATH) },
+            )
+            DropdownMenuItem(
+                text = { Text("导出到…") },
+                leadingIcon = { Icon(Icons.Default.FileDownload, contentDescription = null) },
+                onClick = { onMenuItem(TreeAction.EXPORT) },
             )
             DropdownMenuItem(
                 text = { Text("删除") },
