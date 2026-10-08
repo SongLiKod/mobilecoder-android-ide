@@ -1117,17 +1117,35 @@ private fun TerminalLineText(
     }
 }
 
-/** 把一屏行转成 AnnotatedString（SGR 样式 + 光标反色块）。 */
+/**
+ * 把一屏行转成 AnnotatedString（SGR 样式 + 光标反色块）。
+ *
+ * 栅格里双宽字（中文 / emoji）占两格：字符 + 续格占位符 [CELL_CONTINUATION]。
+ * 续格**不渲染**（交给字形的自然宽度），但栅格列号照常推进 —— 因此文本下标与
+ * 栅格列号必须分开维护，光标才能落到真正的字符上：
+ *
+ *  - run 文本先剔除续格再 append（选中复制拿到的也是干净文本）；
+ *  - 光标落在续格上时，反色块套给它所属的双宽字（前一格）。
+ */
 private fun buildTerminalLine(
     line: TerminalLine,
     palette: AppPalette,
     isCursorLine: Boolean,
 ): AnnotatedString = buildAnnotatedString {
-    var col = 0
+    var col = 0 // 栅格列（含续格）
+    var cursorText = -1 // 光标在渲染文本中的下标
+    var cursorFg = Color.Unspecified
+    var cursorBg = Color.Unspecified
     line.runs.forEach { run ->
         val start = length
-        val len = run.text.length
-        append(run.text)
+        val cells = run.text
+        val hasCont = cells.indexOf(CELL_CONTINUATION) >= 0
+        val text = if (hasCont) {
+            buildString(cells.length) { for (ch in cells) if (ch != CELL_CONTINUATION) append(ch) }
+        } else {
+            cells
+        }
+        append(text)
 
         var fg = resolveColor(run.fg, palette, true)
         var bg = resolveColor(run.bg, palette, false)
@@ -1162,16 +1180,26 @@ private fun buildTerminalLine(
                 },
             ),
             start,
-            start + len,
+            start + text.length,
         )
 
         val cursorAt = line.cursorCol
-        if (isCursorLine && cursorAt >= col && cursorAt < col + len) {
-            val at = start + (cursorAt - col)
-            // 光标：与单元格底色互换的反色块
-            addStyle(SpanStyle(color = bg, background = fg), at, at + 1)
+        if (isCursorLine && cursorText < 0 && cursorAt >= col && cursorAt < col + cells.length) {
+            val offset = cursorAt - col
+            var idx = start
+            for (i in 0 until offset) {
+                if (cells[i] != CELL_CONTINUATION) idx++
+            }
+            // 光标停在续格上 → 套给前一格的双宽字
+            cursorText = if (cells[offset] == CELL_CONTINUATION) idx - 1 else idx
+            cursorFg = fg
+            cursorBg = bg
         }
-        col += len
+        col += cells.length
+    }
+    if (isCursorLine && cursorText in 0 until length) {
+        // 光标：与单元格底色互换的反色块
+        addStyle(SpanStyle(color = cursorBg, background = cursorFg), cursorText, cursorText + 1)
     }
 }
 
