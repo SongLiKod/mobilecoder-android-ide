@@ -14,7 +14,6 @@ data class FileNode(
 /** 文本文件判定与读写（编辑器 / 检索 / Diff 共用）。 */
 object FileRepository {
 
-    private const val MAX_TEXT_BYTES = 4L * 1024 * 1024
     private val TEXT_EXT = setOf(
         "kt", "kts", "java", "xml", "gradle", "properties", "json", "md", "txt", "pro",
         "js", "ts", "jsx", "tsx", "dart", "html", "css", "scss", "yml", "yaml", "toml",
@@ -26,6 +25,39 @@ object FileRepository {
         "zip", "gz", "tar", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4",
         "pdf", "keystore", "jks", "bin", "dex", "class", "apk_", "properties_",
     )
+
+    /**
+     * 内置默认的「不支持在编辑器里打开」扩展名（用户可在设置里自定义，见 [unopenableReason]）。
+     * 这类文件整读会把 UI 卡死（如 .apk），必须在读盘前拦截。
+     */
+    val DEFAULT_UNOPENABLE_EXTS = setOf(
+        "apk", "aab", "dex", "jar", "class", "so", "a", "o", "bin",
+        "zip", "gz", "tar", "7z", "rar", "war",
+        "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "avif",
+        "mp3", "mp4", "mkv", "avi", "wav", "ogg", "m4a",
+        "pdf", "keystore", "jks", "ttf", "otf", "woff", "woff2", "eot",
+    )
+
+    /**
+     * 用户自定义的「不支持打开」扩展名（小写、不带点）。
+     * 由 EditorController 从偏好注入（进程级）；**null = 未注入用 [DEFAULT_UNOPENABLE_EXTS]，
+     * 空集 = 用户清空即全部尝试打开**（此时仍受大小 / 二进制嗅探两道兜底拦截）。
+     */
+    @Volatile
+    var customUnopenableExts: Set<String>? = null
+
+    /** 打开大小上限的内置默认：10MB（用户可在设置中自定义，见 [editorMaxOpenMb] 链路）。 */
+    const val DEFAULT_MAX_OPEN_BYTES = 10L * 1024 * 1024
+
+    /**
+     * 用户自定义的打开大小上限（字节）。
+     * 由 EditorController 从偏好注入（进程级）；**null = 未注入用 [DEFAULT_MAX_OPEN_BYTES]**。
+     */
+    @Volatile
+    var customMaxOpenBytes: Long? = null
+
+    /** 当前生效的打开大小上限（字节）。 */
+    val maxOpenBytes: Long get() = customMaxOpenBytes ?: DEFAULT_MAX_OPEN_BYTES
 
     /** 目录直系子项（按：目录优先、名称不区分大小写排序）。 */
     fun listChildren(dir: File, showHidden: Boolean = false): List<FileNode> {
@@ -137,8 +169,33 @@ object FileRepository {
         val ext = file.extension.lowercase()
         if (ext in BINARY_EXT) return false
         if (ext in TEXT_EXT) return true
-        if (!file.isFile || file.length() > MAX_TEXT_BYTES) return false
+        if (!file.isFile || file.length() > maxOpenBytes) return false
         return sniffText(file)
+    }
+
+    /**
+     * 能否在编辑器里打开：null = 可打开；否则返回提示语（读盘**前**调用，防卡死）。
+     *
+     * 三道防线（顺序即优先级）：
+     *  1. 扩展名命中「不支持打开」名单（[customUnopenableExts] 注入的用户名单，
+     *     null = [DEFAULT_UNOPENABLE_EXTS]）；
+     *  2. 文件超过 [maxOpenBytes]（默认 [DEFAULT_MAX_OPEN_BYTES]，可在设置里自定义）——
+     *     整读进 BasicTextField 必卡 UI；
+     *  3. 非已知文本扩展名且头部含 NUL（[sniffText]）—— 兜底未知二进制，
+     *     即使用户清空了名单也不会把 .apk 之类读进来。
+     */
+    fun unopenableReason(file: File): String? {
+        if (!file.isFile) return "文件不存在或不可读"
+        val ext = file.extension.lowercase()
+        val names = customUnopenableExts ?: DEFAULT_UNOPENABLE_EXTS
+        if (ext.isNotEmpty() && ext in names) return "该文件类型不支持在线预览或编辑"
+        val limit = maxOpenBytes
+        if (file.length() > limit) {
+            val mb = limit / 1024 / 1024
+            return "文件超过 ${mb}MB，不支持在线预览或编辑"
+        }
+        if (ext !in TEXT_EXT && !sniffText(file)) return "该文件包含二进制内容，不支持在线预览或编辑"
+        return null
     }
 
     /**
@@ -146,6 +203,7 @@ object FileRepository {
      *
      * 不做大小与扩展名白名单拦截：文本按 UTF-8 读入（非法字节用替换符）；
      * 仅在真正读不下（OOM / IO 失败）时返回 null，由编辑器提示。
+     * 打开前请先过 [unopenableReason]，否则大文件 / 二进制会把 UI 卡死。
      */
     fun readText(file: File): String? {
         if (!file.isFile) return null

@@ -82,6 +82,29 @@ class AppPreferences(
         set(KEY_EDITOR_HIDDEN_NAMES, array.toString())
     }
 
+    /**
+     * 「不支持在编辑器里打开」的扩展名（小写、不带点，默认 [DEFAULT_UNOPENABLE_EXTS]）。
+     * 键不存在 = 用默认值；用户清空后写入 `[]`，读出空列表（= 全部尝试打开，
+     * 仍受大小 / 二进制嗅探兜底）。
+     */
+    suspend fun editorUnopenableExts(): List<String> {
+        val raw = get(KEY_EDITOR_UNOPENABLE_EXTS) ?: return DEFAULT_UNOPENABLE_EXTS
+        return runCatching {
+            val array = JSONArray(raw)
+            buildList { for (i in 0 until array.length()) add(array.getString(i)) }
+        }.getOrDefault(DEFAULT_UNOPENABLE_EXTS)
+    }
+
+    suspend fun setEditorUnopenableExts(exts: List<String>) {
+        val array = JSONArray()
+        exts.forEach { array.put(it) }
+        set(KEY_EDITOR_UNOPENABLE_EXTS, array.toString())
+    }
+
+    /** 单个文件可打开的大小上限（MB），默认 10，范围 1–1024。超过即提示不支持预览/编辑。 */
+    suspend fun editorMaxOpenMb(): Int = getInt(KEY_EDITOR_MAX_OPEN_MB, 10)
+    suspend fun setEditorMaxOpenMb(value: Int) = setInt(KEY_EDITOR_MAX_OPEN_MB, value.coerceIn(1, 1024))
+
     // ---------------- 终端 ----------------
 
     suspend fun terminalFontSize(): Int = getInt(KEY_TERM_FONT, 13)
@@ -238,6 +261,9 @@ class AppPreferences(
         /** 「不显示」名称的内置默认（用户可改，见 [editorHiddenNames]）。 */
         val DEFAULT_HIDDEN_NAMES = FileRepository.DEFAULT_HIDDEN_NAMES.toList()
 
+        /** 「不支持打开」扩展名的内置默认（用户可改，见 [editorUnopenableExts]）。 */
+        val DEFAULT_UNOPENABLE_EXTS = FileRepository.DEFAULT_UNOPENABLE_EXTS.toList()
+
         private val KEY_LAST_PROJECT = stringPreferencesKey("last_project_path")
         private val KEY_GIT_NAME = stringPreferencesKey("git_user_name")
         private val KEY_GIT_EMAIL = stringPreferencesKey("git_user_email")
@@ -249,6 +275,8 @@ class AppPreferences(
         private val KEY_EDITOR_AUTOSAVE = stringPreferencesKey("editor_autosave")
         private val KEY_EDITOR_SHOW_HIDDEN = stringPreferencesKey("editor_show_hidden_files")
         private val KEY_EDITOR_HIDDEN_NAMES = stringPreferencesKey("editor_hidden_names")
+        private val KEY_EDITOR_UNOPENABLE_EXTS = stringPreferencesKey("editor_unopenable_exts")
+        private val KEY_EDITOR_MAX_OPEN_MB = intPreferencesKey("editor_max_open_mb")
         private val KEY_TERM_FONT = intPreferencesKey("terminal_font_size")
         private val KEY_TERM_SCREEN_ON = stringPreferencesKey("terminal_screen_on")
         private val KEY_TERM_HISTORY = stringPreferencesKey("terminal_history")
