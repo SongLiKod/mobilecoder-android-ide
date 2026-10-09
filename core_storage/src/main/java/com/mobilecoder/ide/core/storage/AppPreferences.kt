@@ -254,6 +254,11 @@ class AppPreferences(
     suspend fun floatingDotRings(): String? = get(KEY_FLOATING_DOT_RINGS)
     suspend fun setFloatingDotRings(value: String) = set(KEY_FLOATING_DOT_RINGS, value)
 
+    /** 底部导航栏（底部胶囊标签栏）是否显示，默认开启；与悬浮圆点至少保留一个。 */
+    suspend fun bottomBarEnabled(): Boolean = get(KEY_BOTTOM_BAR) != "0"
+    suspend fun setBottomBarEnabled(value: Boolean) =
+        set(KEY_BOTTOM_BAR, if (value) "1" else "0")
+
     // ---------------- 内部 ----------------
 
     private suspend fun get(key: Preferences.Key<String>): String? = dataStore.data.first()[key]
@@ -325,5 +330,6 @@ class AppPreferences(
         private val KEY_FLOATING_DOT_LABELS = stringPreferencesKey("floating_dot_labels")
         private val KEY_FLOATING_DOT_MENUS = stringPreferencesKey("floating_dot_menus")
         private val KEY_FLOATING_DOT_RINGS = stringPreferencesKey("floating_dot_rings")
+        private val KEY_BOTTOM_BAR = stringPreferencesKey("bottom_bar_enabled")
     }
 }

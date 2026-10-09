@@ -64,6 +64,8 @@ fun SettingsScreen(
     themeManager: ThemeManager,
     floatingDotEnabled: Boolean,
     onFloatingDotEnabledChange: (Boolean) -> Unit,
+    bottomBarEnabled: Boolean = true,
+    onBottomBarEnabledChange: (Boolean) -> Unit = {},
     floatingDotLabels: Boolean = true,
     onFloatingDotLabelsChange: (Boolean) -> Unit = {},
     floatingDotMenus: Set<String> = emptySet(),
@@ -146,9 +148,9 @@ fun SettingsScreen(
 
         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
 
-        // ---------------- 悬浮导航 ----------------
+        // ---------------- 导航 ----------------
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-            SectionHeader(title = "悬浮导航")
+            SectionHeader(title = "导航")
             Spacer(modifier = Modifier.padding(top = 4.dp))
             Row(
                 modifier = Modifier
@@ -163,7 +165,8 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onBackground,
                     )
                     Text(
-                        text = "点击圆点展开全部导航页（贴边扇形、居中圆形），按住可拖动到屏幕任意位置",
+                        text = "点击圆点展开全部导航页（贴边扇形、居中圆形），按住可拖动到屏幕任意位置；" +
+                            "与底部导航栏至少启用一个",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 2.dp),
@@ -172,7 +175,34 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.width(12.dp))
                 Switch(
                     checked = floatingDotEnabled,
+                    enabled = floatingDotEnabled || bottomBarEnabled,
                     onCheckedChange = onFloatingDotEnabledChange,
+                )
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "底部导航栏",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    Text(
+                        text = "屏幕底部的胶囊标签栏；隐藏后仍可用悬浮圆点导航，两者至少启用一个",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Switch(
+                    checked = bottomBarEnabled,
+                    enabled = bottomBarEnabled || floatingDotEnabled,
+                    onCheckedChange = onBottomBarEnabledChange,
                 )
             }
             Row(

@@ -3,7 +3,6 @@ package com.mobilecoder.ide.ui
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -227,9 +226,11 @@ fun AppRoot(
     // ---- ① 滚动自动收起顶/底栏（Chrome 式）：手指下滑露出、上滑收起 ----
     var barsHidden by remember { mutableStateOf(false) }
 
-    // ---- 悬浮导航圆点（设置页「悬浮导航」可开关，默认开）：状态的唯一来源，
-    //      设置页切换时立即生效，同时持久化到 AppPreferences。 ----
+    // ---- 导航入口（设置页「导航」可开关，默认开）：状态的唯一来源，
+    //      设置页切换时立即生效，同时持久化到 AppPreferences。
+    //      悬浮圆点与底部导航栏至少启用一个。 ----
     var floatingDotEnabled by remember { mutableStateOf(true) }
+    var bottomBarEnabled by remember { mutableStateOf(true) }
     // 展开菜单的标签开关 + 自定义菜单 route 集合（空 = 全部）+ 各项所在环，设置页与圆点共用
     var floatingDotLabels by remember { mutableStateOf(true) }
     var floatingDotMenus by remember { mutableStateOf(emptySet<String>()) }
@@ -239,6 +240,11 @@ fun AppRoot(
         floatingDotEnabled = runCatching {
             AppStorage.preferences.floatingDotEnabled()
         }.getOrDefault(true)
+        bottomBarEnabled = runCatching {
+            AppStorage.preferences.bottomBarEnabled()
+        }.getOrDefault(true)
+        // 兜底：两个入口都被关掉则无法再进入设置页，强制恢复底部导航栏
+        if (!floatingDotEnabled && !bottomBarEnabled) bottomBarEnabled = true
         floatingDotLabels = runCatching {
             AppStorage.preferences.floatingDotLabels()
         }.getOrDefault(true)
@@ -288,7 +294,6 @@ fun AppRoot(
     }
     // 换页面重新露出顶/底栏，并记录最近一次的底栏 tab（二级页高亮用）
     LaunchedEffect(currentRoute) {
-        Log.i("NavDbg", "currentRoute -> $currentRoute")
         barsHidden = false
         scrollAccum.floatValue = 0f
         val route = currentRoute
@@ -337,9 +342,10 @@ fun AppRoot(
             }
         },
         bottomBar = {
-            // 底部导航跟随 ①②③ 收起；键盘弹出时把空间全部让给键盘与内容
+            // 底部导航跟随 ①②③ 收起；键盘弹出时把空间全部让给键盘与内容；
+            // 设置页「导航」里关闭底部导航栏时整体隐藏
             AnimatedVisibility(
-                visible = !barsHidden && !isImeVisible() && !fullscreen,
+                visible = !barsHidden && !isImeVisible() && !fullscreen && bottomBarEnabled,
                 enter = expandVertically(expandFrom = Alignment.Bottom) + fadeIn(),
                 exit = shrinkVertically(shrinkTowards = Alignment.Bottom) + fadeOut(),
             ) {
@@ -507,6 +513,15 @@ fun AppRoot(
                                     }
                                 }
                             },
+                            bottomBarEnabled = bottomBarEnabled,
+                            onBottomBarEnabledChange = { next ->
+                                bottomBarEnabled = next
+                                dotScope.launch {
+                                    runCatching {
+                                        AppStorage.preferences.setBottomBarEnabled(next)
+                                    }
+                                }
+                            },
                             floatingDotLabels = floatingDotLabels,
                             onFloatingDotLabelsChange = { next ->
                                 floatingDotLabels = next
@@ -584,7 +599,6 @@ fun AppRoot(
             visibleMenus = floatingDotMenus,
             ringOverrides = floatingDotRings,
             onNavigate = { destination ->
-                Log.i("NavDbg", "menu click -> ${destination.route}")
                 if (destination.inBottomBar) {
                     navController.navigateTo(destination.route)
                 } else {
@@ -773,12 +787,10 @@ private fun ProjectGuard(
 }
 
 private fun NavHostController.navigateTo(route: String) {
-    Log.i("NavDbg", "navigateTo $route from=${currentDestination?.route}")
     navigate(route) {
         popUpTo(graph.findStartDestination().id)
         launchSingleTop = true
     }
-    Log.i("NavDbg", "navigateTo $route done -> ${currentDestination?.route}")
 }
 
 /** 二级页导航：入栈（不弹掉来源页），系统返回键回上一级（更多 → 构建 → 环境中心）。 */
