@@ -159,6 +159,9 @@ enum class AppDestination(
 
     /** 是否占底部导航位（重构后底栏固定 5 个 tab，其余为二级页：统一返回条）。 */
     val inBottomBar: Boolean = true,
+
+    /** 悬浮圆点扇形菜单里的短标签（菜单项紧凑，长名如「构建与运行」→「构建」）。 */
+    val menuLabel: String = label,
 ) {
     // ---- 底栏 5 tab ----
     HOME("home", "项目", Icons.Default.Folder),
@@ -168,12 +171,12 @@ enum class AppDestination(
     MORE("more", "更多", Icons.Default.MoreHoriz),
 
     // ---- 二级页（顶部统一返回条，标题即 label；系统返回键回上一级）----
-    BUILD("build", "构建与运行", Icons.Default.Build, inBottomBar = false),
-    AI("ai", "AI 助手", Icons.Default.SmartToy, inBottomBar = false),
-    SSH("ssh", "SSH 密钥", Icons.Default.Lock, inBottomBar = false),
-    HISTORY("history", "历史记录", Icons.Default.History, inBottomBar = false),
-    ENV("env", "环境中心", Icons.Default.Widgets, inBottomBar = false),
-    MARKET("market", "软件市场", Icons.Default.ShoppingCart, inBottomBar = false),
+    BUILD("build", "构建与运行", Icons.Default.Build, inBottomBar = false, menuLabel = "构建"),
+    AI("ai", "AI 助手", Icons.Default.SmartToy, inBottomBar = false, menuLabel = "AI"),
+    SSH("ssh", "SSH 密钥", Icons.Default.Lock, inBottomBar = false, menuLabel = "SSH"),
+    HISTORY("history", "历史记录", Icons.Default.History, inBottomBar = false, menuLabel = "记录"),
+    ENV("env", "环境中心", Icons.Default.Widgets, inBottomBar = false, menuLabel = "环境"),
+    MARKET("market", "软件市场", Icons.Default.ShoppingCart, inBottomBar = false, menuLabel = "市场"),
     SETTINGS("settings", "设置", Icons.Default.Settings, inBottomBar = false),
     ABOUT("about", "关于", Icons.Default.Info, inBottomBar = false),
     ;
@@ -222,6 +225,46 @@ fun AppRoot(
 
     // ---- ① 滚动自动收起顶/底栏（Chrome 式）：手指下滑露出、上滑收起 ----
     var barsHidden by remember { mutableStateOf(false) }
+
+    // ---- 导航入口（设置页「导航」可开关，默认开）：状态的唯一来源，
+    //      设置页切换时立即生效，同时持久化到 AppPreferences。
+    //      悬浮圆点与底部导航栏至少启用一个。 ----
+    var floatingDotEnabled by remember { mutableStateOf(true) }
+    var bottomBarEnabled by remember { mutableStateOf(true) }
+    // 展开菜单的标签开关 + 自定义菜单 route 集合（空 = 全部）+ 各项所在环，设置页与圆点共用
+    var floatingDotLabels by remember { mutableStateOf(true) }
+    var floatingDotMenus by remember { mutableStateOf(emptySet<String>()) }
+    var floatingDotRings by remember { mutableStateOf(emptyMap<String, Int>()) }
+    val dotScope = rememberCoroutineScope()
+    LaunchedEffect(Unit) {
+        floatingDotEnabled = runCatching {
+            AppStorage.preferences.floatingDotEnabled()
+        }.getOrDefault(true)
+        bottomBarEnabled = runCatching {
+            AppStorage.preferences.bottomBarEnabled()
+        }.getOrDefault(true)
+        // 兜底：两个入口都被关掉则无法再进入设置页，强制恢复底部导航栏
+        if (!floatingDotEnabled && !bottomBarEnabled) bottomBarEnabled = true
+        floatingDotLabels = runCatching {
+            AppStorage.preferences.floatingDotLabels()
+        }.getOrDefault(true)
+        floatingDotMenus = runCatching { AppStorage.preferences.floatingDotMenus() }.getOrNull()
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.toSet()
+            ?: emptySet()
+        floatingDotRings = runCatching { AppStorage.preferences.floatingDotRings() }.getOrNull()
+            ?.split(',')
+            ?.mapNotNull { part ->
+                val bits = part.split('=')
+                val route = bits.getOrNull(0)?.trim()
+                val ring = bits.getOrNull(1)?.toIntOrNull()
+                if (!route.isNullOrEmpty() && ring != null) route to ring else null
+            }
+            ?.toMap()
+            ?: emptyMap()
+    }
     val scrollAccum = remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
     // 阈值 48dp：阅读/输入时手指的小幅抖动不再误触收起
@@ -277,10 +320,13 @@ fun AppRoot(
     // 全屏时按返回键 = 退出全屏（而不是退出应用）
     BackHandler(enabled = fullscreen) { fullscreen = false }
 
-    Scaffold(
-        // imePadding：键盘弹出时整体上移，避免输入框被遮挡（键盘可见时底部导航
-        // 已不渲染，见下方 bottomBar）
-        modifier = modifier.fillMaxSize().imePadding(),
+    // 悬浮圆点渲染在 Scaffold 之外、其上层：Scaffold 的 top/bottomBar 画在 content
+    // 之后，圆点原来放 content Box 里会被顶/底栏盖住（展开菜单在最上层显示）
+    Box(modifier = modifier.fillMaxSize()) {
+        Scaffold(
+            // imePadding：键盘弹出时整体上移，避免输入框被遮挡（键盘可见时底部导航
+            // 已不渲染，见下方 bottomBar）
+            modifier = Modifier.fillMaxSize().imePadding(),
         topBar = {
             // 收起条件：① 向下滚动收起 ② 全屏（② 键盘弹出时顶栏保留，输入时仍能看到项目与分支）
             AnimatedVisibility(
@@ -296,9 +342,10 @@ fun AppRoot(
             }
         },
         bottomBar = {
-            // 底部导航跟随 ①②③ 收起；键盘弹出时把空间全部让给键盘与内容
+            // 底部导航跟随 ①②③ 收起；键盘弹出时把空间全部让给键盘与内容；
+            // 设置页「导航」里关闭底部导航栏时整体隐藏
             AnimatedVisibility(
-                visible = !barsHidden && !isImeVisible() && !fullscreen,
+                visible = !barsHidden && !isImeVisible() && !fullscreen && bottomBarEnabled,
                 enter = expandVertically(expandFrom = Alignment.Bottom) + fadeIn(),
                 exit = shrinkVertically(shrinkTowards = Alignment.Bottom) + fadeOut(),
             ) {
@@ -455,7 +502,58 @@ fun AppRoot(
                 }
                 composable(AppDestination.SETTINGS.route) {
                     SubPage(AppDestination.SETTINGS, onBack = { navController.popBackStack() }) {
-                        SettingsScreen(themeManager = themeManager)
+                        SettingsScreen(
+                            themeManager = themeManager,
+                            floatingDotEnabled = floatingDotEnabled,
+                            onFloatingDotEnabledChange = { next ->
+                                floatingDotEnabled = next
+                                dotScope.launch {
+                                    runCatching {
+                                        AppStorage.preferences.setFloatingDotEnabled(next)
+                                    }
+                                }
+                            },
+                            bottomBarEnabled = bottomBarEnabled,
+                            onBottomBarEnabledChange = { next ->
+                                bottomBarEnabled = next
+                                dotScope.launch {
+                                    runCatching {
+                                        AppStorage.preferences.setBottomBarEnabled(next)
+                                    }
+                                }
+                            },
+                            floatingDotLabels = floatingDotLabels,
+                            onFloatingDotLabelsChange = { next ->
+                                floatingDotLabels = next
+                                dotScope.launch {
+                                    runCatching {
+                                        AppStorage.preferences.setFloatingDotLabels(next)
+                                    }
+                                }
+                            },
+                            floatingDotMenus = floatingDotMenus,
+                            onFloatingDotMenusChange = { next ->
+                                floatingDotMenus = next
+                                dotScope.launch {
+                                    runCatching {
+                                        AppStorage.preferences.setFloatingDotMenus(
+                                            next.joinToString(","),
+                                        )
+                                    }
+                                }
+                            },
+                            floatingDotRings = floatingDotRings,
+                            onFloatingDotRingsChange = { next ->
+                                floatingDotRings = next
+                                dotScope.launch {
+                                    runCatching {
+                                        AppStorage.preferences.setFloatingDotRings(
+                                            next.entries.joinToString(",") { "${it.key}=${it.value}" },
+                                        )
+                                    }
+                                }
+                            },
+                        )
                     }
                 }
                 composable(AppDestination.ABOUT.route) {
@@ -491,6 +589,23 @@ fun AppRoot(
                 )
             }
         }
+        }
+
+        // 悬浮导航圆点：位于 Scaffold 之上（最上层），展开菜单不被顶/底栏或内容遮挡
+        FloatingNavDot(
+            enabled = floatingDotEnabled,
+            currentRoute = currentRoute,
+            showLabels = floatingDotLabels,
+            visibleMenus = floatingDotMenus,
+            ringOverrides = floatingDotRings,
+            onNavigate = { destination ->
+                if (destination.inBottomBar) {
+                    navController.navigateTo(destination.route)
+                } else {
+                    navController.navigateToSub(destination.route)
+                }
+            },
+        )
     }
 }
 
@@ -673,9 +788,8 @@ private fun ProjectGuard(
 
 private fun NavHostController.navigateTo(route: String) {
     navigate(route) {
-        popUpTo(graph.findStartDestination().id) { saveState = true }
+        popUpTo(graph.findStartDestination().id)
         launchSingleTop = true
-        restoreState = true
     }
 }
 
@@ -683,7 +797,6 @@ private fun NavHostController.navigateTo(route: String) {
 private fun NavHostController.navigateToSub(route: String) {
     navigate(route) {
         launchSingleTop = true
-        restoreState = true
     }
 }
 
