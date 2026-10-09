@@ -229,6 +229,31 @@ class AppPreferences(
     suspend fun aiRoundLimit(): Int = getInt(KEY_AI_ROUND_LIMIT, 100_000)
     suspend fun setAiRoundLimit(value: Int) = setInt(KEY_AI_ROUND_LIMIT, value.coerceIn(0, 1_000_000))
 
+    // ---------------- 悬浮导航圆点 ----------------
+
+    /** 悬浮导航圆点（点击弹出扇形导航菜单），默认开启；设置页可关。 */
+    suspend fun floatingDotEnabled(): Boolean = get(KEY_FLOATING_DOT) != "0"
+    suspend fun setFloatingDotEnabled(value: Boolean) =
+        set(KEY_FLOATING_DOT, if (value) "1" else "0")
+
+    /** 悬浮圆点位置：相对容器的千分比 `"x,y"`；null = 未拖动过（用默认位）。 */
+    suspend fun floatingDotPos(): String? = get(KEY_FLOATING_DOT_POS)
+    suspend fun setFloatingDotPos(x: Int, y: Int) =
+        set(KEY_FLOATING_DOT_POS, "$x,$y")
+
+    /** 悬浮圆点菜单是否显示图标名称（外环标签），默认显示。 */
+    suspend fun floatingDotLabels(): Boolean = get(KEY_FLOATING_DOT_LABELS) != "0"
+    suspend fun setFloatingDotLabels(value: Boolean) =
+        set(KEY_FLOATING_DOT_LABELS, if (value) "1" else "0")
+
+    /** 悬浮圆点菜单显示哪些项：route 逗号分隔；null/空 = 全部显示。 */
+    suspend fun floatingDotMenus(): String? = get(KEY_FLOATING_DOT_MENUS)
+    suspend fun setFloatingDotMenus(value: String) = set(KEY_FLOATING_DOT_MENUS, value)
+
+    /** 各菜单项所在环：`route=0/1` 逗号分隔（0=内圈、1=外圈）；null/空 = 默认（底栏内圈、二级页外圈）。 */
+    suspend fun floatingDotRings(): String? = get(KEY_FLOATING_DOT_RINGS)
+    suspend fun setFloatingDotRings(value: String) = set(KEY_FLOATING_DOT_RINGS, value)
+
     // ---------------- 内部 ----------------
 
     private suspend fun get(key: Preferences.Key<String>): String? = dataStore.data.first()[key]
@@ -295,5 +320,10 @@ class AppPreferences(
         private val KEY_AI_CONFIRM_WRITES = stringPreferencesKey("ai_confirm_writes")
         private val KEY_AI_SYSTEM_PROMPT = stringPreferencesKey("ai_system_prompt")
         private val KEY_AI_ROUND_LIMIT = intPreferencesKey("ai_round_limit")
+        private val KEY_FLOATING_DOT = stringPreferencesKey("floating_dot_enabled")
+        private val KEY_FLOATING_DOT_POS = stringPreferencesKey("floating_dot_pos")
+        private val KEY_FLOATING_DOT_LABELS = stringPreferencesKey("floating_dot_labels")
+        private val KEY_FLOATING_DOT_MENUS = stringPreferencesKey("floating_dot_menus")
+        private val KEY_FLOATING_DOT_RINGS = stringPreferencesKey("floating_dot_rings")
     }
 }
