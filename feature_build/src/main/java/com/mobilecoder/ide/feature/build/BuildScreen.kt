@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -22,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ExpandLess
@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -79,17 +80,21 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * PRD 2.7 安卓项目编译打包页面。
+ * PRD 2.7「构建与运行」页面 —— **多项目类型**：按 [detectProject] 识别的类型
+ * 动态匹配语言 / 环境 / 构建命令（安卓 Gradle APK、纯 JVM JAR、npm dist、
+ * 静态 HTML / 未识别类型源码打包），**所有项目都能产出可下载 / 分享的产物**。
  *
  * 布局（Column，不加 bottomBar，由 app 的 Scaffold 提供底部导航）：
- *  0. 环境状态条（整行点击 → [onOpenEnvironment] 打开「环境中心」）
- *  1. 工程信息
- *  2. 变体选择 + 开始/取消构建 + Clean + 内存仪表
- *  3. 阶段进度条
- *  4. 实时日志（自动滚动 / 暂停 / 清空 / 复制）
- *  5. 错误列表（可折叠，点击记录跳转目标）
- *  6. APK 产物（安装 / 分享 / 复制路径 / 打开目录）
- *  7. 构建历史（可折叠）
+ *  0. 项目头卡（工程名/路径 + 环境就绪徽标 → [onOpenEnvironment] + 类型/所需环境/产物摘要一行，
+ *     合并原「环境状态条 + 工程信息 + 类型徽标」三块，环境信息只说一遍）
+ *  1. 补充引导卡（Flutter / Python 等 hint，仅有提示时显示）
+ *  2. 构建选项行（变体[仅安卓] + Clean + 高级选项[仅 Gradle]，可展开附加任务输入）
+ *  3. 主按钮：开始/取消构建（满宽，构建中为警示色）
+ *  4. 阶段进度 + 状态行 + 内存仪表（**仅构建中 / 有结果时显示**，空闲态不占位）
+ *  5. 实时日志（自动滚动 / 暂停 / 清空 / 复制）
+ *  6. 错误列表（可折叠，点击记录跳转）
+ *  7. 构建产物（APK：安装 · 全部：分享 / 下载 / 复制路径 / 打开目录）
+ *  8. 构建历史（可折叠）
  *
  * 本页是路由页（壳层统一渲染返回栏 + 「构建与运行」标题），因此**不自带**路由级
  * 返回栏 / 页面大标题；提示类反馈统一走页面内 [SnackbarHostState]（无 Toast）。
@@ -107,7 +112,8 @@ fun BuildScreen(
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val projectDir = remember(projectPath) { File(projectPath) }
-    val isProject = remember(projectPath) { BuildRunner.isGradleProject(projectDir) }
+    val profile = remember(projectPath) { detectProject(projectDir) }
+    val usesGradle = profile.usesGradle
 
     val state by BuildRunner.state.collectAsStateWithLifecycle()
     val logs by BuildRunner.logs.collectAsStateWithLifecycle()
@@ -138,6 +144,7 @@ fun BuildScreen(
 
     LaunchedEffect(projectPath) {
         BuildRunner.init(context)
+        BuildRunner.openProject(projectDir)
         runCatching { BuildEnvironment.refresh(context, projectDir) }
         runCatching { variant = AppStorage.preferences.buildVariant() }
     }
@@ -165,187 +172,150 @@ fun BuildScreen(
     Box(modifier = modifier) {
         Column(modifier = Modifier.fillMaxSize()) {
 
-            // ---------------- 环境状态条：整体就绪度 + 组件摘要（→ 环境中心） ----------------
-            EnvironmentStatusBar(
+            // ---------------- 项目头卡：工程信息 + 环境徽标（→ 环境中心）+ 类型/产物摘要 ----------------
+            ProjectHeaderCard(
+                projectName = projectDir.name.ifBlank { projectPath },
+                projectPath = projectPath,
+                profile = profile,
                 status = envStatus,
-                onClick = { onOpenEnvironment(false) },
+                onOpenEnvironment = { onOpenEnvironment(false) },
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
+            profile.hint?.let { hint -> HintCard(hint = hint) }
 
-            // ---------------- 顶部：工程信息 ----------------
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = projectDir.name.ifBlank { projectPath },
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = projectPath,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-
-            if (!isProject) {
-                val isNodeProject = remember(projectPath) { File(projectPath, "package.json").exists() }
-                Card(
+            // ---------------- 构建选项行：变体（仅安卓）+ Clean + 高级选项（仅 Gradle） ----------------
+            if (usesGradle) {
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                    ),
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            text = if (isNodeProject) "该项目是 Node / Vue 工程" else "该项目不是安卓 Gradle 工程",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                        )
-                        Text(
-                            text = if (isNodeProject) {
-                                "Node 工程无需 Gradle 构建：请在顶部「环境状态条」进入「环境中心」在线下载 Node.js，" +
-                                    "再在「终端」执行 npm install / npm run build。"
-                            } else {
-                                "缺少 settings.gradle / build.gradle。请在「项目」页新建「安卓应用」项目生成骨架后再构建。"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                        )
-                    }
-                }
-            }
-
-            // ---------------- 变体 + Clean ----------------
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.weight(1f)) {
-                    listOf("debug" to "Debug", "release" to "Release").forEachIndexed { index, (value, label) ->
-                        SegmentedButton(
-                            selected = variant == value,
-                            onClick = { if (!running) variant = value },
-                            shape = SegmentedButtonDefaults.itemShape(index = index, count = 2),
-                        ) {
-                            Text(label, style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-                }
-                FilterChip(
-                    selected = clean,
-                    onClick = { if (!running) clean = !clean },
-                    label = { Text("Clean") },
-                )
-            }
-
-            // ---------------- 主操作 + 内存仪表 ----------------
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Button(
-                    onClick = {
-                        if (running) {
-                            BuildRunner.cancel()
-                        } else {
-                            scope.launch {
-                                runCatching { AppStorage.preferences.setBuildVariant(variant) }
-                                val ok = BuildRunner.startBuild(
-                                    BuildRequest(
-                                        projectDir = projectDir,
-                                        variant = variant,
-                                        clean = clean,
-                                        extraTasks = BuildRunner.parseExtraTasks(extraTasksText),
-                                    ),
-                                )
-                                if (!ok) showHint("构建未能启动：请稍后重试（可能已有构建在进行）")
+                    if (profile.kind == ProjectKind.ANDROID_APP) {
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.weight(1f)) {
+                            listOf("debug" to "Debug", "release" to "Release").forEachIndexed { index, (value, label) ->
+                                SegmentedButton(
+                                    selected = variant == value,
+                                    onClick = { if (!running) variant = value },
+                                    shape = SegmentedButtonDefaults.itemShape(index = index, count = 2),
+                                ) {
+                                    Text(label, style = MaterialTheme.typography.labelMedium)
+                                }
                             }
                         }
-                    },
-                    enabled = isProject || running,
-                ) {
-                    Icon(
-                        imageVector = if (running) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.padding(end = 4.dp),
+                    } else {
+                        // 纯 JVM：无变体概念，右侧对齐 Clean / 高级
+                        Spacer(Modifier.weight(1f))
+                    }
+                    FilterChip(
+                        selected = clean,
+                        onClick = { if (!running) clean = !clean },
+                        label = { Text("Clean") },
                     )
-                    Text(if (running) "取消构建" else "开始构建")
+                    TextButton(onClick = { showAdvanced = !showAdvanced }) {
+                        Text(
+                            text = if (showAdvanced) "收起高级" else "高级选项",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
                 }
-                Spacer(Modifier.width(4.dp))
-                MemoryGauge(sample = memory, modifier = Modifier.weight(1f))
-            }
-
-            // ---------------- 高级选项：附加 Gradle 任务（默认空 = 安全默认值） ----------------
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = { showAdvanced = !showAdvanced }) {
-                    Text(
-                        text = if (showAdvanced) "收起高级选项" else "高级选项",
-                        style = MaterialTheme.typography.labelMedium,
+                if (showAdvanced) {
+                    OutlinedTextField(
+                        value = extraTasksText,
+                        onValueChange = { if (!running) extraTasksText = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        enabled = !running,
+                        singleLine = true,
+                        label = { Text("附加 Gradle 任务（可选，空格分隔）") },
+                        placeholder = { Text("例如：lint test") },
+                        textStyle = MaterialTheme.typography.bodySmall,
                     )
-                }
-                Spacer(Modifier.weight(1f))
-                if (extraTasksText.isNotBlank()) {
+                } else if (extraTasksText.isNotBlank()) {
                     Text(
-                        text = "附加：${BuildRunner.parseExtraTasks(extraTasksText).joinToString(" ")}",
+                        text = "附加任务：${BuildRunner.parseExtraTasks(extraTasksText).joinToString(" ")}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(end = 16.dp),
+                        modifier = Modifier.padding(horizontal = 16.dp),
                     )
                 }
             }
-            if (showAdvanced) {
-                OutlinedTextField(
-                    value = extraTasksText,
-                    onValueChange = { if (!running) extraTasksText = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    enabled = !running,
-                    singleLine = true,
-                    label = { Text("附加 Gradle 任务（可选，空格分隔）") },
-                    placeholder = { Text("例如：lint test") },
-                    textStyle = MaterialTheme.typography.bodySmall,
-                )
-            }
 
-            // ---------------- 阶段进度 ----------------
-            LinearProgressIndicator(
-                progress = { progress },
+            // ---------------- 主按钮：开始 / 取消（满宽易点按，构建中为警示色） ----------------
+            Button(
+                onClick = {
+                    if (running) {
+                        BuildRunner.cancel()
+                    } else {
+                        scope.launch {
+                            runCatching { AppStorage.preferences.setBuildVariant(variant) }
+                            val ok = BuildRunner.startBuild(
+                                BuildRequest(
+                                    projectDir = projectDir,
+                                    variant = variant,
+                                    clean = clean,
+                                    extraTasks = BuildRunner.parseExtraTasks(extraTasksText),
+                                ),
+                            )
+                            if (!ok) showHint("构建未能启动：请稍后重试（可能已有构建在进行）")
+                        }
+                    }
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 4.dp),
-                color = when (state) {
-                    is BuildState.Success -> Color(0xFF000000 or palette.success.rgb)
-                    is BuildState.Failed -> Color(0xFF000000 or palette.logError.rgb)
-                    else -> MaterialTheme.colorScheme.primary
+                colors = if (running) {
+                    ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF000000 or palette.logError.rgb),
+                        contentColor = Color.White,
+                    )
+                } else {
+                    ButtonDefaults.buttonColors()
                 },
-            )
-            StatusLine(state = state, phase = phase, elapsedMs = elapsedMs)
+            ) {
+                Icon(
+                    imageVector = if (running) Icons.Default.Close else Icons.Default.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.padding(end = 4.dp),
+                )
+                Text(
+                    text = when {
+                        running && profile.kind == ProjectKind.ZIP_PACKAGE -> "取消打包"
+                        running -> "取消构建"
+                        profile.kind == ProjectKind.ZIP_PACKAGE -> "打包项目"
+                        profile.kind == ProjectKind.NODE -> "开始构建"
+                        else -> "开始构建"
+                    },
+                )
+            }
+
+            // ---------------- 阶段进度 + 状态 + 内存（仅构建中 / 有结果时显示，空闲不占位） ----------------
+            if (state != BuildState.Idle) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    color = when (state) {
+                        is BuildState.Success -> Color(0xFF000000 or palette.success.rgb)
+                        is BuildState.Failed -> Color(0xFF000000 or palette.logError.rgb)
+                        else -> MaterialTheme.colorScheme.primary
+                    },
+                )
+                StatusLine(state = state, phase = phase, elapsedMs = elapsedMs)
+                if (memory != null) {
+                    MemoryGauge(
+                        sample = memory,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 2.dp),
+                    )
+                }
+            }
 
             // ---------------- 实时日志 ----------------
             Row(
@@ -445,7 +415,7 @@ fun BuildScreen(
 
                 if (artifacts.isNotEmpty() || state is BuildState.Success) {
                     SectionHeader(
-                        title = "APK 产物（${artifacts.size}）",
+                        title = "构建产物（${artifacts.size}）",
                         action = {
                             IconButton(onClick = { showArtifacts = !showArtifacts }) {
                                 Icon(
@@ -458,7 +428,8 @@ fun BuildScreen(
                     if (showArtifacts) {
                         if (artifacts.isEmpty()) {
                             Text(
-                                text = "本次构建未发现 APK 产物",
+                                text = "本次构建未发现产物" +
+                                    if (profile.kind == ProjectKind.NODE) "（未找到 dist / out / build 目录）" else "",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -504,51 +475,118 @@ fun BuildScreen(
 // ---------------------------------------------------------------------------
 
 /**
- * 环境状态条：整体就绪度（[EnvBadge]，如「就绪 4/4」）+ 各组件简要摘要 + 进入
- * 「环境中心」的箭头。整行可点击（44dp ≥ 40dp 触控目标），点击回调 [onClick]。
+ * 项目头卡：工程名 / 路径 + 环境就绪徽标（[EnvBadge] + 箭头 → [onOpenEnvironment]）
+ * + 类型 / 所需环境 / 产物一行摘要。
+ *
+ * 合并了原「环境状态条 + 工程信息行 + 项目类型徽标」三块，环境信息只出现一次；
+ * 例：`测试` + `就绪 2/2 ›`，第二行 `Vue / Vite（Node.js） · Node.js✓ · Linux 环境✓ · 产物：dist 压缩包`。
  */
 @Composable
-private fun EnvironmentStatusBar(
+private fun ProjectHeaderCard(
+    projectName: String,
+    projectPath: String,
+    profile: ProjectProfile,
     status: EnvStatus?,
-    onClick: () -> Unit,
+    onOpenEnvironment: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // 取一份非委托的局部引用，便于 null 判定后的智能转换
-    val current: EnvStatus? = status
-    val summary = when {
-        current == null -> "正在检测环境组件…"
-        else -> current.items.joinToString(" · ") { item ->
-            "${item.kind.title}${if (item.ready) "✓" else "✗"}"
-        }
-    }
     Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(44.dp)
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(8.dp),
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            EnvBadge(status = current)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = projectName,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = projectPath,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                // 徽标 + 箭头：整块可点，进入环境中心（≥40dp 触控高度）
+                Row(
+                    modifier = Modifier
+                        .clickable(onClick = onOpenEnvironment)
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    EnvBadge(status = status)
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = "进入环境中心",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             Text(
-                text = summary,
+                text = profileSummary(profile = profile, status = status),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
             )
-            Icon(
-                imageVector = Icons.Default.ChevronRight,
-                contentDescription = "进入环境中心",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        }
+    }
+}
+
+/** 头卡第二行摘要：`类型 · 所需环境就绪态 · 产物：xxx`（环境取实际体检项，含按需追加的 Linux）。 */
+private fun profileSummary(profile: ProjectProfile, status: EnvStatus?): String = buildString {
+    append(profile.displayName)
+    append(" · ")
+    // 已出体检结果 → 用实际体检项（含 withLinuxIfNeeded 追加的 Linux）；否则退回类型声明的需求
+    val items = status?.items.orEmpty()
+    val required = if (status != null) items.map { it.kind } else profile.requiredEnv
+    when {
+        required.isEmpty() -> append("无需编译环境")
+        status == null -> {
+            append("需要 ")
+            append(required.joinToString(" · ") { it.title })
+            append("（检测中）")
+        }
+        else -> append(items.joinToString(" · ") { "${it.kind.title}${if (it.ready) "✓" else "✗"}" })
+    }
+    append(" · 产物：")
+    append(profile.artifactLabel)
+}
+
+/** 补充引导卡（Flutter / Python / 未识别类型等的完整构建提示）。 */
+@Composable
+private fun HintCard(hint: String) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+        ),
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = "提示",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = hint,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -556,7 +594,7 @@ private fun EnvironmentStatusBar(
 
 /**
  * 环境就绪徽标：就绪绿 / 缺失红（随主题调色板），带就绪计数（如「就绪 4/4」）；
- * 尚未完成体检（[status] 为 null）时显示「检测中」。
+ * 纯打包类项目（无所需组件）显示绿色「无需环境」；尚未完成体检显示「检测中」。
  */
 @Composable
 private fun EnvBadge(status: EnvStatus?) {
@@ -565,9 +603,10 @@ private fun EnvBadge(status: EnvStatus?) {
     val current: EnvStatus? = status
     val items = current?.items.orEmpty()
     val readyCount = items.count { it.ready }
+    val noEnv = current != null && items.isEmpty()
     val color = when {
         current == null -> MaterialTheme.colorScheme.onSurfaceVariant
-        current.ready -> Color(0xFF000000 or palette.success.rgb)
+        noEnv || current.ready -> Color(0xFF000000 or palette.success.rgb)
         else -> Color(0xFF000000 or palette.logError.rgb)
     }
     Surface(
@@ -582,7 +621,7 @@ private fun EnvBadge(status: EnvStatus?) {
             Text(
                 text = when {
                     current == null -> "…"
-                    current.ready -> "●"
+                    noEnv || current.ready -> "●"
                     else -> "▲"
                 },
                 style = MaterialTheme.typography.labelSmall,
@@ -591,6 +630,7 @@ private fun EnvBadge(status: EnvStatus?) {
             Text(
                 text = when {
                     current == null -> "检测中"
+                    noEnv -> "无需环境"
                     current.ready -> "就绪 $readyCount/${items.size}"
                     else -> "缺 ${items.size - readyCount}/${items.size}"
                 },
@@ -653,10 +693,11 @@ private fun StatusLine(state: BuildState, phase: String, elapsedMs: Long) {
     val (text, color) = when (state) {
         BuildState.Idle -> phase to MaterialTheme.colorScheme.onSurfaceVariant
         is BuildState.Preparing -> state.message to MaterialTheme.colorScheme.primary
-        is BuildState.Running -> "构建中 · ${state.task.variant} · 已用 ${formatDuration(elapsedMs)}" to
+        is BuildState.Running -> "${state.task.label} · 已用 ${formatDuration(elapsedMs)}" to
             MaterialTheme.colorScheme.primary
-        is BuildState.Success -> "构建成功 · ${state.apks.size} 个 APK · 耗时 ${formatDuration(state.durationMs)}" to
-            Color(0xFF000000 or palette.success.rgb)
+        is BuildState.Success ->
+            "构建成功 · ${state.artifacts.size} 个产物 · 耗时 ${formatDuration(state.durationMs)}" to
+                Color(0xFF000000 or palette.success.rgb)
         is BuildState.Failed -> state.message to Color(0xFF000000 or palette.logError.rgb)
     }
     Text(
@@ -766,7 +807,7 @@ private fun ErrorRow(
     }
 }
 
-/** 产物行：名称 / 模块 / 变体 / 大小 / 时间 + 安装·分享·复制路径。 */
+/** 产物行：名称 / 模块 / 变体 / 大小 / 时间 + 按类型可用的动作（安装·分享·下载·路径·目录）。 */
 @Composable
 private fun ArtifactRow(
     artifact: BuildArtifact,
@@ -774,6 +815,7 @@ private fun ArtifactRow(
 ) {
     val context = LocalContext.current
     val file = remember(artifact.path) { File(artifact.path) }
+    val isApk = remember(artifact.name) { ApkActions.isApk(file) }
     val time = remember(artifact.modifiedAt) {
         SimpleDateFormat("MM-dd HH:mm", Locale.ROOT).format(Date(artifact.modifiedAt))
     }
@@ -804,7 +846,7 @@ private fun ArtifactRow(
             )
         }
         Text(
-            text = "${artifact.module} · ${artifact.path}",
+            text = if (artifact.module.isBlank()) artifact.path else "${artifact.module} · ${artifact.path}",
             style = MaterialTheme.typography.labelSmall,
             fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -818,19 +860,24 @@ private fun ArtifactRow(
                 color = Color(0xFF000000 or LocalAppPalette.current.logWarn.rgb),
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+            if (isApk) {
+                TextButton(onClick = {
+                    onHint(ApkActions.install(context, file) ?: "已发起安装：${artifact.name}")
+                }) { Text("安装") }
+            }
             TextButton(onClick = {
-                onHint(ApkActions.install(context, file) ?: "已发起安装：${artifact.name}")
-            }) { Text("安装") }
-            TextButton(onClick = {
-                onHint(ApkActions.share(context, file) ?: "已打开分享面板")
+                onHint(ApkActions.share(context, file) ?: "已打开分享面板：${artifact.name}")
             }) { Text("分享") }
             TextButton(onClick = {
+                onHint(ApkActions.download(context, file) ?: "已保存到 下载/MobileCoder/${artifact.name}")
+            }) { Text("下载") }
+            TextButton(onClick = {
                 onHint(ApkActions.copyPath(context, file) ?: "路径已复制")
-            }) { Text("复制路径") }
+            }) { Text("路径") }
             TextButton(onClick = {
                 onHint(ApkActions.openDirectory(context, file.parentFile ?: file) ?: "已打开所在目录")
-            }) { Text("打开目录") }
+            }) { Text("目录") }
         }
     }
 }

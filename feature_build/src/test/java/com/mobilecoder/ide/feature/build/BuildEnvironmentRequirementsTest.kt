@@ -73,18 +73,31 @@ class BuildEnvironmentRequirementsTest {
     }
 
     @Test
-    fun unrecognizedProject_defaultsToAndroidToolchain() {
+    fun unrecognizedProject_requiresNoToolchainForPackaging() {
+        // 未识别类型 → 源码打包即可，不再兜底要求安卓工具链（动态匹配环境）
         val root = dir("empty")
-        assertEquals(
-            listOf(EnvKind.JDK, EnvKind.GRADLE, EnvKind.SDK),
-            BuildEnvironment.requirementsFor(root),
-        )
+        assertEquals(emptyList<EnvKind>(), BuildEnvironment.requirementsFor(root))
+    }
+
+    @Test
+    fun staticHtmlProject_requiresNoToolchain() {
+        val root = dir("site")
+        root.touch("index.html", "<!doctype html>")
+        assertEquals(emptyList<EnvKind>(), BuildEnvironment.requirementsFor(root))
+    }
+
+    @Test
+    fun nodeProjectWithoutBuildScript_requiresNoToolchain() {
+        // 无 build 脚本的 Node 工程按源码打包处理，不需要 Node 运行时
+        val root = dir("node-app")
+        root.touch("package.json", "{\"scripts\":{\"start\":\"node index.js\"}}")
+        assertEquals(emptyList<EnvKind>(), BuildEnvironment.requirementsFor(root))
     }
 
     @Test
     fun withLinuxIfNeeded_appendsLinuxExactlyOnce() {
-        // LINUX 不由 requirementsFor 决定，而是在体检/下载入口恒并入（终端、npm、
-        // sdkmanager、构建里的 java 全部从 proot 走 → 所有项目的硬依赖）
+        // LINUX 不由 requirementsFor 决定，而是在体检入口并入（终端、npm、sdkmanager、
+        // 构建里的 java 全部从 proot 走 → 需要子进程的项目的硬依赖）
         val base = BuildEnvironment.requirementsFor(null)
         assertFalse(base.contains(EnvKind.LINUX))
 
@@ -96,5 +109,7 @@ class BuildEnvironmentRequirementsTest {
         assertEquals(withLinux, BuildEnvironment.withLinuxIfNeeded(withLinux))
         // 只要 LINUX 的场景（纯终端）也不再追加第二份
         assertEquals(listOf(EnvKind.LINUX), BuildEnvironment.withLinuxIfNeeded(listOf(EnvKind.LINUX)))
+        // 纯打包类项目（无需求）不追加 Linux —— 进程内 zip 不需要任何子进程环境
+        assertEquals(emptyList<EnvKind>(), BuildEnvironment.withLinuxIfNeeded(emptyList()))
     }
 }

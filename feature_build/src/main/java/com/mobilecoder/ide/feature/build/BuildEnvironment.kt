@@ -46,13 +46,18 @@ data class EnvItem(
 
 /** 整体环境体检结果。 */
 data class EnvStatus(
-    /** 当前项目**需要**的组件（按项目类型动态推断，未识别的工程按安卓处理）。 */
+    /** 当前项目**需要**的组件（按项目类型动态推断；纯打包类项目为空）。 */
     val items: List<EnvItem>,
     val required: List<EnvKind> = items.map { it.kind },
+    /**
+     * 设备上**已装但非当前项目必需**的工具（软件市场 / 终端里 agent 装的
+     * Python、GCC、Git 等）。环境状态条据此体现「这些环境其实已经有了」。
+     */
+    val extraTools: List<String> = emptyList(),
 ) {
 
-    /** 所需组件全部就绪才算构建环境可用。 */
-    val ready: Boolean get() = items.isNotEmpty() && items.all { it.ready }
+    /** 所需组件全部就绪才算构建环境可用（无需求的项目恒为 true）。 */
+    val ready: Boolean get() = items.all { it.ready }
 
     fun item(kind: EnvKind): EnvItem? = items.firstOrNull { it.kind == kind }
 }
@@ -135,7 +140,12 @@ object BuildEnvironment {
     suspend fun refresh(context: Context, projectDir: File? = null): EnvStatus {
         val all = detect(context)
         val required = withLinuxIfNeeded(requirementsFor(projectDir))
-        val status = EnvStatus(items = all.filter { it.kind in required }, required = required)
+        val items = all.filter { it.kind in required }
+        val status = EnvStatus(
+            items = items,
+            required = required,
+            extraTools = extraTools(all, items, context),
+        )
         _status.value = status
         // JAVA_HOME 同步注入进程环境，供终端 / CLI 子进程继承（与项目类型无关）
         runCatching {
@@ -145,40 +155,47 @@ object BuildEnvironment {
     }
 
     /**
-     * 把 **Linux 环境（LINUX）** 恒并入「所需组件」。
+     * 把 **Linux 环境（LINUX）** 并入「所需组件」——仅当确有需要执行的工具链时。
      *
-     * 不再按「node/java 是不是 glibc ELF」逐一预判（旧方案要读 ELF 头，既漏判
-     * 又会把不该装的场景也判进去）：终端命令、`npm`、`sdkmanager`、构建里的
-     * `java`/`gradle` 全部统一从 proot 走，rootfs 因此是**所有项目的硬依赖**——
-     * 装一次，终端即完整 Linux（可 `apt install` 任意包）。
+     * 终端命令、`npm`、`sdkmanager`、构建里的 `java`/`gradle` 全部统一从 proot 走，
+     * rootfs 因此是**需要子进程的项目**（Gradle / Node）的硬依赖 —— 装一次即可。
+     * 纯打包类项目（[ProjectKind.ZIP_PACKAGE]，进程内 zip）不跑任何子进程，
+     * 需求为空时不再追加 Linux，避免构建页出现与实际无关的「Linux 环境 ✗」。
      *
-     * @return 追加后的所需组件（已有则原样返回）
+     * @return 追加后的所需组件（已有或本就为空则原样返回）
      */
-    internal fun withLinuxIfNeeded(required: List<EnvKind>): List<EnvKind> =
-        if (EnvKind.LINUX in required) required else required + EnvKind.LINUX
+    internal fun withLinuxIfNeeded(required: List<EnvKind>): List<EnvKind> = when {
+        required.isEmpty() || EnvKind.LINUX in required -> required
+        else -> required + EnvKind.LINUX
+    }
 
     /**
      * 按当前项目类型推断**需要**哪些环境（「构建环境」页据此动态展示与检查）。
      *
-     * - 安卓 Gradle 工程 → JDK + Gradle + Android SDK
-     * - 纯 JVM/Kotlin Gradle 工程 → JDK + Gradle
-     * - Node/Vue 工程（package.json）→ Node.js
-     * - 未识别 → 按安卓工程处理
+     * 统一委托 [detectProject]（构建页与环境中心共用同一套类型识别）：
+     *  - 安卓 Gradle 工程 → JDK + Gradle + Android SDK
+     *  - 纯 JVM/Kotlin Gradle 工程 → JDK + Gradle
+     *  - Node/Vue 工程（package.json 且有 build 脚本）→ Node.js
+     *  - 静态 HTML / Flutter / Python / 未识别 → 空（源码打包无需工具链）
+     *  - [projectDir] 为 null（未打开项目）→ 按默认（安卓）展示
      */
     fun requirementsFor(projectDir: File?): List<EnvKind> {
         if (projectDir == null) return listOf(EnvKind.JDK, EnvKind.GRADLE, EnvKind.SDK)
-        val hasGradle = File(projectDir, "gradlew").exists() || listOf(
-            "settings.gradle",
-            "settings.gradle.kts",
-            "build.gradle",
-            "build.gradle.kts",
-        ).any { File(projectDir, it).exists() }
-        return when {
-            hasGradle && isAndroidProject(projectDir) -> listOf(EnvKind.JDK, EnvKind.GRADLE, EnvKind.SDK)
-            hasGradle -> listOf(EnvKind.JDK, EnvKind.GRADLE)
-            File(projectDir, "package.json").exists() -> listOf(EnvKind.NODE)
-            else -> listOf(EnvKind.JDK, EnvKind.GRADLE, EnvKind.SDK)
-        }
+        return detectProject(projectDir).requiredEnv
+    }
+
+    /**
+     * 已装但**非当前项目必需**的工具（市场 / 终端 agent 装的）+ 已就绪而本次未要求的
+     * 核心组件，去重后返回 —— 让构建页环境状态条体现设备已具备的全部能力。
+     */
+    private fun extraTools(all: List<EnvItem>, items: List<EnvItem>, context: Context): List<String> {
+        val readyRequired = items.filter { it.ready }.map { it.kind.title }
+        val coreReady = all.filter { it.ready }.map { it.kind.title }
+        val rootfs = Proot.rootfsDir(context)
+        val marketReady = MarketInstaller.items
+            .filter { MarketInstaller.probeInstalled(rootfs, it) }
+            .map { it.name }
+        return (coreReady + marketReady).distinct().filterNot { it in readyRequired }
     }
 
     /** 是否安卓工程：存在 AndroidManifest，或构建脚本引用了 com.android 插件。 */
@@ -194,7 +211,8 @@ object BuildEnvironment {
     suspend fun status(context: Context, projectDir: File? = null): EnvStatus {
         val all = detect(context)
         val required = withLinuxIfNeeded(requirementsFor(projectDir))
-        return EnvStatus(items = all.filter { it.kind in required }, required = required)
+        val items = all.filter { it.kind in required }
+        return EnvStatus(items = items, required = required, extraTools = extraTools(all, items, context))
     }
 
     /** 全量检测（不做项目过滤）。 */
@@ -202,6 +220,14 @@ object BuildEnvironment {
         val jdk = resolveJdk(context)
         val gradle = resolveGradle(context)
         val node = resolveNode(context)
+        // rootfs 内的 Node（软件市场 / 终端 apt 装的）：整条构建命令在 proot 里执行，
+        // 用的正是 rootfs 的 node+npm —— 与 files/sdk 的 Node 二选一即可视为就绪
+        val rootfsNode = run {
+            val rootfs = Proot.rootfsDir(context)
+            listOf("usr/local/bin/node", "usr/bin/node")
+                .map { File(rootfs, it) }
+                .firstOrNull { it.exists() }
+        }
         val sdk = sdkDir(context)
         val sdkReady = sdkLooksReady(sdk)
         return listOf(
@@ -225,8 +251,8 @@ object BuildEnvironment {
             ),
             EnvItem(
                 kind = EnvKind.NODE,
-                path = node,
-                ready = node != null,
+                path = node ?: rootfsNode?.absolutePath,
+                ready = node != null || rootfsNode != null,
                 hint = "未就绪：点「在线下载」安装 Node.js 20（含 npm，约 50MB），或导入 node-v*-linux-*.tar.gz",
             ),
             EnvItem(
@@ -682,7 +708,10 @@ object BuildEnvironment {
             add("  files/bin     ${binModesLine(context)}（终端 Permission denied 看这里）")
             add("  执行探测     ${execProbeLine(context)}")
             status?.required?.let {
-                add("  本项目所需   ${it.joinToString(" / ") { kind -> kind.title }}")
+                add("  本项目所需   ${it.joinToString(" / ") { kind -> kind.title }.ifBlank { "无需（源码打包）" }}")
+            }
+            status?.extraTools?.takeIf { it.isNotEmpty() }?.let {
+                add("  其它已装工具 ${it.joinToString(" / ")}（市场 / 终端安装，本项目不需要）")
             }
             add("  JDK           ${mark(jdk)} ${jdk?.path ?: "未安装"}")
             add("                bin/java = ${if (hasBin(dirOf(jdk), "java")) "存在" else "缺失"}")

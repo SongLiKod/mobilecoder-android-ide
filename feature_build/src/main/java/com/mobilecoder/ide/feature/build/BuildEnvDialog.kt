@@ -258,7 +258,8 @@ fun EnvironmentContent(
 
         status?.required?.let { required ->
             Text(
-                text = "当前项目所需：${required.joinToString(" · ") { it.title }}",
+                text = "当前项目所需：" +
+                    required.joinToString(" · ") { it.title }.ifBlank { "无需（源码打包）" },
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.primary,
             )
@@ -281,6 +282,15 @@ fun EnvironmentContent(
                     )
                 },
                 onDownload = { startDownload(item.kind) },
+            )
+        }
+
+        // 已装但本项目不需要的工具（软件市场 / 终端 agent 安装）——体现设备已有能力
+        status?.extraTools?.takeIf { it.isNotEmpty() }?.let { tools ->
+            Text(
+                text = "其它已装工具（本项目不需要）：${tools.joinToString(" · ")}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
