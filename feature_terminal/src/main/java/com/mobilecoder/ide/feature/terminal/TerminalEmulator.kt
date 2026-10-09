@@ -18,6 +18,75 @@ object Attr {
 const val COLOR_DEFAULT: Int = -1
 const val TRUECOLOR_FLAG: Int = 0x2000000
 
+/**
+ * 双宽字符（中文 / 全角 / emoji …）的**续格**标记：双宽字占两格，首格存字符、
+ * 次格存本标记（占位但不渲染）。
+ *
+ * 为什么必须占两格：TUI（opencode / lazygit …）内部按 `wcwidth` 计算列宽 ——
+ * 中文算 2 列。若模拟器只推进 1 格，程序用绝对定位（CSI H）画下一段内容时
+ * 落到的格子与它自己记录的列号错位，旧内容残留在缝隙里 —— 表现就是
+ * 「中英文交错的文字重叠」。对齐到 2 格后，程序写出的列号与网格格号一致，
+ * 重绘才能正确覆盖。
+ */
+const val CELL_CONTINUATION: Char = '\u0000'
+
+internal fun isHighSurrogate(ch: Char): Boolean = ch in '\uD800'..'\uDBFF'
+internal fun isLowSurrogate(ch: Char): Boolean = ch in '\uDC00'..'\uDFFF'
+
+/** BMP 双宽字符（存 1 个 Char + 1 个续格）。 */
+internal fun isWideChar(ch: Char): Boolean =
+    !isHighSurrogate(ch) && !isLowSurrogate(ch) && isWideCodePoint(ch.code)
+
+/**
+ * 码点显示宽度（0 / 1 / 2），对齐 xterm / `wcwidth` 约定。
+ *
+ * - 0：组合标记、零宽格式符（ZWJ / ZWNJ …）—— 网格按 1 格存不下，打印时跳过；
+ * - 2：东亚全角（W/F）与常见 emoji —— 占 2 格；
+ * - 其余（含歧义宽度）按 1 格 —— 与 go-runewidth 默认（ambiguous=1）一致。
+ *
+ * 范围取自 Unicode EastAsianWidth 的 W/F 段 + emoji 主区，够覆盖终端实际输出。
+ */
+internal fun isWideCodePoint(cp: Int): Boolean = when (cp) {
+    in 0x1100..0x115F, // 谚文字母
+    in 0x2E80..0x303E, // CJK 部首 / 康熙部首 / CJK 符号（U+303F 半填充是 1 宽）
+    in 0x3041..0x33FF, // 假名 / 注音 / 拼音 / 汉字部件 / 制表兼容 / CJK 兼容
+    in 0x3400..0x4DBF, // CJK 扩展 A
+    in 0x4E00..0x9FFF, // CJK 统一汉字
+    in 0xA000..0xA4CF, // 彝文
+    in 0xA960..0xA97F, // 谚文字母扩展-A
+    in 0xAC00..0xD7A3, // 谚文音节
+    in 0xF900..0xFAFF, // CJK 兼容汉字
+    in 0xFE10..0xFE19, // 竖排形式
+    in 0xFE30..0xFE6F, // CJK 兼容形式 / 小写变体
+    in 0xFF00..0xFF60, // 全角形式
+    in 0xFFE0..0xFFE6, // 全角符号
+    in 0x17000..0x18AFF, // 西夏文等
+    in 0x1B000..0x1BFFF, // 假名补充 / 上千假名
+    in 0x1F200..0x1F2FF, // 封闭表意文字补充
+    in 0x1F300..0x1F64F, // 杂项符号与表情
+    in 0x1F680..0x1F6FF, // 交通与地图符号
+    in 0x1F900..0x1F9FF, // 补充符号与表情
+    in 0x1FA00..0x1FAFF, // 符号与象形文字扩展-A
+    in 0x20000..0x3FFFD -> true // CJK 扩展 B 及以后
+    else -> false
+}
+
+/**
+ * 码点占格数：0 = 零宽（组合标记 / 零宽格式符），1 = 半角，2 = 双宽。
+ *
+ * 零宽字符网格按 1 格存不下、按 0 格渲染层又会对不齐，打印时直接跳过
+ * （与 TUI 侧 wcwidth=0 的光标推进一致，不会产生列错位）。
+ */
+internal fun cellWidthOf(cp: Int): Int {
+    if (cp < 0x0300) return 1 // ASCII / Latin 快路径（控制字符走不到这里）
+    val type = Character.getType(cp)
+    val nonSpacingMark = Character.NON_SPACING_MARK.toInt()
+    val enclosingMark = Character.ENCLOSING_MARK.toInt()
+    val format = Character.FORMAT.toInt()
+    if (type == nonSpacingMark || type == enclosingMark || type == format) return 0
+    return if (isWideCodePoint(cp)) 2 else 1
+}
+
 /** 一行文本的样式分段（渲染层据此拼 AnnotatedString）。 */
 data class TerminalRun(
     val text: String,
@@ -171,8 +240,13 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
                             i++
                         }
                         else -> {
-                            printChar(ch)
-                            i++
+                            // 代理对（emoji 等非 BMP 双宽字）必须成对处理：
+                            // 两个 Char 分别落入连续两格，正好等于 2 列显示宽度
+                            i += if (isHighSurrogate(ch) && i + 1 < n && isLowSurrogate(text[i + 1])) {
+                                printSurrogatePair(ch, text[i + 1])
+                            } else {
+                                printChar(ch)
+                            }
                         }
                     }
                 }
@@ -315,7 +389,12 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
         bump()
     }
 
-    /** 光标回退并擦除最近打印的 n 个字符（命令拦截回滚用，含自动换行场景）。 */
+    /**
+     * 光标回退并擦除最近打印的 n 个**字符**（命令拦截回滚用，含自动换行场景）。
+     *
+     * 双宽字 / 代理对按**整字**回退一次、只计 1 个字符（拦截器对中文回滚 1、
+     * emoji 回滚 2，各自与显示宽度解耦），避免回滚后留出半截字或多余空格。
+     */
     fun erasePrinted(n: Int) {
         var left = n
         while (left > 0) {
@@ -331,11 +410,35 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
                 break // 已到屏幕左上角，无法继续回退
             }
             val row = grid[cursorRow]
-            row.chars[cursorCol] = ' '
-            row.fg[cursorCol] = COLOR_DEFAULT
-            row.bg[cursorCol] = COLOR_DEFAULT
-            row.attrs[cursorCol] = 0
-            left--
+            val ch = row.chars[cursorCol]
+            var start = cursorCol
+            var cost = 1
+            var span = 1
+            when {
+                ch == CELL_CONTINUATION -> {
+                    if (start > 0) start-- // 光标停在续格：整字回退
+                    span = if (start != cursorCol) 2 else 1
+                }
+
+                isHighSurrogate(ch) && start + 1 < cols && isLowSurrogate(row.chars[start + 1]) -> {
+                    cost = 2 // 代理对按整对擦（拦截器按 Char 计数 = 2）
+                    span = 2
+                }
+
+                isLowSurrogate(ch) && start > 0 && isHighSurrogate(row.chars[start - 1]) -> {
+                    start--
+                    cost = 2
+                    span = 2
+                }
+
+                isWideChar(ch) -> {
+                    // 光标落在双宽字首格上：连同下一格（续格/孤儿残留）一并清掉
+                    span = 2
+                }
+            }
+            row.fill(start, (start + span).coerceAtMost(cols), curBg)
+            cursorCol = start
+            left -= cost
         }
         bump()
     }
@@ -414,6 +517,7 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
      * 截掉尾部纯空格（不算丢字）。
      */
     private fun appendNormalized(row: TerminalRow, c: Int, out: MutableList<TerminalRow>) {
+        row.sanitize() // 裁剪/滚动可能产生孤儿宽字或孤儿续格
         if (row.cols <= c) {
             if (row.cols != c) row.resize(c)
             out.add(row)
@@ -434,12 +538,20 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
         var from = 0
         while (from < row.cols) {
             val part = TerminalRow(c)
-            val to = minOf(from + c, row.cols)
+            var to = minOf(from + c, row.cols)
+            // 拆行点不许落在双宽字首格与续格（或代理对两半）之间，否则整字会被截断
+            if (to < row.cols && to - 1 > from) {
+                val atCut = row.chars[to - 1]
+                val pairSplit = (isWideChar(atCut) && row.chars[to] == CELL_CONTINUATION) ||
+                    (isHighSurrogate(atCut) && isLowSurrogate(row.chars[to]))
+                if (pairSplit) to--
+            }
             val n = to - from
             System.arraycopy(row.chars, from, part.chars, 0, n)
             System.arraycopy(row.fg, from, part.fg, 0, n)
             System.arraycopy(row.bg, from, part.bg, 0, n)
             System.arraycopy(row.attrs, from, part.attrs, 0, n)
+            part.sanitize()
             out.add(part)
             from = to
         }
@@ -629,23 +741,148 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
 
     // ---------------------------------------------------------------- 打印与滚动
 
-    private fun printChar(c: Char) {
+    /**
+     * 打印一个 BMP 字符：双宽字（中文 / 全角 …）占 2 格（次格写续格标记），
+     * 半角占 1 格，零宽字符跳过。
+     *
+     * @return 消耗的 Char 数（恒为 1；代理对走 [printSurrogatePair]）。
+     */
+    private fun printChar(c: Char): Int {
         if (wrapPending) {
             wrapPending = false
             doWrap()
         }
         if (cursorCol >= cols) cursorCol = cols - 1
+        when {
+            isHighSurrogate(c) || isLowSurrogate(c) -> placeNarrow(c) // 孤立代理（几乎不出现）
+            else -> when (cellWidthOf(c.code)) {
+                0 -> Unit // 零宽：跳过，保持列对齐
+                2 -> placeWide(c)
+                else -> placeNarrow(c)
+            }
+        }
+        return 1
+    }
+
+    /** 打印代理对（非 BMP 双宽字，如 emoji）：两个 Char 各占一格，合计 2 格 = 2 列。 */
+    private fun printSurrogatePair(hi: Char, lo: Char): Int {
+        if (wrapPending) {
+            wrapPending = false
+            doWrap()
+        }
+        if (cursorCol >= cols) cursorCol = cols - 1
+        if (cellWidthOf(Character.toCodePoint(hi, lo)) == 0) return 2 // 零宽：跳过
+        if (cursorCol >= cols - 1) {
+            // 末列放不下 2 格：自动换行关闭时压到倒数第二列
+            if (autowrap || cols < 2) doWrap() else cursorCol = cols - 2
+        }
         val row = grid[cursorRow]
-        if (insertMode) row.insertBlank(cursorCol, 1)
-        row.chars[cursorCol] = c
-        row.fg[cursorCol] = curFg
-        row.bg[cursorCol] = curBg
-        row.attrs[cursorCol] = curAttrs
+        if (insertMode) {
+            row.insertBlank(cursorCol, 2)
+            row.sanitize() // 插入点可能落在双宽字/代理对中间
+        }
+        clearOverwritten(row, cursorCol)
+        clearOverwritten(row, cursorCol + 1)
+        writeCell(row, cursorCol, hi)
+        writeCell(row, cursorCol + 1, lo)
+        lastPrinted = null // 代理对不支持 REP（CSI b）重印
+        advanceAfterWide()
+        return 2
+    }
+
+    /** 双宽字打印（首格字符 + 次格续格），并处理行尾换行。 */
+    private fun placeWide(c: Char) {
+        if (cursorCol >= cols - 1) {
+            if (autowrap || cols < 2) doWrap() else cursorCol = cols - 2
+        }
+        val row = grid[cursorRow]
+        if (insertMode) {
+            row.insertBlank(cursorCol, 2)
+            row.sanitize() // 插入点可能落在双宽字中间
+        }
+        clearOverwritten(row, cursorCol)
+        clearOverwritten(row, cursorCol + 1)
+        writeCell(row, cursorCol, c)
+        writeCell(row, cursorCol + 1, CELL_CONTINUATION)
+        lastPrinted = c
+        advanceAfterWide()
+    }
+
+    private fun placeNarrow(c: Char) {
+        val row = grid[cursorRow]
+        if (insertMode) {
+            row.insertBlank(cursorCol, 1)
+            row.sanitize() // 插入点可能落在双宽字中间
+        }
+        clearOverwritten(row, cursorCol)
+        writeCell(row, cursorCol, c)
         lastPrinted = c
         if (cursorCol >= cols - 1) {
             if (autowrap) wrapPending = true
         } else {
             cursorCol++
+        }
+    }
+
+    /** 双宽字写完后的光标推进：占到行尾时按约定停在最后一格并挂起待换行。 */
+    private fun advanceAfterWide() {
+        cursorCol += 2
+        if (cursorCol > cols - 1) {
+            cursorCol = cols - 1
+            if (autowrap) wrapPending = true
+        }
+    }
+
+    private fun writeCell(row: TerminalRow, col: Int, ch: Char) {
+        row.chars[col] = ch
+        row.fg[col] = curFg
+        row.bg[col] = curBg
+        row.attrs[col] = curAttrs
+    }
+
+    /**
+     * 覆盖清理：写入 [col] 前，把会被拆散的双宽结构补干净 ——
+     *
+     *  - 目标格是某双宽字的**续格** → 其首格一并清掉（不留半截字）；
+     *  - 目标格是某双宽字的**首格** → 其续格一并清掉；
+     *  - 代理对同理按整对处理。
+     *
+     * 这样网格里永远不会出现「宽字没有续格 / 续格没有宽字」的错位残片。
+     */
+    private fun clearOverwritten(row: TerminalRow, col: Int) {
+        if (col < 0 || col >= row.cols) return
+        when (val ch = row.chars[col]) {
+            CELL_CONTINUATION -> if (col > 0) blankCell(row, col - 1)
+            else -> when {
+                isHighSurrogate(ch) && col + 1 < row.cols && isLowSurrogate(row.chars[col + 1]) ->
+                    blankCell(row, col + 1)
+
+                isLowSurrogate(ch) && col > 0 && isHighSurrogate(row.chars[col - 1]) ->
+                    blankCell(row, col - 1)
+
+                isWideChar(ch) && col + 1 < row.cols && row.chars[col + 1] == CELL_CONTINUATION ->
+                    blankCell(row, col + 1)
+            }
+        }
+    }
+
+    private fun blankCell(row: TerminalRow, col: Int) {
+        row.chars[col] = ' '
+        row.fg[col] = COLOR_DEFAULT
+        row.bg[col] = curBg
+        row.attrs[col] = 0
+    }
+
+    /**
+     * 擦除起点：光标停在双宽字续格上时回退一格，
+     * 避免擦除时把宽字首格留成残影（表现就是重叠出来的半截字）。
+     */
+    private fun eraseStartCol(): Int {
+        val col = cursorCol
+        return if (col > 0 && col < cols && grid[cursorRow].chars[col] == CELL_CONTINUATION) {
+            col - 1
+        } else {
+            col
         }
     }
 
@@ -696,9 +933,11 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
     // ---------------------------------------------------------------- 擦除
 
     private fun eraseInDisplay(mode: Int) {
+        // 起点在双宽字续格上时回退一格，避免留半截宽字
+        val start = eraseStartCol()
         when (mode) {
             0 -> {
-                grid[cursorRow].fill(cursorCol, cols, curBg)
+                grid[cursorRow].fill(start, cols, curBg)
                 for (r in cursorRow + 1 until rows) grid[r].fill(0, cols, curBg)
             }
             1 -> {
@@ -718,7 +957,7 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
     private fun eraseInLine(mode: Int) {
         val row = grid[cursorRow]
         when (mode) {
-            0 -> row.fill(cursorCol, cols, curBg)
+            0 -> row.fill(eraseStartCol(), cols, curBg)
             1 -> row.fill(0, (cursorCol + 1).coerceAtMost(cols), curBg)
             else -> row.fill(0, cols, curBg)
         }
@@ -726,15 +965,17 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
 
     private fun eraseChars(n: Int) {
         val row = grid[cursorRow]
-        row.fill(cursorCol, (cursorCol + n).coerceAtMost(cols), curBg)
+        row.fill(eraseStartCol(), (cursorCol + n).coerceAtMost(cols), curBg)
     }
 
     private fun insertChars(n: Int) {
         grid[cursorRow].insertBlank(cursorCol, n.coerceAtMost(cols - cursorCol))
+        grid[cursorRow].sanitize() // 插入点可能落在双宽字中间
     }
 
     private fun deleteChars(n: Int) {
         grid[cursorRow].delete(cursorCol, n.coerceAtMost(cols - cursorCol))
+        grid[cursorRow].sanitize() // 删除点可能落在双宽字中间
     }
 
     private fun insertLines(n: Int) {
@@ -1038,6 +1279,7 @@ class TerminalRow(cols: Int) {
 
     fun resize(newCols: Int) {
         if (newCols == cols) return
+        val shrinking = newCols < cols
         chars = chars.copyOf(newCols)
         fg = fg.copyOf(newCols)
         bg = bg.copyOf(newCols)
@@ -1051,6 +1293,53 @@ class TerminalRow(cols: Int) {
             }
         }
         cols = newCols
+        if (shrinking) sanitize() // 截断可能把双宽字/代理对劈成两半
+    }
+
+    /**
+     * 修补被截断 / 插删拆散的双宽结构，保证「续格必有首格、首格必有续格」：
+     *
+     *  - 续格前面没有双宽字首格 → 清掉续格；
+     *  - 双宽字首格后面没有续格（或代理对两半不相邻）→ 清掉残缺的一半。
+     *
+     * 只清不移位，不影响其余内容。渲染层依赖这条不变式。
+     */
+    fun sanitize() {
+        var i = 0
+        while (i < cols) {
+            val ch = chars[i]
+            when {
+                ch == CELL_CONTINUATION -> {
+                    if (i == 0 || !isWideChar(chars[i - 1])) blankCell(i)
+                    i++ // 首格已在上一轮校验过
+                }
+
+                isHighSurrogate(ch) -> {
+                    if (i + 1 < cols && isLowSurrogate(chars[i + 1])) {
+                        i += 2 // 成对有效，低半区随行校验
+                    } else {
+                        blankCell(i)
+                        i++ // 继续检查下一格（可能是孤儿续格）
+                    }
+                }
+
+                isLowSurrogate(ch) -> blankCell(i) // 高半区缺失
+
+                isWideChar(ch) -> {
+                    if (i + 1 >= cols || chars[i + 1] != CELL_CONTINUATION) blankCell(i)
+                    i += 2
+                }
+
+                else -> i++
+            }
+        }
+    }
+
+    private fun blankCell(i: Int) {
+        chars[i] = ' '
+        fg[i] = COLOR_DEFAULT
+        attrs[i] = 0
+        // 背景色保留：避免把整行底色带捅出一个透明洞
     }
 
     /** 用空格 + 指定背景填充 [from, to)。 */
@@ -1095,10 +1384,14 @@ class TerminalRow(cols: Int) {
         fill(cols - count, cols, COLOR_DEFAULT)
     }
 
-    /** 去掉行尾空白后的纯文本。 */
+    /** 去掉行尾空白后的纯文本（双宽字续格是占位，不计入文本）。 */
     fun toText(): String {
         var end = cols
-        while (end > 0 && chars[end - 1] == ' ') end--
-        return String(chars, 0, end)
+        while (end > 0 && (chars[end - 1] == ' ' || chars[end - 1] == CELL_CONTINUATION)) end--
+        val sb = StringBuilder(end)
+        for (i in 0 until end) {
+            if (chars[i] != CELL_CONTINUATION) sb.append(chars[i])
+        }
+        return sb.toString()
     }
 }
