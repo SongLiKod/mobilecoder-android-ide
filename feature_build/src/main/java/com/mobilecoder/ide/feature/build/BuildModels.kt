@@ -35,15 +35,18 @@ data class BuildRequest(
 /** 构建任务快照（进入 Running 后不再变化）。 */
 data class BuildTask(
     val projectPath: String,
+    /** `debug` / `release`（安卓）；`assemble` / `build` / `package`（其它类型）。 */
     val variant: String,
     val clean: Boolean,
     val extraTasks: List<String>,
     val startedAt: Long,
+    /** 展示用任务名：`assembleDebug` / `assemble` / `npm run build` / `打包源码`。 */
+    val label: String = variant,
 )
 
 /**
  * 构建状态机：
- * Idle → Preparing → Running → Success(APK 路径) / Failed(错误)。
+ * Idle → Preparing → Running → Success(产物路径) / Failed(错误)。
  */
 sealed interface BuildState {
 
@@ -53,13 +56,13 @@ sealed interface BuildState {
     /** 准备中：校验工程与构建环境、组装命令。 */
     data class Preparing(val message: String) : BuildState
 
-    /** 构建中：子进程已启动。 */
+    /** 构建中：子进程已启动（或进程内打包进行中）。 */
     data class Running(val task: BuildTask) : BuildState
 
-    /** 构建成功：附带产出的 APK 绝对路径。 */
+    /** 构建成功：附带产出的产物绝对路径（APK / JAR / 压缩包）。 */
     data class Success(
         val task: BuildTask,
-        val apks: List<String>,
+        val artifacts: List<String>,
         val durationMs: Long,
     ) : BuildState
 
@@ -95,11 +98,11 @@ data class BuildError(
         }
 }
 
-/** 一个 APK 产物。 */
+/** 一个构建产物（APK / JAR / dist 压缩包 / 源码压缩包）。 */
 data class BuildArtifact(
     /** 文件名，例如 `app-debug.apk`。 */
     val name: String,
-    /** 所属模块（相对工程根，例如 `app`）。 */
+    /** 所属模块（相对工程根，例如 `app`；根模块为空串）。 */
     val module: String,
     /** `debug` / `release` / `unknown`。 */
     val variant: String,
