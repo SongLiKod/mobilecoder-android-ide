@@ -59,8 +59,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -79,8 +81,12 @@ import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.SectionHeader
 import com.mobilecoder.ide.core.storage.FileNode
+import com.mobilecoder.ide.core.storage.FileRepository
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** 文件树可见行（含缩进层级与展开状态）。 */
 data class TreeRow(
@@ -482,8 +488,8 @@ fun FileTreeDrawer(
     pendingMove?.let { node ->
         MoveDialog(
             node = node,
-            tree = tree,
             rootPath = rootPath,
+            showHidden = settings.showHiddenFiles,
             onPick = { dir ->
                 pendingMove = null
                 EditorController.move(node.file.path, dir.file.path)
@@ -743,61 +749,196 @@ private fun NameInputDialog(
     )
 }
 
-/** 移动目标目录选择（取全量树而非可见行：默认折叠时可见行几乎只有顶层）。 */
+/** 移动目标选择弹层的可见行：一个目录 + 层级 / 展开态 / 是否还有子目录可展开。 */
+data class MoveDirRow(
+    val node: FileNode,
+    val depth: Int,
+    val expanded: Boolean,
+    val hasChildren: Boolean,
+) {
+    val path: String get() = node.file.path
+}
+
+/**
+ * 由「目录路径 → 直系子目录」缓存生成弹层可见行：
+ * 根恒展开（首层直接可见），其余目录 [expanded] 里登记的才逐层展开；
+ * 尚未读盘缓存子级的目录按「可能有子级」出箭头，读完是空列表箭头自动消失。
+ */
+fun buildMoveDirRows(
+    root: FileNode,
+    expanded: Set<String>,
+    childDirs: Map<String, List<FileNode>>,
+): List<MoveDirRow> {
+    val rows = ArrayList<MoveDirRow>()
+    fun walk(dir: FileNode, depth: Int) {
+        val kids = childDirs[dir.file.path]
+        val isOpen = depth == 0 || dir.file.path in expanded
+        rows.add(MoveDirRow(dir, depth, isOpen, kids?.isNotEmpty() ?: true))
+        if (isOpen) kids?.forEach { walk(it, depth + 1) }
+    }
+    walk(root, 0)
+    return rows
+}
+
+/**
+ * 移动目标目录选择：按项目目录层级显示，默认折叠（只列首层），点箭头一层层展开。
+ * 子级展开时按需读盘，不受主树 eager 深度限制——再深的目录也能逐层选到。
+ * 被移动节点本身不进候选列表（其子树因此无从展开进入）；当前所在目录置灰不可选；
+ * 点目录名选中后需按「移动到此处」确认，防误触直接移动。
+ */
 @Composable
 private fun MoveDialog(
     node: FileNode,
-    tree: List<FileNode>,
     rootPath: String?,
+    showHidden: Boolean,
     onPick: (FileNode) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val candidates = remember(tree, rootPath) {
-        buildList {
-            rootPath?.let { root ->
-                add(FileNode(File(root).name, File(root), true, 0L, 0))
-            }
-            tree.filter { it.isDirectory && it.file.path != node.file.path }.forEach {
-                add(it)
-            }
+    val root = remember(rootPath) {
+        rootPath?.let { rp ->
+            File(rp).takeIf { it.isDirectory }?.let { FileNode(it.name, it, true, 0L, 0) }
         }
     }
+    val scope = rememberCoroutineScope()
+    val expanded = remember { mutableStateListOf<String>() }
+    val childDirs = remember { mutableStateMapOf<String, List<FileNode>>() }
+    var selected by remember { mutableStateOf<FileNode?>(null) }
+    val currentParent = node.file.parentFile?.path
+
+    suspend fun loadChildren(dir: FileNode): List<FileNode> = withContext(Dispatchers.IO) {
+        runCatching {
+            FileRepository.listTreeChildren(dir.file, showHidden, childDepth = dir.depth + 1)
+                .filter { it.isDirectory && it.file.path != node.file.path }
+                .map { it.copy(depth = dir.depth + 1) }
+        }.getOrDefault(emptyList())
+    }
+
+    LaunchedEffect(root, showHidden) {
+        val r = root ?: return@LaunchedEffect
+        if (r.file.path !in childDirs) childDirs[r.file.path] = loadChildren(r)
+    }
+
+    val rows = root?.let { buildMoveDirRows(it, expanded.toSet(), childDirs) } ?: emptyList()
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("移动「${node.name}」到") },
         text = {
-            if (candidates.isEmpty()) {
+            if (rows.isEmpty()) {
                 Text("没有可选目录")
             } else {
                 LazyColumn(modifier = Modifier.height(280.dp)) {
-                    items(candidates, key = { it.file.path }) { dir ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onPick(dir) }
-                                .padding(vertical = 10.dp, horizontal = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(
-                                Icons.Default.Folder,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                            Text(
-                                text = dir.name,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(start = 8.dp),
-                            )
-                        }
+                    items(rows, key = { it.path }) { row ->
+                        MoveDirRowItem(
+                            row = row,
+                            selected = row.path == selected?.file?.path,
+                            disabled = row.path == currentParent,
+                            onToggle = {
+                                val path = row.path
+                                if (path in expanded) {
+                                    expanded.remove(path)
+                                } else {
+                                    expanded.add(path)
+                                    if (path !in childDirs) {
+                                        scope.launch { childDirs[path] = loadChildren(row.node) }
+                                    }
+                                }
+                            },
+                            onSelect = { selected = row.node },
+                        )
                     }
                 }
             }
         },
         confirmButton = {
+            TextButton(
+                onClick = { selected?.let(onPick) },
+                enabled = selected != null,
+            ) { Text("移动到此处") }
+        },
+        dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
         },
     )
+}
+
+/** 弹层里的目录行：箭头区展开 / 折叠，行其余部分点选目标；当前所在目录置灰并标注。 */
+@Composable
+private fun MoveDirRowItem(
+    row: MoveDirRow,
+    selected: Boolean,
+    disabled: Boolean,
+    onToggle: () -> Unit,
+    onSelect: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(40.dp)
+            .background(
+                if (selected) {
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+                } else {
+                    Color.Transparent
+                },
+            )
+            .clickable(enabled = !disabled, onClick = onSelect)
+            .padding(start = (6 + row.depth * 14).dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (row.hasChildren) {
+            Box(
+                modifier = Modifier
+                    .width(28.dp)
+                    .fillMaxHeight()
+                    .clickable(
+                        onClickLabel = if (row.expanded) "折叠" else "展开",
+                    ) { onToggle() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (row.expanded) {
+                        Icons.Default.KeyboardArrowDown
+                    } else {
+                        Icons.Default.ChevronRight
+                    },
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        } else {
+            Spacer(modifier = Modifier.width(28.dp))
+        }
+        Icon(
+            imageVector = Icons.Default.Folder,
+            contentDescription = null,
+            tint = if (disabled) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.primary
+            },
+            modifier = Modifier.padding(start = 2.dp, end = 6.dp),
+        )
+        Text(
+            text = row.node.name,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (disabled) {
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (disabled) {
+            Text(
+                text = "当前位置",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                maxLines = 1,
+            )
+        }
+    }
 }
