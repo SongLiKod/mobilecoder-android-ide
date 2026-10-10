@@ -4,13 +4,12 @@ import android.content.ClipData
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
-import android.provider.Settings
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
+import com.mobilecoder.ide.core.common.apk.ApkInstaller
 import java.io.File
 
 /**
@@ -36,7 +35,7 @@ object ApkActions {
         FileProvider.getUriForFile(context, authority(context), file)
 
     /** 是否安装包（决定产物行是否显示「安装」按钮）。 */
-    fun isApk(file: File): Boolean = file.extension.equals("apk", ignoreCase = true)
+    fun isApk(file: File): Boolean = ApkInstaller.isApk(file)
 
     /** 按扩展名取 MIME（未知回退二进制）。 */
     fun mimeOf(file: File): String {
@@ -53,35 +52,9 @@ object ApkActions {
     }
 
     /**
-     * 安装 APK。
-     *
-     * 未授予「安装未知应用」权限时，先跳转 `ACTION_MANAGE_UNKNOWN_APP_SOURCES` 授权页。
+     * 安装 APK（实现见 [ApkInstaller]：未授权时先跳「安装未知应用」授权页）。
      */
-    fun install(context: Context, file: File): String? {
-        if (!file.exists()) return "APK 不存在：${file.absolutePath}"
-        return try {
-            val allowed = runCatching {
-                context.packageManager.canRequestPackageInstalls()
-            }.getOrDefault(false)
-            if (!allowed) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:${context.packageName}"),
-                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(intent)
-                return "已打开「安装未知应用」授权页，允许后返回重试安装 ${file.name}"
-            }
-            val uri = uriOf(context, file)
-            val view = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, MIME_APK)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(view)
-            null
-        } catch (t: Throwable) {
-            "无法安装：${t.message ?: t::class.java.simpleName}"
-        }
-    }
+    fun install(context: Context, file: File): String? = ApkInstaller.install(context, file)
 
     /** 分享产物（ACTION_SEND + FileProvider 只读授权，MIME 按扩展名）。 */
     fun share(context: Context, file: File): String? {
@@ -166,13 +139,5 @@ object ApkActions {
     }
 
     /** 是否已具备安装未知来源应用的权限（用于产物行的提示徽标）。 */
-    fun canInstall(context: Context): Boolean = runCatching {
-        context.packageManager.canRequestPackageInstalls()
-    }.getOrDefault(false) ||
-        runCatching {
-            context.packageManager.checkPermission(
-                "android.permission.REQUEST_INSTALL_PACKAGES",
-                context.packageName,
-            ) == PackageManager.PERMISSION_GRANTED
-        }.getOrDefault(false)
+    fun canInstall(context: Context): Boolean = ApkInstaller.canInstall(context)
 }

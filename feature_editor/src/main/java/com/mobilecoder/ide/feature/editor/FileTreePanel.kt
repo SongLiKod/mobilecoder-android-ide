@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.DropdownMenu
@@ -73,10 +74,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mobilecoder.ide.core.common.apk.ApkInstaller
 import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.SectionHeader
@@ -163,8 +166,8 @@ private sealed interface NameDialog {
 
 /**
  * 项目文件树抽屉（PRD 2.2「项目树目录」）：
- * 点击打开 / 收起展开，长按弹出菜单（新建文件 / 新建目录 / 重命名 / 移动 / 复制路径 / 导出 / 删除），
- * 长按拖拽移动文件到目标目录。
+ * 点击打开 / 收起展开，长按弹出菜单（新建文件 / 新建目录 / 重命名 / 移动 / 复制路径 / 导出 / 删除，
+ * `.apk` 文件另显示「安装」），长按拖拽移动文件到目标目录。
  * 顶部提供「全部折叠 / 全部展开」切换（新项目默认全部折叠）；
  * 打开 / 切换文件时按 [EditorController.locatePath] 展开祖先并滚动定位、高亮当前文件。
  */
@@ -183,6 +186,7 @@ fun FileTreeDrawer(
     val rows = remember(tree, collapsed) { buildTreeRows(tree, collapsed) }
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
     // 顶部「全部折叠 / 全部展开」按钮的目标态：树里还有展开着的目录即显示折叠按钮
     val anyExpanded = remember(tree, collapsed) {
         tree.any { it.isDirectory && it.file.path !in collapsed }
@@ -405,6 +409,12 @@ fun FileTreeDrawer(
                                             exportLauncher.launch(null)
                                         }
 
+                                        TreeAction.INSTALL ->
+                                            EditorController.showMessage(
+                                                ApkInstaller.install(context, node.file)
+                                                    ?: "已发起安装：${node.name}",
+                                            )
+
                                         TreeAction.DELETE -> pendingDelete = node
                                         TreeAction.MOVE -> pendingMove = node
                                     }
@@ -516,6 +526,7 @@ private enum class TreeAction {
     RENAME,
     COPY_PATH,
     EXPORT,
+    INSTALL,
     DELETE,
     MOVE,
 }
@@ -668,6 +679,16 @@ private fun TreeRowItem(
         }
 
         DropdownMenu(expanded = menuExpanded, onDismissRequest = onMenuDismiss) {
+            // 「安装」只对 .apk 出现（与构建产物行共用 ApkInstaller：系统安装器 + 未知应用授权）
+            if (!row.isDirectory && ApkInstaller.isApk(row.node.file)) {
+                DropdownMenuItem(
+                    text = { Text("安装") },
+                    leadingIcon = {
+                        Icon(Icons.Default.SystemUpdate, contentDescription = null)
+                    },
+                    onClick = { onMenuItem(TreeAction.INSTALL) },
+                )
+            }
             DropdownMenuItem(
                 text = { Text("新建文件") },
                 leadingIcon = { Icon(Icons.Default.FileCopy, contentDescription = null) },

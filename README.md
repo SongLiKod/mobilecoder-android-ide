@@ -79,7 +79,7 @@ MobileCoder = 代码编辑器 + 内置完整终端 + proot Linux 环境
 - 代码折叠（配对花括号 / 块注释，折叠偏移量正确映射光标）、行号槽、自动缩进（回车继承缩进、闭括号反缩进）
 - **代码大纲 / 方法导航**：Kotlin、Java、JS/TS、Dart、Markdown 标题、HTML 结构、JSON 键、Shell 函数等启发式符号提取
 - **静态代码检查**：括号配对错误、未闭合字符串 / 注释、Git 合并冲突标记检测（结构级 lint，非编译诊断）
-- 多文件 Tab（脏标记 + 关闭确认）、文件树抽屉（新建 / 重命名 / 删除 / 长按拖拽移动）
+- 多文件 Tab（脏标记 + 关闭确认）、文件树抽屉（新建 / 重命名 / 删除 / 长按拖拽移动；`.apk` 长按菜单可直接**安装**）
 - 文件内查找（5000 命中上限）+ **全项目内容检索**（点击命中跳转到行）
 - 撤销 / 重做历史（每文件独立，连续打字 800ms 内合并为一步，容量 120 步）
 - 自动保存（800ms 防抖）、跳转行号、双指缩放字号（10–28）、每 Tab 独立滚动位置
@@ -378,7 +378,7 @@ mobilecoder-android-ide/
 │       ├── ui/                            # AppRoot 导航 / Home / Settings / More / About
 │       └── update/                        # UpdateSource / UpdateController / UpdateInstall
 ├── core_common/
-│   └── .../common/{cli,linux,theme,ui}    # CliEngine、Proot、主题、通用组件
+│   └── .../common/{apk,cli,linux,theme,ui}  # ApkInstaller、CliEngine、Proot、主题、通用组件
 ├── core_native/
 │   ├── src/main/java/.../nativebridge/    # NativeRuntime + Terminal/Git/Ssh/Cli Native (Java)
 │   └── src/main/cpp/                      # C 源码 + CMakeLists + third_party
