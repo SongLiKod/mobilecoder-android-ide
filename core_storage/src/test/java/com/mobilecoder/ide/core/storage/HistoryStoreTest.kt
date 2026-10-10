@@ -64,15 +64,16 @@ class HistoryStoreTest {
     }
 
     @Test
-    fun `textsOf 只取指定来源且按时间倒序`() {
+    fun `textsOf 只取指定来源且收藏置顶各自时间倒序`() {
         val list = listOf(
             record("1", "git status", time = 100),
             record("2", "构建 assembleDebug", source = HistoryStore.SOURCE_BUILD, time = 500),
             record("3", "ls -la", time = 300),
+            record("4", "git push", time = 50, favorite = true),
         )
 
         assertEquals(
-            listOf("ls -la", "git status"),
+            listOf("git push", "ls -la", "git status"),
             HistoryStore.textsOf(list, HistoryStore.SOURCE_TERMINAL),
         )
         assertEquals(

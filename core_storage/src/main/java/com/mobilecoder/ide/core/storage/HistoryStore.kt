@@ -150,7 +150,7 @@ object HistoryStore {
         }
     }
 
-    /** 终端命令（时间倒序），供终端 ↑ 键逐条回填。 */
+    /** 终端命令（收藏置顶、各自时间倒序），供终端 ↑ 键逐条回填与历史下拉。 */
     fun terminalCommands(): List<String> = textsOf(_records.value, SOURCE_TERMINAL)
 
     // ------------------------------------------------------------------
@@ -179,9 +179,9 @@ object HistoryStore {
         return sorted.filter { it.favorite } + sorted.filterNot { it.favorite }
     }
 
-    /** 指定来源的记录文本（时间倒序）。 */
+    /** 指定来源的记录文本（收藏置顶，各自按时间倒序）。 */
     internal fun textsOf(list: List<HistoryRecord>, source: String): List<String> =
-        list.sortedByDescending { it.time }.filter { it.source == source }.map { it.text }
+        displayOrder(list).filter { it.source == source }.map { it.text }
 
     // ------------------------------------------------------------------
 
