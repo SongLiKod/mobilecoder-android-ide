@@ -3042,7 +3042,11 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_configGet(
         return mc_cstr_to_jstring(env, "");
     }
     mc_clear_error();
-    if (git_repository_config(&cfg, g_repo) < 0) {
+    /* 用 snapshot（读盘）而非 git_repository_config 的句柄内缓存：
+     * branch.<n>.remote/merge 可能被同进程其它句柄或终端 git 子流程写入磁盘，
+     * weakptr 缓存不会随外部写入刷新，导致 git status（snapshot 路径）能看到
+     * 上游而 git pull/push（此处）看不到。 */
+    if (git_repository_config_snapshot(&cfg, g_repo) < 0) {
         free(c_key);
         return mc_cstr_to_jstring(env, "");
     }

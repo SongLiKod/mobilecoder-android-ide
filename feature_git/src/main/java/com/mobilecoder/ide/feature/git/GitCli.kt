@@ -1017,20 +1017,35 @@ object GitCli {
                 runCatching { GitNative.configGet("branch.$current.remote") }.getOrDefault("")
                     .takeIf { it.isNotBlank() && it != "." }
             } else null
-            val remote = pickRemoteOrFatal(
+            var remote = pickRemoteOrFatal(
                 requestedRemote ?: configRemote,
                 "fatal: No configured remote repositories.",
                 emit,
             ) ?: return@repoOp 1
 
-            /* 未指定分支且无上游配置 → 真 git 的提示块 */
-            val configuredMerge = if (branchArg == null && current != null) {
+            /* 未指定分支且无上游配置 → 先自愈（远程唯一同名分支 → 补写跟踪配置），
+             * 关联不上才给真 git 的提示块 */
+            var configuredMerge = if (branchArg == null && current != null) {
                 runCatching { GitNative.configGet("branch.$current.merge") }.getOrDefault("")
                     .takeIf { it.isNotBlank() }
             } else null
+            runCatching {
+                android.util.Log.d(
+                    "GITPULL",
+                    "branch=[$current] cfgRemote=[$configRemote] cfgMerge=[$configuredMerge] " +
+                        "rawRemote=[${runCatching { GitNative.configGet("branch." + current + ".remote") }.getOrElse { "EX:" + it } }]",
+                )
+            }
             if (branchArg == null && current != null && configuredMerge == null) {
-                pullNoTrackingLines(current, remote).forEach { emit(it) }
-                return@repoOp 1
+                val healed = GitController.autoAssociateBranch(current)
+                if (healed == null) {
+                    pullNoTrackingLines(current, remote).forEach { emit(it) }
+                    return@repoOp 1
+                }
+                val (healedRemote, healedBranch) = healed
+                if (requestedRemote == null) remote = healedRemote
+                configuredMerge = "refs/heads/$healedBranch"
+                emit("branch '$healedBranch' set up to track '$healedRemote/$healedBranch'.")
             }
 
             val rc = doFetch(remote, emit)
@@ -1101,13 +1116,13 @@ object GitCli {
             }
 
             /* 上游配置（真 git push.default=simple：无显式分支时必须有上游） */
-            val upRemote = if (branchName != null) {
+            var upRemote = if (branchName != null) {
                 runCatching { GitNative.configGet("branch.$branchName.remote") }.getOrDefault("")
                     .takeIf { it.isNotBlank() && it != "." }
             } else {
                 null
             }
-            val upMerge = if (branchName != null) {
+            var upMerge = if (branchName != null) {
                 runCatching { GitNative.configGet("branch.$branchName.merge") }.getOrDefault("")
             } else {
                 ""
@@ -1118,11 +1133,19 @@ object GitCli {
                 emit("error: 当前处于分离头指针状态，无法确定推送分支")
                 return@repoOp 1
             }
-            /* 未显式给分支且无上游 → 真 git 的 fatal 块（exit 128，-u 也不例外） */
+            /* 未显式给分支且无上游 → 先自愈（远程唯一同名分支 → 补写跟踪配置），
+             * 关联不上才是真 git 的 fatal 块（exit 128，-u 也不例外） */
             if (branchArg == null && branchName != null && (upRemote == null || upMerge.isBlank())) {
-                val hintRemote = pickRemote(positional.getOrNull(0) ?: upRemote) ?: "origin"
-                pushNoUpstreamLines(branchName, hintRemote).forEach { emit(it) }
-                return@repoOp 128
+                val healed = GitController.autoAssociateBranch(branchName)
+                if (healed == null) {
+                    val hintRemote = pickRemote(positional.getOrNull(0) ?: upRemote) ?: "origin"
+                    pushNoUpstreamLines(branchName, hintRemote).forEach { emit(it) }
+                    return@repoOp 128
+                }
+                val (healedRemote, healedBranch) = healed
+                upRemote = healedRemote
+                upMerge = "refs/heads/$healedBranch"
+                emit("branch '$healedBranch' set up to track '$healedRemote/$healedBranch'.")
             }
             val remote = pickRemote(positional.getOrNull(0) ?: upRemote) ?: run {
                 emit("fatal: No configured push destination.")

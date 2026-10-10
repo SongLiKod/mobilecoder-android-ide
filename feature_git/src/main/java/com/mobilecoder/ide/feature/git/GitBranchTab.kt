@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -198,9 +199,16 @@ fun BranchTab(
 
     // ---------------- 切换分支确认（行点击 / 「切换」按钮共用一条路径） ----------------
     if (checkoutTarget.isNotBlank()) {
+        val tracking = GitController.remoteTrackingName(checkoutTarget)
         AppAlertDialog(
             title = "切换分支",
-            message = "切换到分支「$checkoutTarget」？未提交改动会跟随工作区。",
+            message = if (tracking != null) {
+                val (remote, localName) = tracking
+                "检出远程分支「$remote/$localName」：本地分支「$localName」不存在时" +
+                    "会自动创建并关联上游；未提交改动会跟随工作区。"
+            } else {
+                "切换到分支「$checkoutTarget」？未提交改动会跟随工作区。"
+            },
             confirmLabel = "切换",
             onConfirm = {
                 val target = checkoutTarget
@@ -387,7 +395,8 @@ private fun BranchRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-            } else {
+            } else if (!branch.isRemote) {
+                // 远程跟踪分支本身就是上游，不提示「无上游」（对齐 git branch -a 的行为）
                 Text(
                     text = "无上游分支",
                     style = MaterialTheme.typography.labelSmall,
@@ -395,6 +404,8 @@ private fun BranchRow(
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                 )
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
             }
 
             if (!branch.isHead) {
