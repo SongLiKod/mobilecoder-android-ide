@@ -8,6 +8,7 @@ import com.mobilecoder.ide.core.storage.AppPreferences
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.core.storage.FileNode
 import com.mobilecoder.ide.core.storage.FileRepository
+import com.mobilecoder.ide.core.storage.SafImport
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -823,6 +824,55 @@ object EditorController {
             }
             showMessage(if (ok) "已导出「$name」" else "导出失败：目标目录不可写")
             onResult(ok)
+        }
+    }
+
+    /**
+     * 把 SAF 选择的文件（[uris]，可多个）复制进目录 [dirPath]，同名文件覆盖。
+     * 与「导出到…」互为反向：导出是项目 → 系统目录，导入是系统目录 → 项目。
+     */
+    fun importFiles(dirPath: String, uris: List<Uri>) {
+        val context = appContext
+        if (context == null) {
+            showMessage("导入失败：存储未初始化")
+            return
+        }
+        if (uris.isEmpty()) return
+        scope.launch {
+            val done = withContext(Dispatchers.IO) {
+                runCatching {
+                    uris.count { uri -> SafImport.copyDocumentTo(context, uri, File(dirPath)) != null }
+                }.getOrDefault(0)
+            }
+            if (done > 0) {
+                refreshTree()
+                showMessage(if (done == uris.size) "已导入 $done 个文件" else "已导入 $done/${uris.size} 个文件")
+            } else {
+                showMessage("导入失败：源不可读或目标不可写")
+            }
+        }
+    }
+
+    /**
+     * 把 SAF 选择的目录（[treeUri] 树）连同内容复制进目录 [dirPath]，
+     * 作为其子目录（重名自动加序号）；复制完成后刷新文件树。
+     */
+    fun importFolder(dirPath: String, treeUri: Uri) {
+        val context = appContext
+        if (context == null) {
+            showMessage("导入失败：存储未初始化")
+            return
+        }
+        scope.launch {
+            val name = withContext(Dispatchers.IO) {
+                runCatching { SafImport.copyTreeTo(context, treeUri, File(dirPath)) }.getOrNull()
+            }
+            if (name != null) {
+                refreshTree()
+                showMessage("已导入目录「$name」")
+            } else {
+                showMessage("导入失败：目录不可读或目标不可写")
+            }
         }
     }
 
