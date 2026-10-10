@@ -409,10 +409,78 @@ object GitController {
 
         _commits.value = parseLog(runCatching { GitNative.log(logLimit) }.getOrDefault(""))
         _logHasMore.value = _commits.value.size >= logLimit
-        _branches.value = parseBranches(runCatching { GitNative.branches() }.getOrDefault(""))
+        _branches.value = autoAssociateUpstreams(
+            parseBranches(runCatching { GitNative.branches() }.getOrDefault("")),
+        )
         _tags.value = parseTags(runCatching { GitNative.tags() }.getOrDefault(""))
         _remotes.value = parseRemotes(runCatching { GitNative.remotes() }.getOrDefault(""))
         _identity.value = loadIdentity()
+    }
+
+    /**
+     * 自动关联上游：未配置上游的本地分支，若远程恰有唯一同名分支，
+     * 按 `git checkout` DWIM 的规则写 branch.<n>.remote / .merge（真实 git
+     * 检出远程分支时就是这么做的），写完重读一帧拿准确的领先落后。
+     */
+    private fun autoAssociateUpstreams(list: List<GitBranch>): List<GitBranch> {
+        val candidates = autoTrackCandidates(list)
+        if (candidates.isEmpty()) return list
+        var wrote = false
+        for ((name, remote) in candidates) {
+            if (GitNative.configSet("branch.$name.remote", remote) == 0 &&
+                GitNative.configSet("branch.$name.merge", "refs/heads/$name") == 0
+            ) {
+                wrote = true
+            }
+        }
+        return if (wrote) {
+            parseBranches(runCatching { GitNative.branches() }.getOrDefault(""))
+        } else {
+            list
+        }
+    }
+
+    /** 找出「本地无上游 && 远程恰好唯一同名分支」的自动关联候选：(本地名, 远程名)。 */
+    internal fun autoTrackCandidates(list: List<GitBranch>): List<Pair<String, String>> {
+        val remotePairs: List<Pair<String, String>> = list.mapNotNull { b ->
+            if (!b.isRemote) return@mapNotNull null
+            val tail = b.name.removePrefix("remotes/")
+            if (tail == b.name || !tail.contains('/')) return@mapNotNull null
+            val remote = tail.substringBefore('/')
+            val branch = tail.substringAfter('/')
+            if (remote.isBlank() || branch.isBlank() || branch == "HEAD") null else branch to remote
+        }
+        val remoteIndex: Map<String, List<String>> =
+            remotePairs.groupBy({ it.first }, { it.second }).mapValues { it.value.distinct() }
+        return list.filter { !it.isRemote && it.upstream.isBlank() }.mapNotNull { b ->
+            remoteIndex[b.name]?.singleOrNull()?.let { b.name to it }
+        }
+    }
+
+    /**
+     * 终端 git 命令遇到「无上游」时的自愈关联：远程恰有唯一同名分支时按
+     * DWIM 规则补写配置（与分支列表自动关联同源逻辑），成功返回 (远程名, 分支名)。
+     * 须在仓库互斥区内调用（repoOp / withRepo 内）。
+     */
+    internal fun autoAssociateBranch(branch: String): Pair<String, String>? {
+        val list = parseBranches(runCatching { GitNative.branches() }.getOrDefault(""))
+        val (name, remote) = autoTrackCandidates(list).firstOrNull { it.first == branch }
+            ?: run {
+                runCatching {
+                    android.util.Log.d(
+                        "GITPULL",
+                        "heal($branch): no candidate; localRow=${list.firstOrNull { !it.isRemote && it.name == branch }?.upstream} " +
+                            "remoteRows=${list.filter { it.isRemote }.map { it.name }.take(30)}",
+                    )
+                }
+                return null
+            }
+        val rc1 = GitNative.configSet("branch.$name.remote", remote)
+        val rc2 = GitNative.configSet("branch.$name.merge", "refs/heads/$name")
+        runCatching { android.util.Log.d("GITPULL", "heal($branch): rc1=$rc1 rc2=$rc2") }
+        if (rc1 != 0 || rc2 != 0) return null
+        _branches.value = parseBranches(runCatching { GitNative.branches() }.getOrDefault(""))
+        return remote to name
     }
 
     private fun clearRepoData() {
@@ -732,13 +800,28 @@ object GitController {
     }
 
     /**
-     * 切换分支（远程项走 DWIM：本地不存在时自动建跟踪分支或分离检出）。
+     * 切换分支。UI 选中远程跟踪分支（`remotes/` 前缀）时走「本地分支 + 上游关联」：
+     * 本地不存在则从远程引用创建，并写 branch.<n>.remote / .merge 后切换——
+     * 等价终端 `git checkout <分支名>` 的 DWIM，不再分离 HEAD。
      *
      * @return 0 已切换 / 2 已在该分支 / 3 DWIM 新建跟踪分支 / 4 分离头指针 /
      *   -1 失败 / -2 引用不存在 / -3 多个远程存在同名分支
      */
     suspend fun checkoutBranch(name: String): Int = withRepo(-1) {
         if (!ensureOpen()) return@withRepo -1
+        remoteTrackingName(name)?.let { (remote, localName) ->
+            val rc = checkoutAsTracking(remote, localName)
+            when (rc) {
+                0 -> {
+                    postInfo("已切换到分支 $localName（上游 $remote/$localName）")
+                    refreshLocked(all = true)
+                }
+                2 -> postInfo("已经在分支 $localName")
+                -2 -> postError("远程分支不存在：$remote/$localName")
+                else -> postError("切换分支失败：" + nativeError("工作区可能有冲突改动"))
+            }
+            return@withRepo rc
+        }
         val rc = try {
             GitNative.checkoutBranch(name)
         } catch (t: Throwable) {
@@ -764,6 +847,42 @@ object GitController {
             else -> postError("切换分支失败：" + nativeError("工作区可能有冲突改动"))
         }
         rc
+    }
+
+    /** 把远程分支 $remote/$localName 检出为本地分支（需要时创建 + 写上游），返回原生切换码。 */
+    private fun checkoutAsTracking(remote: String, localName: String): Int {
+        val branches = parseBranches(runCatching { GitNative.branches() }.getOrDefault(""))
+        val local = branches.firstOrNull { !it.isRemote && it.name == localName }
+        if (local == null) {
+            val created = runCatching {
+                GitNative.createBranch(localName, "remotes/$remote/$localName")
+            }.getOrDefault(false)
+            if (!created) {
+                postError("创建分支 $localName 失败：" + nativeError("远程分支不存在"))
+                return -1
+            }
+        }
+        if (local == null || local.upstream.isBlank()) {
+            GitNative.configSet("branch.$localName.remote", remote)
+            GitNative.configSet("branch.$localName.merge", "refs/heads/$localName")
+        }
+        return try {
+            GitNative.checkoutBranch(localName)
+        } catch (t: Throwable) {
+            postError("切换分支失败：" + (t.message ?: "未知错误"))
+            -1
+        }
+    }
+
+    /** UI 远程行名（remotes/<远程>/<分支>）→ (远程名, 本地分支名)；非远程行与 HEAD 符号引用返回 null。 */
+    internal fun remoteTrackingName(name: String): Pair<String, String>? {
+        if (!name.startsWith("remotes/")) return null
+        val tail = name.removePrefix("remotes/")
+        if (!tail.contains('/')) return null
+        val remote = tail.substringBefore('/')
+        val branch = tail.substringAfter('/')
+        if (remote.isBlank() || branch.isBlank() || branch == "HEAD") return null
+        return remote to branch
     }
 
     /**

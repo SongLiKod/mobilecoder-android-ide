@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Folder
@@ -125,6 +126,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.mobilecoder.ide.AppState
+import com.mobilecoder.ide.ProjectImport
 import com.mobilecoder.ide.R
 import com.mobilecoder.ide.core.common.theme.AppThemeMode
 import com.mobilecoder.ide.core.common.theme.ThemeManager
@@ -850,7 +852,7 @@ private fun SubPage(
 }
 
 // ---------------------------------------------------------------------------
-// 首页：只管项目（打开 / 新建 / 克隆 / 删除）；主题 / SSH / 关于移入「设置」「更多」
+// 首页：只管项目（打开 / 新建 / 克隆 / 导入 / 删除）；主题 / SSH / 关于移入「设置」「更多」
 // ---------------------------------------------------------------------------
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -884,6 +886,40 @@ private fun HomeScreen(
             }
         }
     }
+    // 导入项目：压缩包（zip / tar.gz）与文件夹两条路径，成功后登记并直接打开
+    var importMenuOpen by remember { mutableStateOf(false) }
+    val finishImport: suspend (ProjectMeta?) -> Unit = { meta ->
+        if (meta != null) {
+            AppStorage.projects.markOpened(meta.relativePath)
+            AppState.open(meta)
+            projects = AppStorage.projects.list()
+            onOpenProject()
+        } else {
+            homeNotice = "导入失败：所选内容无法读取（压缩包仅支持 zip / tar.gz）"
+        }
+    }
+    val importArchiveLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            homeNotice = "正在导入项目（压缩包）…"
+            scope.launch {
+                val meta = runCatching { ProjectImport.importArchive(context, uri) }.getOrNull()
+                finishImport(meta)
+            }
+        }
+    }
+    val importFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { treeUri ->
+        if (treeUri != null) {
+            homeNotice = "正在导入项目（文件夹）…"
+            scope.launch {
+                val meta = runCatching { ProjectImport.importFolder(context, treeUri) }.getOrNull()
+                finishImport(meta)
+            }
+        }
+    }
 
     LaunchedEffect(Unit) { runCatching { EditorController.ensureInit(context) } }
     LaunchedEffect(homeNotice) {
@@ -906,6 +942,42 @@ private fun HomeScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             SectionHeader(title = "我的项目", modifier = Modifier.weight(1f))
+            // 导入项目（压缩包 / 文件夹），与「克隆」「新建」并列
+            Box {
+                IconButton(onClick = { importMenuOpen = true }) {
+                    Icon(Icons.Default.FileUpload, contentDescription = "导入项目")
+                }
+                DropdownMenu(
+                    expanded = importMenuOpen,
+                    onDismissRequest = { importMenuOpen = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("从压缩包导入…") },
+                        leadingIcon = { Icon(Icons.Default.FileUpload, contentDescription = null) },
+                        onClick = {
+                            importMenuOpen = false
+                            importArchiveLauncher.launch(
+                                arrayOf(
+                                    "application/zip",
+                                    "application/x-zip-compressed",
+                                    "application/gzip",
+                                    "application/x-gzip",
+                                    "application/x-tar",
+                                    "application/octet-stream",
+                                ),
+                            )
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("从文件夹导入…") },
+                        leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null) },
+                        onClick = {
+                            importMenuOpen = false
+                            importFolderLauncher.launch(null)
+                        },
+                    )
+                }
+            }
             IconButton(
                 onClick = {
                     cloneNotice = null
@@ -932,7 +1004,7 @@ private fun HomeScreen(
         if (projects.isEmpty()) {
             EmptyState(
                 title = "还没有项目",
-                subtitle = "创建新项目，或克隆一个 Git 仓库",
+                subtitle = "创建新项目、克隆 Git 仓库，或用上方「导入项目」引入已有代码",
             )
             Row(
                 modifier = Modifier
