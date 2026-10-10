@@ -18,8 +18,10 @@ import org.tukaani.xz.XZInputStream
  * - **格式嗅探**：按流首部识别（gzip = 0x1f8b，zip = 'PK'），与文件名无关；
  * - **.deb 支持**（[extractDeb]）：ar 归档 + `data.tar[.xz|.gz]` 成员，安装 proot 三件套
  *   （Termux 官方仓库 .deb）时用。
+ *
+ * public：首页「导入项目」解压 zip / tar.gz 压缩包时复用（app 模块）。
  */
-internal object ArchiveExtractor {
+object ArchiveExtractor {
 
     /** 解压结果：条目数 + 已解出的字节数。 */
     data class Result(val entries: Int, val readBytes: Long)

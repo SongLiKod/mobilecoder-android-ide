@@ -36,7 +36,9 @@ import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FileCopy
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -166,8 +168,8 @@ private sealed interface NameDialog {
 
 /**
  * 项目文件树抽屉（PRD 2.2「项目树目录」）：
- * 点击打开 / 收起展开，长按弹出菜单（新建文件 / 新建目录 / 重命名 / 移动 / 复制路径 / 导出 / 删除，
- * `.apk` 文件另显示「安装」），长按拖拽移动文件到目标目录。
+ * 点击打开 / 收起展开，长按弹出菜单（新建文件 / 新建目录 / 重命名 / 移动 / 复制路径 / 导出 / 删除 /
+ * 目录另有「导入文件…」「导入文件夹…」，`.apk` 文件另显示「安装」），长按拖拽移动文件到目标目录。
  * 顶部提供「全部折叠 / 全部展开」切换（新项目默认全部折叠）；
  * 打开 / 切换文件时按 [EditorController.locatePath] 展开祖先并滚动定位、高亮当前文件。
  */
@@ -217,6 +219,8 @@ fun FileTreeDrawer(
     var pendingMove by remember { mutableStateOf<FileNode?>(null) }
     // 待导出条目：先记下（选择器期间行可能被折叠 / 刷新掉），拿到目标目录后再执行
     var pendingExport by remember { mutableStateOf<FileNode?>(null) }
+    // 待导入目标目录：与 pendingExport 同理，选择器返回时行可能已不在
+    var pendingImportDir by remember { mutableStateOf<String?>(null) }
     var hiddenNamesDialogOpen by remember { mutableStateOf(false) }
     var drag by remember { mutableStateOf<DragState?>(null) }
     val bounds = remember { mutableStateMapOf<String, Rect>() }
@@ -227,6 +231,24 @@ fun FileTreeDrawer(
         pendingExport = null
         if (treeUri != null && node != null) {
             EditorController.exportTo(node.file.path, treeUri)
+        }
+    }
+    val importFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        val dir = pendingImportDir
+        pendingImportDir = null
+        if (uri != null && dir != null) {
+            EditorController.importFiles(dir, listOf(uri))
+        }
+    }
+    val importFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { treeUri ->
+        val dir = pendingImportDir
+        pendingImportDir = null
+        if (treeUri != null && dir != null) {
+            EditorController.importFolder(dir, treeUri)
         }
     }
 
@@ -409,6 +431,16 @@ fun FileTreeDrawer(
                                             exportLauncher.launch(null)
                                         }
 
+                                        TreeAction.IMPORT_FILE -> {
+                                            pendingImportDir = node.file.path
+                                            importFileLauncher.launch(arrayOf("*/*"))
+                                        }
+
+                                        TreeAction.IMPORT_FOLDER -> {
+                                            pendingImportDir = node.file.path
+                                            importFolderLauncher.launch(null)
+                                        }
+
                                         TreeAction.INSTALL ->
                                             EditorController.showMessage(
                                                 ApkInstaller.install(context, node.file)
@@ -526,6 +558,8 @@ private enum class TreeAction {
     RENAME,
     COPY_PATH,
     EXPORT,
+    IMPORT_FILE,
+    IMPORT_FOLDER,
     INSTALL,
     DELETE,
     MOVE,
@@ -721,6 +755,19 @@ private fun TreeRowItem(
                 leadingIcon = { Icon(Icons.Default.FileDownload, contentDescription = null) },
                 onClick = { onMenuItem(TreeAction.EXPORT) },
             )
+            // 「导入」只对目录出现：文件进目录、目录作为子目录（重名自动加序号）
+            if (row.isDirectory) {
+                DropdownMenuItem(
+                    text = { Text("导入文件…") },
+                    leadingIcon = { Icon(Icons.Default.FileUpload, contentDescription = null) },
+                    onClick = { onMenuItem(TreeAction.IMPORT_FILE) },
+                )
+                DropdownMenuItem(
+                    text = { Text("导入文件夹…") },
+                    leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
+                    onClick = { onMenuItem(TreeAction.IMPORT_FOLDER) },
+                )
+            }
             DropdownMenuItem(
                 text = { Text("删除") },
                 leadingIcon = {

@@ -25,6 +25,7 @@ dependencies {
     implementation(project(":core_common"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.androidx.documentfile)
     implementation(libs.kotlinx.coroutines.android)
 
     testImplementation(libs.junit)
