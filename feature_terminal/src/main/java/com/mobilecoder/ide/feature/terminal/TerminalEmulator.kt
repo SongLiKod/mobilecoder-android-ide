@@ -126,7 +126,8 @@ data class TerminalMouseMode(
  *  - ESC：7 8 D E H M c ( ) * + # > = 与未知序列跳过
  *  - SGR：0/1/2/3/4/7/22/23/24/27、30-37/90-97、39、40-47/100-107、49、
  *    38;5;N / 48;5;N（256 色）、38;2;R;G;B / 48;2;R;G;B（真彩色）
- *  - OSC 0/2 窗口标题、OSC 8 超链接跳过；DCS/SOS/APC/PM 字符串跳过
+ *  - OSC 0/2 窗口标题、OSC 10/11 前景/背景查询（应答当前主题色）、OSC 8 超链接跳过；
+ *    DCS/SOS/APC/PM 字符串跳过
  *  - 滚动区域 DECSTBM、备用屏幕 (?47/?1047/?1049)、插入模式 IRM、自动换行 DECAWM
  *  - 鼠标报告 (?1000/1002/1003/1006)：只记录状态供触摸手势分流，不参与渲染
  */
@@ -205,8 +206,17 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
     /** OSC 0/2 设置的窗口标题（会话标签名）。 */
     var onTitle: ((String) -> Unit)? = null
 
-    /** 需要回写给 PTY 的终端应答（DSR / DA）。 */
+    /** 需要回写给 PTY 的终端应答（DSR / DA / OSC 颜色查询）。 */
     var onResponse: ((String) -> Unit)? = null
+
+    /**
+     * OSC 10 / 11 前景 / 背景查询应答色（0xRRGGBB；-1 = 未知不作答）。
+     * 由渲染层随当前主题写入：bubbletea / lipgloss 系 TUI（opencode 等）启动时
+     * 查询终端背景色来选明暗主题，应答真实底色后它们不再按「深色终端」假设
+     * 渲染，浅色主题下行尾未刷背景的部分不会再露出白底。
+     */
+    var queriedForeground: Int = -1
+    var queriedBackground: Int = -1
 
     private val mouseModes = HashSet<Int>() // 已开启的鼠标报告模式（1000/1002/1003）
     private var mouseSgr = false // SGR 编码（1006）
@@ -1254,12 +1264,25 @@ class TerminalEmulator(initialCols: Int = 80, initialRows: Int = 24) {
         val sep = payload.indexOf(';')
         if (sep <= 0) return
         val code = payload.substring(0, sep).toIntOrNull() ?: return
-        if (code == 0 || code == 2) {
-            val title = payload.substring(sep + 1).trim()
-            if (title.isNotEmpty()) onTitle?.invoke(title)
+        val arg = payload.substring(sep + 1).trim()
+        when (code) {
+            0, 2 -> {
+                if (arg.isNotEmpty()) onTitle?.invoke(arg)
+            }
+            // OSC 10 / 11 颜色查询（"?"/"?" + BEL/ST）：应答当前主题前景 / 背景
+            10, 11 -> if (arg == "?") {
+                val rgb = if (code == 10) queriedForeground else queriedBackground
+                if (rgb >= 0) onResponse?.invoke(
+                    "\u001b]$code;rgb:${hex16(rgb shr 16 and 0xFF)}" +
+                        "/${hex16(rgb shr 8 and 0xFF)}/${hex16(rgb and 0xFF)}\u0007",
+                )
+            }
+            // OSC 8 超链接、OSC 7 等：正确跳过即可
         }
-        // OSC 8 超链接、OSC 7 等：正确跳过即可
     }
+
+    /** 8 位分量 → OSC 答复的 16 位十六进制（x*257 保持纯色不失真）。 */
+    private fun hex16(v: Int): String = (v * 257).toString(16).padStart(4, '0')
 
     private fun bump() {
         _version.value = _version.value + 1

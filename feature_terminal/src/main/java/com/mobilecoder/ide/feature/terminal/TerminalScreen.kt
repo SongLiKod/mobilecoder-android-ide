@@ -7,6 +7,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -21,7 +22,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -71,22 +74,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -98,7 +101,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -111,6 +114,8 @@ import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.core.storage.HistoryStore
 import kotlin.math.abs
+import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -171,6 +176,16 @@ fun TerminalScreen(
     val noticeMessage by TerminalManager.notice.collectAsStateWithLifecycle()
 
     val active = sessions.firstOrNull { it.id == activeId } ?: sessions.firstOrNull()
+
+    // OSC 10/11 查询应答色：随主题 / 会话变化同步，opencode 这类 TUI 启动时
+    // 据此判断终端明暗，自动选择匹配主题（否则默认按深色终端渲染，浅色主题
+    // 下行尾未刷背景的单元格会露出容器底色，看起来像背景右缘不对齐）。
+    LaunchedEffect(palette, sessions) {
+        sessions.forEach { s ->
+            s.emulator.queriedForeground = palette.terminalForeground.rgb.toInt()
+            s.emulator.queriedBackground = palette.terminalBackground.rgb.toInt()
+        }
+    }
 
     // ---- 字号（AppPreferences 持久化；修改入口在全局「设置」页） ----
     var fontSize by remember { mutableIntStateOf(13) }
@@ -473,6 +488,7 @@ fun TerminalScreen(
                     palette = palette,
                     style = termStyle,
                     availableWidthPx = areaSize.width,
+                    cellWidthPx = metrics.first,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -880,6 +896,7 @@ private fun TerminalViewport(
     palette: AppPalette,
     style: TextStyle,
     availableWidthPx: Int,
+    cellWidthPx: Int,
     modifier: Modifier = Modifier,
 ) {
     val emulator = session.emulator
@@ -887,6 +904,7 @@ private fun TerminalViewport(
     val total = emulator.lineCount()
     val cursorLine = emulator.cursorLineIndex()
     val listState = rememberLazyListState()
+    val textMeasurer = rememberTextMeasurer(cacheSize = 2048)
 
     // 鼠标报告模式：单指滑动改为发滚轮给 TUI，本地滚动（userScrollEnabled）停用
     val mouseOn = emulator.mouseMode.collectAsStateWithLifecycle().value.tracking
@@ -937,6 +955,8 @@ private fun TerminalViewport(
                     palette = palette,
                     style = style,
                     availableWidthPx = availableWidthPx,
+                    cellWidthPx = cellWidthPx,
+                    textMeasurer = textMeasurer,
                 )
             }
         }
@@ -1055,16 +1075,28 @@ private fun Modifier.terminalMouseGestures(
     }
 }
 
+/** 一行终端文本的渲染分段：栅格定位 + 独立字形 + 网格对齐的背景块。 */
+private class TerminalPiece(
+    val text: String,
+    val style: TextStyle,
+    val startCol: Int,
+    val cells: Int,
+    val bg: Color?,
+)
+
 /**
- * 单行终端文本。
+ * 单行终端文本（**网格对齐渲染**）。
  *
- * 网格里 1 个单元格按 1 个字符算，但**字形未必等宽**：中文 / 制表符 / emoji 等
- * 缺字时走回退字体，明显比测宽用的 `M` 宽；滚动区里按旧列数存留的行也可能比
- * 当前视口宽。这些行若直接交给容器约束，超出部分会被裁掉 —— 表现就是
- * 「换行后行尾缺字符」。
+ * 旧实现把整行拼成一条 [androidx.compose.ui.text.AnnotatedString] 交给单个 Text，
+ * 背景色用 SpanStyle 画在字形上：字形实际推进宽度（中文 / emoji / 制表符回退字体）
+ * 不等于测量基准 `M` 的列宽时，同一段背景在不同行就停在不同的像素上 ——
+ * 表现为「opencode 回复块的背景右侧不整齐」。
  *
- * 这里改用**自然宽度**（不给宽度上限）测量该行，测量结果放不下时整体 `scaleX`
- * 压到刚好铺满可视宽度：一个字符都不会丢，且宽度本来就够的行完全不受影响。
+ * 现在按终端栅格绘制：每个样式分段摆在自己的起始列（`startCol × cellWidth`），
+ * 背景块用 Canvas 按**整格**铺矩形（宽度 = 占格数 × cellWidth），与字形推进无关，
+ * 任意两行的背景左右边界都严格对齐。
+ *
+ * 行整体放不下视口宽度时沿用旧策略：整体 `scaleX` 压到刚好铺满，一个字符不丢。
  */
 @Composable
 private fun TerminalLineText(
@@ -1073,134 +1105,190 @@ private fun TerminalLineText(
     palette: AppPalette,
     style: TextStyle,
     availableWidthPx: Int,
+    cellWidthPx: Int,
+    textMeasurer: TextMeasurer,
 ) {
-    val annotated = remember(line, palette, isCursorLine) {
-        buildTerminalLine(line, palette, isCursorLine)
+    val pieces = remember(line, palette, isCursorLine, style) {
+        buildTerminalLinePieces(line, palette, isCursorLine, style)
     }
-    Layout(
-        content = {
+    // 分段自然宽度 / 高度：与 Text 同一套测量（TextMeasurer 自带缓存）；空段跳过测量
+    val sizes = remember(pieces, textMeasurer, style) {
+        pieces.map {
+            if (it.text.isEmpty()) IntSize.Zero else textMeasurer.measure(it.text, it.style).size
+        }
+    }
+    val rowHeightPx = remember(style, textMeasurer) {
+        textMeasurer.measure("M", style).size.height.coerceAtLeast(1)
+    }
+    val heightPx = maxOf(rowHeightPx, sizes.maxOfOrNull { it.height } ?: 0)
+
+    // 自然宽度：分段栅格末端 与 字形实际末端 取大者（超宽行整体压缩用）
+    val gridEndPx = pieces.lastOrNull()?.let { (it.startCol + it.cells) * cellWidthPx } ?: 0
+    val glyphEndPx = pieces.indices.maxOfOrNull { i -> pieces[i].startCol * cellWidthPx + sizes[i].width } ?: 0
+    val lineNatural = maxOf(gridEndPx, glyphEndPx)
+    val scale = if (availableWidthPx > 0 && lineNatural > availableWidthPx) {
+        availableWidthPx.toFloat() / lineNatural
+    } else {
+        1f
+    }
+
+    val density = LocalDensity.current
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(with(density) { heightPx.toDp() }),
+    ) {
+        // 背景块：先画（Canvas 是第一个子节点，文本盖在其上）；按整格铺，右缘严格对齐
+        Canvas(modifier = Modifier.matchParentSize()) {
+            pieces.forEach { piece ->
+                val color = piece.bg ?: return@forEach
+                drawRect(
+                    color = color,
+                    topLeft = Offset(piece.startCol * cellWidthPx * scale, 0f),
+                    size = Size(piece.cells * cellWidthPx * scale, size.height),
+                )
+            }
+        }
+        pieces.forEachIndexed { i, piece ->
+            if (piece.text.isEmpty()) return@forEachIndexed
             Text(
-                text = annotated,
-                style = style,
+                text = piece.text,
+                style = piece.style,
                 maxLines = 1,
                 softWrap = false,
                 overflow = TextOverflow.Clip,
+                modifier = Modifier
+                    .offset { IntOffset((piece.startCol * cellWidthPx * scale).roundToInt(), 0) }
+                    .requiredWidth(with(density) { sizes[i].width.toDp().coerceAtLeast(0.dp) })
+                    .graphicsLayer {
+                        scaleX = scale
+                        transformOrigin = TransformOrigin(0f, 0f)
+                    },
             )
-        },
-    ) { measurables, constraints ->
-        val placeable = measurables.first().measure(
-            constraints.copy(minWidth = 0, maxWidth = Constraints.Infinity),
-        )
-        val natural = placeable.width
-        // 可视宽度：优先用父约束（LazyColumn 行约束），退化时用视口实测宽度
-        val maxWidth = if (constraints.maxWidth == Constraints.Infinity) {
-            availableWidthPx.coerceAtLeast(1)
-        } else {
-            constraints.maxWidth
-        }
-        val fits = natural <= maxWidth
-        val width = when {
-            constraints.maxWidth == Constraints.Infinity -> maxWidth.coerceAtLeast(constraints.minWidth)
-            else -> constraints.maxWidth
-        }
-        layout(width, placeable.height) {
-            if (fits) {
-                placeable.place(0, 0)
-            } else {
-                // 以左上角为锚点横向压缩：scaleY 保持 1，行高、行距都不变
-                placeable.placeWithLayer(0, 0) {
-                    scaleX = maxWidth.toFloat() / natural
-                    transformOrigin = TransformOrigin(0f, 0f)
-                }
-            }
         }
     }
 }
 
 /**
- * 把一屏行转成 AnnotatedString（SGR 样式 + 光标反色块）。
+ * 把一屏行转成渲染分段（SGR 样式 + 光标反色块），列号按**栅格**推进。
  *
  * 栅格里双宽字（中文 / emoji）占两格：字符 + 续格占位符 [CELL_CONTINUATION]。
- * 续格**不渲染**（交给字形的自然宽度），但栅格列号照常推进 —— 因此文本下标与
- * 栅格列号必须分开维护，光标才能落到真正的字符上：
+ * 续格不进入分段文本（交给字形自然宽度），但栅格列号照常推进；分段按栅格
+ * 摆放后，背景块宽度 = 占格数 × 列宽，右缘对齐不再依赖字形推进。
  *
- *  - run 文本先剔除续格再 append（选中复制拿到的也是干净文本）；
- *  - 光标落在续格上时，反色块套给它所属的双宽字（前一格）。
+ * 背景块规则：
+ *  - 默认底色不画（容器已铺 terminalBackground，画了反而遮挡选中高亮）；
+ *  - 显式 SGR / 反色背景按整格绘制。
+ *
+ * 光标：落在哪一格就把那一格（含双宽字整字）拆成独立分段，颜色与单元格底色互换。
  */
-private fun buildTerminalLine(
+private fun buildTerminalLinePieces(
     line: TerminalLine,
     palette: AppPalette,
     isCursorLine: Boolean,
-): AnnotatedString = buildAnnotatedString {
-    var col = 0 // 栅格列（含续格）
-    var cursorText = -1 // 光标在渲染文本中的下标
-    var cursorFg = Color.Unspecified
-    var cursorBg = Color.Unspecified
+    baseStyle: TextStyle,
+): List<TerminalPiece> {
+    val out = ArrayList<TerminalPiece>(line.runs.size + 2)
+    val cursorAt = if (isCursorLine) line.cursorCol else -1
+    var col = 0
     line.runs.forEach { run ->
-        val start = length
         val cells = run.text
-        val hasCont = cells.indexOf(CELL_CONTINUATION) >= 0
-        val text = if (hasCont) {
-            buildString(cells.length) { for (ch in cells) if (ch != CELL_CONTINUATION) append(ch) }
-        } else {
-            cells
-        }
-        append(text)
-
         var fg = resolveColor(run.fg, palette, true)
         var bg = resolveColor(run.bg, palette, false)
-        if (run.attrs and Attr.INVERSE != 0) {
+        val inverse = run.attrs and Attr.INVERSE != 0
+        if (inverse) {
             val swap = fg
             fg = bg
             bg = swap
         }
-
-        // 默认底色不画：容器已经铺了 terminalBackground，再画一遍只是遮挡。
-        // 更关键的是 Compose 的选中高亮画在文本节点**之下**（SelectionController.modifier
-        // 在 selectableTextModifier 之前进链），整行铺一层不透明 background 会把它
-        // 完全盖住 —— 表现为「选中了却没有高亮」。
-        // 显式底色（SGR / 反色 / 光标块）本来就该盖住高亮，照常画。
-        val spanBg =
-            if (run.bg == COLOR_DEFAULT && (run.attrs and Attr.INVERSE) == 0) {
-                Color.Transparent
-            } else {
-                bg
-            }
-
-        addStyle(
-            SpanStyle(
-                color = if (run.attrs and Attr.DIM != 0) fg.copy(alpha = 0.72f) else fg,
-                background = spanBg,
-                fontWeight = if (run.attrs and Attr.BOLD != 0) FontWeight.Bold else null,
-                fontStyle = if (run.attrs and Attr.ITALIC != 0) FontStyle.Italic else null,
-                textDecoration = when {
-                    run.attrs and Attr.UNDERLINE != 0 -> TextDecoration.Underline
-                    run.attrs and Attr.STRIKE != 0 -> TextDecoration.LineThrough
-                    else -> null
-                },
-            ),
-            start,
-            start + text.length,
+        // 默认底色分段：不画背景（见函数注释）；反色块用互换后的底色
+        val normalBg: Color? =
+            if (run.bg == COLOR_DEFAULT && !inverse) null else bg
+        // 前景可读性兜底：反色块的颜色已互换、对比由块本身保证，不参与
+        val shownFg = if (inverse) {
+            fg
+        } else {
+            ensureReadableTextColor(fg, normalBg ?: defaultBg(palette), defaultFg(palette))
+        }
+        val pieceStyle = baseStyle.copy(
+            color = if (run.attrs and Attr.DIM != 0) shownFg.copy(alpha = 0.72f) else shownFg,
+            fontWeight = if (run.attrs and Attr.BOLD != 0) FontWeight.Bold else null,
+            fontStyle = if (run.attrs and Attr.ITALIC != 0) FontStyle.Italic else null,
+            textDecoration = when {
+                run.attrs and Attr.UNDERLINE != 0 -> TextDecoration.Underline
+                run.attrs and Attr.STRIKE != 0 -> TextDecoration.LineThrough
+                else -> null
+            },
         )
 
-        val cursorAt = line.cursorCol
-        if (isCursorLine && cursorText < 0 && cursorAt >= col && cursorAt < col + cells.length) {
-            val offset = cursorAt - col
-            var idx = start
-            for (i in 0 until offset) {
-                if (cells[i] != CELL_CONTINUATION) idx++
+        fun add(from: Int, to: Int, style: TextStyle, rect: Color?) {
+            val n = to - from
+            if (n <= 0) return
+            val text = buildString(n) {
+                for (i in from until to) {
+                    val ch = cells[i]
+                    if (ch != CELL_CONTINUATION) append(ch)
+                }
             }
-            // 光标停在续格上 → 套给前一格的双宽字
-            cursorText = if (cells[offset] == CELL_CONTINUATION) idx - 1 else idx
-            cursorFg = fg
-            cursorBg = bg
+            if (text.isEmpty() && rect == null) return
+            out.add(TerminalPiece(text, style, col + from, n, rect))
+        }
+
+        if (cursorAt >= col && cursorAt < col + cells.length) {
+            val off = cursorAt - col
+            var glyphStart = off
+            var glyphCells = 1
+            val ch = cells[off]
+            when {
+                ch == CELL_CONTINUATION && off > 0 -> {
+                    glyphStart = off - 1
+                    glyphCells = 2
+                }
+                isHighSurrogate(ch) && off + 1 < cells.length && isLowSurrogate(cells[off + 1]) ->
+                    glyphCells = 2
+                isLowSurrogate(ch) && off > 0 && isHighSurrogate(cells[off - 1]) -> {
+                    glyphStart = off - 1
+                    glyphCells = 2
+                }
+                isWideChar(ch) -> glyphCells = 2
+            }
+            add(0, glyphStart, pieceStyle, normalBg)
+            // 光标块：字色 = 单元格底色，背景 = 字色（互换），始终绘制
+            add(glyphStart, glyphStart + glyphCells, pieceStyle.copy(color = bg), fg)
+            add(glyphStart + glyphCells, cells.length, pieceStyle, normalBg)
+        } else {
+            add(0, cells.length, pieceStyle, normalBg)
         }
         col += cells.length
     }
-    if (isCursorLine && cursorText in 0 until length) {
-        // 光标：与单元格底色互换的反色块
-        addStyle(SpanStyle(color = cursorBg, background = cursorFg), cursorText, cursorText + 1)
+    return out
+}
+
+/**
+ * 文字前景可读性兜底：opencode 这类 TUI 按自己的主题输出字色，可能与当前终端
+ * 底色低对比（浅色主题下输出为深色面板设计的浅色字最常见）。
+ * 字色与其**实际所在底色**（画了背景块用块色，否则用终端底色）WCAG 对比度
+ * 低于 3:1 时，向主题前景色混合 90%（保留一成原色相），保证可读又不至于
+ * 整屏变成一种颜色。
+ */
+fun ensureReadableTextColor(fg: Color, surface: Color, themeFg: Color): Color =
+    if (contrastRatio(fg, surface) >= 3.0) fg else lerp(fg, themeFg, 0.9f)
+
+/** WCAG 相对亮度对比度（1..21）。 */
+private fun contrastRatio(a: Color, b: Color): Double {
+    val la = luminanceOf(a)
+    val lb = luminanceOf(b)
+    val hi = maxOf(la, lb)
+    val lo = minOf(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+}
+
+private fun luminanceOf(c: Color): Double {
+    fun chan(v: Float): Double {
+        val s = v.coerceIn(0f, 1f).toDouble()
+        return if (s <= 0.03928) s / 12.92 else ((s + 0.055) / 1.055).pow(2.4)
     }
+    return 0.2126 * chan(c.red) + 0.7152 * chan(c.green) + 0.0722 * chan(c.blue)
 }
 
 // ---------------------------------------------------------------------------
