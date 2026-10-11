@@ -55,12 +55,17 @@ object SnippetStore {
 
     val LANGUAGES = listOf(LANG_KOTLIN, LANG_JAVA, LANG_JS, LANG_TS, LANG_HTML, LANG_SHELL, LANG_ANY)
 
-    /** 语言键中文名（面板筛选标签）。 */
+    /**
+     * 语言键显示名（面板筛选标签 / 列表行尾的 tag）。
+     *
+     * JS / TS 用缩写而非 JavaScript / TypeScript：这两个是最长的名字，
+     * 在片段候选面板的窄行里会把触发词 / 描述挤到换行。
+     */
     val LANGUAGE_LABELS = mapOf(
         LANG_KOTLIN to "Kotlin",
         LANG_JAVA to "Java",
-        LANG_JS to "JavaScript",
-        LANG_TS to "TypeScript",
+        LANG_JS to "JS",
+        LANG_TS to "TS",
         LANG_HTML to "HTML",
         LANG_SHELL to "Shell",
         LANG_ANY to "通用",
