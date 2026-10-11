@@ -1029,13 +1029,6 @@ object GitCli {
                 runCatching { GitNative.configGet("branch.$current.merge") }.getOrDefault("")
                     .takeIf { it.isNotBlank() }
             } else null
-            runCatching {
-                android.util.Log.d(
-                    "GITPULL",
-                    "branch=[$current] cfgRemote=[$configRemote] cfgMerge=[$configuredMerge] " +
-                        "rawRemote=[${runCatching { GitNative.configGet("branch." + current + ".remote") }.getOrElse { "EX:" + it } }]",
-                )
-            }
             if (branchArg == null && current != null && configuredMerge == null) {
                 val healed = GitController.autoAssociateBranch(current)
                 if (healed == null) {

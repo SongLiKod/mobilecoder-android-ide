@@ -465,20 +465,12 @@ object GitController {
     internal fun autoAssociateBranch(branch: String): Pair<String, String>? {
         val list = parseBranches(runCatching { GitNative.branches() }.getOrDefault(""))
         val (name, remote) = autoTrackCandidates(list).firstOrNull { it.first == branch }
-            ?: run {
-                runCatching {
-                    android.util.Log.d(
-                        "GITPULL",
-                        "heal($branch): no candidate; localRow=${list.firstOrNull { !it.isRemote && it.name == branch }?.upstream} " +
-                            "remoteRows=${list.filter { it.isRemote }.map { it.name }.take(30)}",
-                    )
-                }
-                return null
-            }
-        val rc1 = GitNative.configSet("branch.$name.remote", remote)
-        val rc2 = GitNative.configSet("branch.$name.merge", "refs/heads/$name")
-        runCatching { android.util.Log.d("GITPULL", "heal($branch): rc1=$rc1 rc2=$rc2") }
-        if (rc1 != 0 || rc2 != 0) return null
+            ?: return null
+        if (GitNative.configSet("branch.$name.remote", remote) != 0 ||
+            GitNative.configSet("branch.$name.merge", "refs/heads/$name") != 0
+        ) {
+            return null
+        }
         _branches.value = parseBranches(runCatching { GitNative.branches() }.getOrDefault(""))
         return remote to name
     }

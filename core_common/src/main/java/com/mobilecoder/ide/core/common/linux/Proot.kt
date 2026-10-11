@@ -148,6 +148,17 @@ object Proot {
         val out = LinkedHashSet<String>()
         HOST_BINDS.forEach { if (File(it).isDirectory) out += it }
         out += dataDir.absolutePath
+        // /data/data/<pkg> 与 /data/user/0/<pkg> 是同一目录的两个前缀：脚本里可能
+        // 硬编码任一种（NDK/aapt2 wrapper、用户手敲路径），两个都 bind 才对得上。
+        runCatching {
+            val abs = dataDir.absolutePath
+            val twin = when {
+                abs.startsWith("/data/data/") -> "/data/user/0/" + abs.removePrefix("/data/data/")
+                abs.startsWith("/data/user/0/") -> "/data/data/" + abs.removePrefix("/data/user/0/")
+                else -> null
+            }
+            twin?.let { if (File(it).isDirectory) out += it }
+        }
         cwd?.trim()?.takeIf { it.isNotBlank() && it != "/" && File(it).isDirectory }
             ?.let { out += it }
         return out.filter { it.isNotBlank() && it != "/" }

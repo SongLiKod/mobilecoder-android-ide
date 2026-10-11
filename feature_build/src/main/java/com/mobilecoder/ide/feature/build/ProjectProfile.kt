@@ -20,6 +20,24 @@ enum class ProjectKind(val label: String) {
 }
 
 /**
+ * 项目**代码分析**出来的输出产物（一个项目可能多目标，如 Vite 前端 +
+ * android 壳工程 + electron 桌面）：buildableOnDevice=false 的目标只在
+ * 展示中列出（如 Windows exe 需在 PC 上 electron-builder 打包），
+ * 构建时跳过并在日志说明。
+ */
+enum class BuildTarget(val label: String, val buildableOnDevice: Boolean) {
+    APK("APK", true),
+    JAR("JAR", true),
+    WEB_DIST("Web dist", true),
+    WINDOWS_EXE("Windows exe", false),
+    SOURCE_ZIP("源码包", true),
+}
+
+/** 产物展示串：可构建的直写，设备不可构建的标（PC）。 */
+internal fun artifactLabelOf(targets: List<BuildTarget>): String =
+    targets.joinToString(" + ") { if (it.buildableOnDevice) it.label else "${it.label}（PC）" }
+
+/**
  * 项目画像：类型 + 展示名 + 所需环境 + 产物描述 + 可选补充引导。
  *
  * @param requiredEnv 所需环境组件（**不含** LINUX；需要子进程的类型由
@@ -33,6 +51,10 @@ data class ProjectProfile(
     val requiredEnv: List<EnvKind> = emptyList(),
     val artifactLabel: String = "",
     val hint: String? = null,
+    /** 代码分析出的全部产物目标（可能多于 kind 单链路实际构建的）。 */
+    val targets: List<BuildTarget> = emptyList(),
+    /** Web 工程内嵌安卓壳工程目录（git-green 式：npm build → android gradle → APK）。 */
+    val androidDir: File? = null,
 ) {
     /** 是否需要子进程（Gradle / npm）构建；false = 进程内打包。 */
     val usesShell: Boolean
@@ -53,20 +75,19 @@ data class ProjectProfile(
  * **任何项目都能在此页产出可分享的产物**，识别不出的只影响是否能编译。
  */
 fun detectProject(dir: File): ProjectProfile {
-    val hasGradle = listOf(
-        "settings.gradle",
-        "settings.gradle.kts",
-        "build.gradle",
-        "build.gradle.kts",
-        "gradlew",
-    ).any { File(dir, it).exists() }
+    val hasGradle = hasGradleProjectFiles(dir)
     if (hasGradle) {
         return if (BuildEnvironment.isAndroidProject(dir)) {
+            val needsNdk = NativeToolchain.hasCMakeLists(dir)
             ProjectProfile(
                 kind = ProjectKind.ANDROID_APP,
                 displayName = "安卓应用（Gradle）",
-                requiredEnv = listOf(EnvKind.JDK, EnvKind.GRADLE, EnvKind.SDK),
+                requiredEnv = buildList {
+                    add(EnvKind.JDK); add(EnvKind.GRADLE); add(EnvKind.SDK)
+                    if (needsNdk) add(EnvKind.NDK)
+                },
                 artifactLabel = "APK",
+                targets = listOf(BuildTarget.APK),
             )
         } else {
             ProjectProfile(
@@ -74,6 +95,7 @@ fun detectProject(dir: File): ProjectProfile {
                 displayName = "JVM / Kotlin（Gradle）",
                 requiredEnv = listOf(EnvKind.JDK, EnvKind.GRADLE),
                 artifactLabel = "JAR",
+                targets = listOf(BuildTarget.JAR),
             )
         }
     }
@@ -86,20 +108,49 @@ fun detectProject(dir: File): ProjectProfile {
             text.contains("\"react\"") -> "React（Node.js）"
             else -> "Node.js"
         }
-        return if (hasNpmBuildScript(text)) {
+        // 产物分析：web dist（build 脚本）+ 内嵌安卓壳工程 + electron 桌面（仅 PC 可打包）
+        val androidSub = File(dir, "android").takeIf { it.isDirectory && hasGradleProjectFiles(it) }
+        val targets = buildList {
+            if (hasNpmBuildScript(text)) add(BuildTarget.WEB_DIST)
+            if (androidSub != null) add(BuildTarget.APK)
+            if (text.contains("electron-builder") || text.contains("\"electron\":")) {
+                add(BuildTarget.WINDOWS_EXE)
+            }
+            if (isEmpty()) add(BuildTarget.SOURCE_ZIP)
+        }
+        val buildable = targets.filter { it.buildableOnDevice }
+        val requiredEnv = buildList {
+            if (BuildTarget.WEB_DIST in targets || BuildTarget.SOURCE_ZIP in targets) add(EnvKind.NODE)
+            if (androidSub != null) {
+                add(EnvKind.JDK); add(EnvKind.GRADLE); add(EnvKind.SDK)
+                if (NativeToolchain.hasCMakeLists(androidSub)) add(EnvKind.NDK)
+            }
+        }
+        val label = artifactLabelOf(targets)
+        return if (BuildTarget.WEB_DIST in targets || androidSub != null) {
             ProjectProfile(
                 kind = ProjectKind.NODE,
                 displayName = display,
-                requiredEnv = listOf(EnvKind.NODE),
-                artifactLabel = "dist 压缩包",
+                requiredEnv = requiredEnv,
+                artifactLabel = label,
+                hint = if (BuildTarget.WINDOWS_EXE in targets) {
+                    "Windows 安装包只能在 PC 上经 electron-builder 生成，设备构建产出：" +
+                        buildable.joinToString("、") { it.label }
+                } else {
+                    null
+                },
+                targets = targets,
+                androidDir = androidSub,
             )
         } else {
             ProjectProfile(
                 kind = ProjectKind.ZIP_PACKAGE,
                 displayName = display,
-                artifactLabel = "源码压缩包",
+                requiredEnv = if (BuildTarget.SOURCE_ZIP in targets) emptyList() else listOf(EnvKind.NODE),
+                artifactLabel = label,
                 hint = "package.json 未定义 build 脚本：已按源码打包分享。" +
                     "如需运行，可在「终端」执行 npm install 后 npm start",
+                targets = targets,
             )
         }
     }
@@ -108,12 +159,21 @@ fun detectProject(dir: File): ProjectProfile {
     if (pubspec.exists()) {
         val text = runCatching { pubspec.readText(Charsets.UTF_8) }.getOrDefault("")
         if (text.contains("flutter:")) {
+            val targets = buildList {
+                if (File(dir, "android").isDirectory) add(BuildTarget.APK)
+                if (File(dir, "web").isDirectory) add(BuildTarget.WEB_DIST)
+                if (File(dir, "windows").isDirectory) add(BuildTarget.WINDOWS_EXE)
+                if (isEmpty()) add(BuildTarget.SOURCE_ZIP)
+            }
             return ProjectProfile(
                 kind = ProjectKind.ZIP_PACKAGE,
                 displayName = "Flutter 应用",
-                artifactLabel = "源码压缩包",
-                hint = "完整构建需要 Flutter SDK：可在「终端」安装 Flutter 后执行 flutter build apk。" +
-                    "当前已按源码打包，可先下载 / 分享。",
+                artifactLabel = artifactLabelOf(targets),
+                hint = "检测到目标产物：${targets.joinToString("、") { it.label }}。" +
+                    "设备端完整构建需要 Flutter SDK（支持规划中），" +
+                    "当前按源码打包，可先下载 / 分享；" +
+                    "也可在「终端」安装 Flutter 后执行 flutter build apk。",
+                targets = targets,
             )
         }
     }
@@ -122,7 +182,8 @@ fun detectProject(dir: File): ProjectProfile {
         return ProjectProfile(
             kind = ProjectKind.ZIP_PACKAGE,
             displayName = "静态 HTML",
-            artifactLabel = "源码压缩包",
+            artifactLabel = "源码包",
+            targets = listOf(BuildTarget.SOURCE_ZIP),
         )
     }
 
@@ -132,19 +193,30 @@ fun detectProject(dir: File): ProjectProfile {
         return ProjectProfile(
             kind = ProjectKind.ZIP_PACKAGE,
             displayName = "Python",
-            artifactLabel = "源码压缩包",
+            artifactLabel = "源码包",
             hint = "Python 无需编译：已按源码打包。可在「软件市场」安装 Python 3 后于「终端」运行。",
+            targets = listOf(BuildTarget.SOURCE_ZIP),
         )
     }
 
     return ProjectProfile(
         kind = ProjectKind.ZIP_PACKAGE,
         displayName = "未识别类型",
-        artifactLabel = "源码压缩包",
+        artifactLabel = "源码包",
         hint = "未在项目根目录发现构建文件（settings.gradle / package.json 等），" +
             "已按源码打包分享；如需编译请确认构建文件位于项目根目录。",
+        targets = listOf(BuildTarget.SOURCE_ZIP),
     )
 }
+
+/** 目录内是否有 Gradle 工程文件（settings / build / gradlew 任一）。 */
+internal fun hasGradleProjectFiles(dir: File): Boolean = listOf(
+    "settings.gradle",
+    "settings.gradle.kts",
+    "build.gradle",
+    "build.gradle.kts",
+    "gradlew",
+).any { File(dir, it).exists() }
 
 /**
  * package.json 的 `scripts` 里是否定义了 `build`（决定走 npm 构建还是源码打包）。

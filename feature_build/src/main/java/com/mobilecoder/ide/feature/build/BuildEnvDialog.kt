@@ -187,6 +187,69 @@ fun EnvironmentContent(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
+        // ---- 一键安装缺失组件（按依赖顺序：Linux → JDK → Gradle → SDK → Node → NDK） ----
+        val missingKinds = status?.items?.filterNot { it.ready }?.map { it.kind }
+            ?.toSet().orEmpty()
+        OutlinedButton(
+            modifier = Modifier.fillMaxWidth(),
+            enabled = downloading == null && importing == null && missingKinds.isNotEmpty(),
+            onClick = {
+                scope.launch {
+                    val order = listOf(
+                        EnvKind.LINUX, EnvKind.JDK, EnvKind.GRADLE,
+                        EnvKind.SDK, EnvKind.NODE, EnvKind.NDK,
+                    ).filter { it in missingKinds }
+                    if (order.isEmpty()) return@launch
+                    val failed = mutableListOf<String>()
+                    order.forEachIndexed { idx, k ->
+                        if (k == EnvKind.NDK && failed.isNotEmpty() &&
+                            failed.any { it.startsWith(EnvKind.LINUX.title) }
+                        ) {
+                            failed += "${k.title}（跳过：依赖 Linux 环境）"
+                            return@forEachIndexed
+                        }
+                        downloading = k
+                        busyProgress = -1f
+                        try {
+                            if (k == EnvKind.SDK) {
+                                EnvDownloader.installSdk(context, source,
+                                    { stageText = "(${idx + 1}/${order.size}) $it" },
+                                    { busyProgress = it },
+                                )
+                            } else {
+                                EnvDownloader.install(context, k, source,
+                                    { stageText = "(${idx + 1}/${order.size}) $it" },
+                                    { busyProgress = it },
+                                    { line -> stageText = "(${idx + 1}/${order.size}) $line" },
+                                )
+                            }
+                        } catch (c: DownloadCancelled) {
+                            failed += "${k.title}：已取消"
+                            return@launch
+                        } catch (t: Throwable) {
+                            failed += "${k.title}：${t.message ?: t::class.java.simpleName}"
+                        } finally {
+                            downloading = null
+                            stageText = ""
+                            busyProgress = -1f
+                        }
+                    }
+                    message = if (failed.isEmpty()) {
+                        "一键安装完成，缺失组件已全部就绪"
+                    } else {
+                        "部分组件失败：${failed.joinToString("；")}（可在上方单项重试）"
+                    }
+                    runCatching { BuildEnvironment.refresh(context, projectDir) }
+                }
+            },
+        ) {
+            Text(
+                if (missingKinds.isEmpty()) "环境已齐备" else
+                    "一键安装缺失组件（${missingKinds.joinToString("、") { it.title }}）",
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+
         // ---- Linux 环境 rootfs 镜像：多内置源自动回退 + 点选首选 + 手动输入自定义源 ----
         Text("Linux 环境镜像（Ubuntu rootfs）", style = MaterialTheme.typography.titleSmall)
         Text(
@@ -269,6 +332,7 @@ fun EnvironmentContent(
             EnvRow(
                 item = item,
                 busy = importing != null || downloading != null,
+                showImport = item.kind != EnvKind.NDK,
                 onImport = {
                     pendingKind = item.kind
                     launcher.launch(
@@ -389,6 +453,7 @@ fun EnvironmentContent(
 private fun EnvRow(
     item: EnvItem,
     busy: Boolean,
+    showImport: Boolean = true,
     onImport: () -> Unit,
     onDownload: () -> Unit,
 ) {
@@ -431,11 +496,14 @@ private fun EnvRow(
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (!item.ready) {
                     OutlinedButton(onClick = onDownload, enabled = !busy) {
-                        Text("在线下载", style = MaterialTheme.typography.labelMedium)
+                        Text(if (item.kind == EnvKind.NDK) "一键装配" else "在线下载",
+                            style = MaterialTheme.typography.labelMedium)
                     }
                 }
-                OutlinedButton(onClick = onImport, enabled = !busy) {
-                    Text("导入压缩包", style = MaterialTheme.typography.labelMedium)
+                if (showImport) {
+                    OutlinedButton(onClick = onImport, enabled = !busy) {
+                        Text("导入压缩包", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
         }

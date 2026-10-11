@@ -257,13 +257,15 @@ object BuildRunner {
         }
     }
 
-    /** 重新扫描产物（按当前项目类型）。 */
+    /** 重新扫描产物（按当前项目类型；web 工程内嵌安卓壳的 APK 一并扫）。 */
     fun refreshArtifacts() {
         val project = currentProject ?: return
         scope.launch {
-            val kind = detectProject(project).kind
+            val profile = detectProject(project)
             _artifacts.value = withContext(Dispatchers.IO) {
-                scanArtifacts(project, kind, defaultVariantOf(kind))
+                val base = scanArtifacts(project, profile.kind, defaultVariantOf(profile.kind))
+                val apks = profile.androidDir?.let { scanApks(it, "debug") }.orEmpty()
+                base + apks
             }
         }
     }
@@ -353,10 +355,20 @@ object BuildRunner {
                     "构建环境未就绪：缺少 Android SDK（需要 platforms / build-tools）。请在「环境中心」中在线安装 SDK，或导入 SDK 压缩包",
                 )
             }
+            if (EnvKind.NDK in profile.requiredEnv && !NativeToolchain.isReady(appContext)) {
+                return fail(
+                    task, startedAt,
+                    "构建环境未就绪：该工程含 native 代码（CMakeLists），需要 NDK 工具链。" +
+                        "请在「环境状态条 → 环境中心」点「NDK 工具链 · 在线下载」一键装配",
+                )
+            }
             if (EnvKind.GRADLE in profile.requiredEnv) {
                 val gradlew = File(request.projectDir, "gradlew")
                 val wrapperJar = File(request.projectDir, "gradle/wrapper/gradle-wrapper.jar")
-                if (gradleHome == null && !(gradlew.exists() && wrapperJar.exists())) {
+                val androidWrapper = profile.androidDir?.let {
+                    File(it, "gradlew").exists() && File(it, "gradle/wrapper/gradle-wrapper.jar").exists()
+                } == true
+                if (gradleHome == null && !(gradlew.exists() && wrapperJar.exists()) && !androidWrapper) {
                     return fail(
                         task, startedAt,
                         "构建环境未就绪：缺少 Gradle 发行版。请在「环境中心」中在线下载，或导入 gradle-x.x-bin.zip",
@@ -403,23 +415,61 @@ object BuildRunner {
             return runPackaging(request, task, profile, startedAt)
         }
 
-        // ---- 3) 命令组装（Gradle / npm） ----
-        val cmd = if (profile.kind == ProjectKind.NODE) {
-            "npm install --no-audit --no-fund --loglevel=error && npm run build"
-        } else {
-            val tasks = buildList {
-                if (task.clean) add("clean")
-                add(task.label)
-                addAll(task.extraTasks)
+        // ---- 3) 命令组装：按代码分析的产物目标拼接 ----
+        //  - Gradle 工程：预置 maven 镜像 init（国内直连 google/maven 常 reset）；
+        //  - 涉及安卓构建（根工程或 web 工程内嵌 android 壳）：aapt2 qemu 适配 +
+        //    AGP override 参数；
+        //  - NODE + androidDir（git-green 式）：npm build → android gradle assemble。
+        val needsAndroidToolchain = profile.kind == ProjectKind.ANDROID_APP || profile.androidDir != null
+        val gradleExtra = buildList {
+            if (profile.usesGradle || profile.androidDir != null) ensureMirrorInit()
+            if (needsAndroidToolchain) {
+                // native 工程按设备实际 ABI 收窄（工程不认识该属性时无害）
+                add("-PmcAbi=" + deviceAbi())
+                if (Aapt2Adapter.prepare(appContext) { append(it, BuildLogLevel.INFO) }) {
+                    add(Aapt2Adapter.overrideArg(appContext))
+                }
             }
-            val gradlew = File(request.projectDir, "gradlew")
-            val base = if (gradlew.exists()) {
-                "chmod +x ./gradlew 2>/dev/null; sh ./gradlew"
-            } else {
-                val bin = File(gradleHome!!, "bin/gradle")
-                "chmod +x '${bin.absolutePath}' 2>/dev/null; '${bin.absolutePath}'"
+        }
+        val npmPart = "npm install --no-audit --no-fund --loglevel=error && npm run build"
+        val cmd = when {
+            profile.kind == ProjectKind.NODE && profile.androidDir == null -> npmPart
+            profile.kind == ProjectKind.NODE && profile.androidDir != null -> {
+                val a = checkNotNull(profile.androidDir)
+                val assemble = if (request.variant.equals("release", true)) {
+                    "assembleRelease"
+                } else {
+                    "assembleDebug"
+                }
+                val extra = gradleExtra.joinToString(" ")
+                val androidPart = if (
+                    File(a, "gradlew").exists() && File(a, "gradle/wrapper/gradle-wrapper.jar").exists()
+                ) {
+                    "cd '${a.absolutePath}' && chmod +x ./gradlew 2>/dev/null; " +
+                        "sh ./gradlew $assemble $extra --no-daemon --stacktrace"
+                } else {
+                    val bin = checkNotNull(gradleHome) { "安卓壳工程构建需要 Gradle 发行版" }
+                    "cd '${a.absolutePath}' && chmod +x '${File(bin, "bin/gradle").absolutePath}' 2>/dev/null; " +
+                        "'${File(bin, "bin/gradle").absolutePath}' $assemble $extra --no-daemon --stacktrace"
+                }
+                "$npmPart && $androidPart"
             }
-            "$base ${tasks.joinToString(" ")} --no-daemon --stacktrace"
+            else -> {
+                val tasks = buildList {
+                    if (task.clean) add("clean")
+                    add(task.label)
+                    addAll(gradleExtra)
+                    addAll(task.extraTasks)
+                }
+                val gradlew = File(request.projectDir, "gradlew")
+                val base = if (gradlew.exists()) {
+                    "chmod +x ./gradlew 2>/dev/null; sh ./gradlew"
+                } else {
+                    val bin = File(gradleHome!!, "bin/gradle")
+                    "chmod +x '${bin.absolutePath}' 2>/dev/null; '${bin.absolutePath}'"
+                }
+                "$base ${tasks.joinToString(" ")} --no-daemon --stacktrace"
+            }
         }
         val envArray = buildEnvArray(jdk, gradleHome, heapMb)
         BuildEnvironment.tmpDir(appContext).mkdirs()
@@ -561,8 +611,9 @@ object BuildRunner {
     }
 
     /**
-     * 构建成功后的产物收集：
-     *  - NODE：把 `dist / out / build` 目录重新压成 `<项目名>-dist.zip`（每次构建产出最新一份）；
+     * 构建成功后的产物收集（按代码分析出的目标逐项收）：
+     *  - NODE：`dist / out / build` 压成 `<项目名>-dist.zip`；
+     *  - NODE + 内嵌安卓壳（git-green 式）：再扫 android 壳工程的 build/outputs/apk；
      *  - 其它类型：按产物规则扫描（APK / JAR / 打包 zip）。
      */
     private suspend fun collectArtifacts(
@@ -571,6 +622,7 @@ object BuildRunner {
         task: BuildTask,
     ): List<BuildArtifact> {
         if (profile.kind == ProjectKind.NODE) {
+            val out = ArrayList<BuildArtifact>()
             val dist = withContext(Dispatchers.IO) {
                 runCatching {
                     ProjectPackager.packageNodeDist(request.projectDir) { n ->
@@ -579,16 +631,24 @@ object BuildRunner {
                 }
             }
             dist.fold(
-                onSuccess = { file ->
-                    if (file != null) return listOf(artifactOf(request.projectDir, file, task.variant))
-                },
+                onSuccess = { file -> if (file != null) out += artifactOf(request.projectDir, file, task.variant) },
                 onFailure = {
                     if (it is PackagingCancelledException) return emptyList()
                     append("dist 打包失败：${it.message ?: it::class.java.simpleName}", BuildLogLevel.WARN)
                 },
             )
-            append("构建命令已成功，但未发现产物目录（dist / out / build）", BuildLogLevel.WARN)
-            return emptyList()
+            profile.androidDir?.let { dir ->
+                val variant =
+                    if (request.variant.equals("release", true)) "release" else "debug"
+                val apks = withContext(Dispatchers.IO) { scanApks(dir, variant) }
+                if (apks.isEmpty()) {
+                    append("android 壳工程未发现 APK 产物（$dir/build/outputs/apk）", BuildLogLevel.WARN)
+                } else {
+                    out += apks
+                }
+            }
+            if (out.isEmpty()) append("构建命令已成功，但未发现产物目录（dist / out / build）", BuildLogLevel.WARN)
+            return out
         }
         return withContext(Dispatchers.IO) {
             scanArtifacts(request.projectDir, profile.kind, task.variant)
@@ -608,7 +668,12 @@ object BuildRunner {
         ProjectKind.ANDROID_APP ->
             if (request.variant.equals("release", true)) "assembleRelease" else "assembleDebug"
         ProjectKind.JVM_GRADLE -> "assemble"
-        ProjectKind.NODE -> "npm run build"
+        ProjectKind.NODE -> if (profile.androidDir != null) {
+            "npm run build + " +
+                if (request.variant.equals("release", true)) "assembleRelease" else "assembleDebug"
+        } else {
+            "npm run build"
+        }
         ProjectKind.ZIP_PACKAGE -> "打包源码"
     }
 
@@ -646,19 +711,91 @@ object BuildRunner {
             add("LANG=C.UTF-8")
             add("LC_ALL=C.UTF-8")
             add("SHELL=/system/bin/sh")
-            jdk?.let { add("JAVA_HOME=$it") }
+            jdk?.let {
+                add("JAVA_HOME=$it")
+                // proot 下 JDK 二进制的 $ORIGIN/../lib RPATH 解析失效（java 报 libjli.so
+                // 找不到），必须显式把 JDK lib 拼进 LD_LIBRARY_PATH；linux/lib 供 proot
+                // 自身，两者合并为一条，避免与 Proot.envEntries 重复键。
+                add(
+                    "LD_LIBRARY_PATH=" +
+                        listOf(
+                            "$it/lib", "$it/lib/server",
+                            File(Proot.linuxDir(appContext), "lib").absolutePath,
+                        ).joinToString(":"),
+                )
+            }
             add("ANDROID_HOME=${sdk.absolutePath}")
             add("ANDROID_SDK_ROOT=${sdk.absolutePath}")
             add("GRADLE_USER_HOME=${BuildEnvironment.gradleUserHome(appContext).absolutePath}")
             add("MOBILECODER_HOME=${files.absolutePath}")
             add("MOBILECODER_GRADLE_HOME=${gradleHome.orEmpty()}")
+            // npm：与 gradle 镜像同理，国内直连 registry.npmjs.org / electron 二进制
+            // 下载经常 reset；electron 桌面包本就不能在设备产出，跳过其二进制下载。
+            add("NPM_CONFIG_REGISTRY=https://registry.npmmirror.com")
+            add("ELECTRON_SKIP_BINARY_DOWNLOAD=1")
             // 仅 Gradle 构建注入堆参数（npm / 打包不需要，避免 -Xmx0m 之类无效值）
             if (heapMb > 0) add("GRADLE_OPTS=-Xmx${heapMb}m -Dorg.gradle.daemon=false")
             add("JAVA_OPTS=-Dfile.encoding=UTF-8")
             // proot 执行通道所需变量（LD_LIBRARY_PATH / PROOT_LOADER / PROOT_TMP_DIR），
             // Linux 环境未就绪时为空数组，构建流程不依赖任何额外机制
-        }.toTypedArray<String>() + Proot.envEntries(appContext)
+        }.toTypedArray<String>() +
+            Proot.envEntries(appContext).filter {
+                jdk == null || !it.startsWith("LD_LIBRARY_PATH=")
+            }.toTypedArray()
     }
+
+    /**
+     * 预置 GRADLE_USER_HOME 的 init.d 镜像脚本（国内直连 google/maven 仓库经常
+     * reset）：文件不存在或被我们旧版管理时才覆写；用户手写同名文件则不动。
+     * 必须纯 ASCII —— Groovy 解析器遇 UTF-8 BOM 直接 syntax error。
+     */
+    /** 设备主 ABI（arm64-v8a 等），传给工程的 -PmcAbi。 */
+    private fun deviceAbi(): String =
+        runCatching { android.os.Build.SUPPORTED_ABIS.firstOrNull().orEmpty() }
+            .getOrDefault("arm64-v8a")
+            .ifBlank { "arm64-v8a" }
+
+    internal suspend fun ensureMirrorInit(context: Context = appContext) = withContext(Dispatchers.IO) {
+        val file = File(BuildEnvironment.gradleUserHome(context), "init.d/" + MIRROR_INIT_FILE)
+        runCatching {
+            val current = if (file.isFile) file.readText() else null
+            val managed = current == null ||
+                current.startsWith("// MobileCoder gradle mirror init v")
+            if (managed && current != mirrorInitText()) {
+                file.parentFile?.mkdirs()
+                file.writeText(mirrorInitText())
+            }
+        }
+    }
+
+    /** [MIRROR_INIT_FILE] 的托管内容（版本前缀 = 所有权标记）。 */
+    internal fun mirrorInitText(): String = """
+        // MobileCoder gradle mirror init v1
+        def mirrors = { repos ->
+            repos.all { repo ->
+                if (repo instanceof MavenArtifactRepository) {
+                    def u = repo.url.toString()
+                    if (u.contains('dl.google.com/dl/android/maven')) {
+                        repo.url = 'https://maven.aliyun.com/repository/google'
+                    } else if (u.contains('repo.maven.apache.org') || u.contains('repo1.maven.org') || u.contains('plugins.gradle.org')) {
+                        repo.url = 'https://maven.aliyun.com/repository/public'
+                    }
+                }
+            }
+        }
+        beforeSettings { s ->
+            s.pluginManagement.repositories { maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }; maven { url 'https://maven.aliyun.com/repository/public' }; maven { url 'https://maven.aliyun.com/repository/google' } }
+            s.buildscript.repositories { m -> mirrors(m) }
+            try { s.dependencyResolutionManagement.repositories { m -> mirrors(m) } } catch (ignored) {}
+        }
+        allprojects {
+            buildscript.repositories { m -> mirrors(m) }
+            repositories { m -> mirrors(m) }
+        }
+
+    """.trimIndent() + "\n"
+
+    internal const val MIRROR_INIT_FILE = "mobilecoder-mirror.gradle"
 
     /**
      * 让项目 `gradle.properties` 的 `org.gradle.jvmargs` 与用户设定的内存上限一致
@@ -948,7 +1085,7 @@ object BuildRunner {
                         limitMb = limit,
                     )
                     when {
-                        ratio >= 0.90f || growth > limit -> abortForMemory(pid)
+                        ratio >= 0.96f || growth > limit -> abortForMemory(pid)
                         !warned && growth > (limit * 4 / 5) -> {
                             warned = true
                             append(

@@ -150,6 +150,7 @@ object EnvDownloader {
                 Source("dl.google.com", url) to Source("dl.google.com", url)
             }
             EnvKind.LINUX -> error("LINUX 已在 candidateSources 入口分流到 linuxCandidates")
+            EnvKind.NDK -> error("NDK 已在 install 入口分流到 NativeToolchain")
         }
         val ordered = if (source == EnvSource.MIRROR) listOf(mirror, official) else listOf(official, mirror)
         return ordered.distinctBy { it.url }
@@ -171,6 +172,7 @@ object EnvDownloader {
         source: EnvSource,
         onStage: (String) -> Unit = {},
         onProgress: (Float) -> Unit = {},
+        onLog: (String) -> Unit = {},
     ): String = withContext(Dispatchers.IO) {
         cancelled = false
 
@@ -183,6 +185,13 @@ object EnvDownloader {
                 onStage = onStage,
                 onProgress = onProgress,
             )
+        }
+
+        // NDK 工具链是多步装配（apt qemu / unzip+wrap / cmake 包装 / aapt2），
+        // 走专属管线 [NativeToolchain]
+        if (kind == EnvKind.NDK) {
+            NativeToolchain.install(context, source, onStage, onLog)
+            return@withContext NativeToolchain.ndkDir(context).absolutePath
         }
 
         val cache = File(context.cacheDir, "envdl").apply { mkdirs() }
@@ -202,13 +211,19 @@ object EnvDownloader {
                 if (cancelled) throw DownloadCancelled("已取消下载")
                 onStage("正在解压 ${kind.title} …")
                 onProgress(-1f)
-                return@withContext extractAndPlace(
+                val placed = extractAndPlace(
                     context,
                     kind,
                     archive.inputStream(),
                     archive.length(),
                     onProgress,
                 )
+                // Gradle 落位成功后顺手预置 wrapper dist（工程 gradlew 免下载，
+                // archive 此刻还在手上，一并放入 dist 目录）
+                if (kind == EnvKind.GRADLE) {
+                    runCatching { NativeToolchain.seedWrapperDist(context, archive, onLog) }
+                }
+                return@withContext placed
             } catch (c: DownloadCancelled) {
                 throw c
             } catch (t: Throwable) {

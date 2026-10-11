@@ -32,6 +32,13 @@ enum class EnvKind(val title: String) {
      * 完整 Linux，`apt install` 可装任意软件包。
      */
     LINUX("Linux 环境"),
+
+    /**
+     * NDK 工具链（`files/sdk/ndk/<revision>` + qemu-user / aapt2 / cmake 包装器）：
+     * 含 native（CMakeLists）的安卓工程需要；x86_64 工具链经 proot guest 的
+     * qemu-user 执行，一键装配见 [NativeToolchain]。
+     */
+    NDK("NDK 工具链"),
 }
 
 /** 单项环境检测结果。 */
@@ -263,6 +270,15 @@ object BuildEnvironment {
                     "装好后终端就是完整 Linux：`apt install` 可装任意软件包，JDK / Gradle / " +
                     "node 等 glibc 程序也在其中原样运行；也可导入本地 ubuntu-base-*.tar.gz",
             ),
+            EnvItem(
+                kind = EnvKind.NDK,
+                path = NativeToolchain.ndkDir(context).takeIf { NativeToolchain.isNdkWrapped(context) }?.absolutePath,
+                ready = NativeToolchain.isReady(context),
+                hint = "未就绪：点「在线下载」一键装配 NDK 工具链（NDK r26 约 640MB + qemu-user / " +
+                    "cmake / ninja / aapt2 设备适配）。含 native（CMakeLists）的安卓工程需要；" +
+                    "纯 Java/Kotlin 安卓工程无需安装。" +
+                    "（当前：${NativeToolchain.missingSummary(context)}）",
+            ),
         )
     }
 
@@ -334,6 +350,8 @@ object BuildEnvironment {
             // 绝不能按「解压包塞进 files/sdk」处理
             EnvKind.LINUX -> throw IllegalStateException("Linux 环境由 RootfsManager 负责落位")
             EnvKind.SDK -> mergeIntoSdk(tmp, sdk, requireReady)
+            // NDK 是多步装配管线（unzip + 符号链接 + qemu 包装），不支持单包导入
+            EnvKind.NDK -> throw IllegalStateException("NDK 工具链请用在线一键装配")
         }
         // 修复可执行权限（gradlew / java / gradle / node 都是脚本或 ELF）
         fixExecutable(File(target, "bin"))
@@ -346,6 +364,7 @@ object BuildEnvironment {
             EnvKind.NODE -> writeNodeShims(context, File(target))
             EnvKind.LINUX -> Unit
             EnvKind.SDK -> Unit
+            EnvKind.NDK -> Unit
         }
         refresh(context)
         return target

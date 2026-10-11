@@ -60,7 +60,7 @@ class ProjectDetectTest {
         assertEquals(ProjectKind.NODE, profile.kind)
         assertEquals("Vue / Vite（Node.js）", profile.displayName)
         assertEquals(listOf(EnvKind.NODE), profile.requiredEnv)
-        assertEquals("dist 压缩包", profile.artifactLabel)
+        assertEquals("Web dist", profile.artifactLabel)
         assertTrue(profile.usesShell)
     }
 
@@ -139,5 +139,26 @@ class ProjectDetectTest {
         // build 出现在 dependencies 不算
         assertFalse(hasNpmBuildScript("""{"dependencies":{"webpack-build-tool":"1.0"}}"""))
         assertFalse(hasNpmBuildScript("""{"scripts":{"start":"node index.js"}}"""))
+    }
+
+    @Test
+    fun viteElectronAndroidShell_detectsAllTargets() {
+        val root = dir("git-green")
+        root.touch(
+            "package.json",
+            """{"scripts":{"build":"vite build","apk:build":"x"},"devDependencies":{"electron":"^31","electron-builder":"^25","vite":"^5"}}""",
+        )
+        root.touch("android/settings.gradle", "rootProject.name = 'GitGreen'")
+        root.touch("android/build.gradle", "plugins { id 'com.android.application' }")
+
+        val profile = detectProject(root)
+        assertEquals(ProjectKind.NODE, profile.kind)
+        assertEquals(listOf(BuildTarget.WEB_DIST, BuildTarget.APK, BuildTarget.WINDOWS_EXE), profile.targets)
+        assertEquals("Web dist + APK + Windows exe（PC）", profile.artifactLabel)
+        assertTrue(profile.androidDir!!.endsWith("android"))
+        assertTrue(EnvKind.JDK in profile.requiredEnv)
+        assertTrue(EnvKind.SDK in profile.requiredEnv)
+        assertTrue(EnvKind.NODE in profile.requiredEnv)
+        assertTrue(profile.hint!!.contains("electron-builder"))
     }
 }
