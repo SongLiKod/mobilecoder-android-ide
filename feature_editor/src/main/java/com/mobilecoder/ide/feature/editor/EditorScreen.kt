@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,11 +25,13 @@ import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -45,6 +48,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
@@ -60,6 +64,9 @@ import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.feature.preview.PreviewController
+import com.mobilecoder.ide.feature.preview.PreviewKind
+import com.mobilecoder.ide.feature.preview.PreviewPane
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -103,6 +110,22 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
     var snippetManagerOpen by rememberSaveable { mutableStateOf(false) }
     val snippetPanel by EditorController.snippetPanel.collectAsStateWithLifecycle()
     val snippetSession by EditorController.snippetSession.collectAsStateWithLifecycle()
+
+    // ---------------- 实时预览（Issue 13）----------------
+    val previewState by PreviewController.state.collectAsStateWithLifecycle()
+    // 设置里的总开关；关掉时兜底收起窗格（正常路径由 setPreviewPane 收起）
+    val previewEnabled = settings.previewPane
+    val previewSupported = previewState.kind != PreviewKind.NONE
+    val previewOpen = previewEnabled && previewSupported && previewState.open
+    // 浮层模式下「切回编辑器」只是把窗格藏起来：dev server 与页面都留着，
+    // 改完代码从 ⋮ 菜单「实时预览」即可原样切回，不必重新起服务
+    var previewSuspended by remember { mutableStateOf(false) }
+    val previewVisible = previewOpen && !previewSuspended
+    // 小屏（< 600dp）以浮层切换，宽屏才左右 / 上下分屏
+    val previewCompact = LocalConfiguration.current.screenWidthDp < 600
+    LaunchedEffect(previewEnabled) {
+        if (!previewEnabled) runCatching { PreviewController.setOpen(false) }
+    }
 
     // 软键盘弹出时底部问题面板隐藏（保持 open 状态，收起键盘后自动恢复）
     val imeVisible = isImeVisible()
@@ -180,6 +203,18 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                         menuOpen = false
                         onOpenBuild()
                     },
+                    onTogglePreview = {
+                        menuOpen = false
+                        if (previewVisible) {
+                            // 只是「收起」：dev server 与页面都留着，再点一次原样展开
+                            previewSuspended = true
+                        } else {
+                            previewSuspended = false
+                            PreviewController.setOpen(true)
+                        }
+                    },
+                    previewAvailable = previewEnabled && previewSupported,
+                    previewOpen = previewVisible,
                     onUndo = {
                         menuOpen = false
                         activeTab?.let { EditorController.undo(it.path) }
@@ -218,64 +253,128 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
             }
         }
 
-        // ---------------- 编辑区 ----------------
+        // ---------------- 编辑区（可选：与「实时预览」窗格分屏 / 浮层） ----------------
+        // 编辑器内容抽成 composable lambda：分屏时按 Row / Column 占一份，
+        // 小屏浮层模式下铺在预览下层（切回编辑器时滚动 / 光标状态原样保留）
+        val editorContent: @Composable (Modifier) -> Unit = { areaModifier ->
+            Box(modifier = areaModifier) {
+                when {
+                    activeTab == null -> EmptyState(
+                        title = "没有打开的文件",
+                        subtitle = "点按左上角文件树浏览项目，或用右上角 ⋮ 菜单「打开文件」按名称打开",
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+
+                    !activeTab.editable -> EmptyState(
+                        title = "文件读取失败",
+                        subtitle = activeTab.relativePath,
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+
+                    else -> EditorBody(
+                        tab = activeTab,
+                        settings = settings,
+                        colors = colors,
+                        find = find,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+
+                // 片段候选面板（触发词输入中弹出）与跳位条（插入后逐个跳转占位符）
+                if (snippetPanel.open && activeTab != null && activeTab.editable) {
+                    SnippetCandidatePanel(
+                        state = snippetPanel,
+                        onInsert = { snippet ->
+                            EditorController.insertSnippet(activeTab.path, snippet)
+                        },
+                        onDismiss = { EditorController.dismissSnippetPanel() },
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                } else if (activeTab != null && activeTab.editable) {
+                    SnippetStopBar(
+                        session = snippetSession?.takeIf { it.path == activeTab.path },
+                        onNext = { EditorController.nextSnippetStop() },
+                        onDone = { EditorController.endSnippetSession() },
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                }
+
+                if (find.open && activeTab != null && activeTab.editable) {
+                    FindBar(
+                        query = find.query,
+                        total = matchCount,
+                        current = find.index,
+                        onQueryChange = { EditorController.setFindQuery(it) },
+                        onNext = { EditorController.stepFind(1, matchCount) },
+                        onPrev = { EditorController.stepFind(-1, matchCount) },
+                        onClose = { EditorController.setFindOpen(false) },
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    )
+                }
+            }
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
         ) {
-            when {
-                activeTab == null -> EmptyState(
-                    title = "没有打开的文件",
-                    subtitle = "点按左上角文件树浏览项目，或用右上角 ⋮ 菜单「打开文件」按名称打开",
-                    modifier = Modifier.align(Alignment.Center),
-                )
-
-                !activeTab.editable -> EmptyState(
-                    title = "文件读取失败",
-                    subtitle = activeTab.relativePath,
-                    modifier = Modifier.align(Alignment.Center),
-                )
-
-                else -> EditorBody(
-                    tab = activeTab,
-                    settings = settings,
-                    colors = colors,
-                    find = find,
+            if (previewVisible && previewCompact) {
+                // 小屏：预览以浮层盖住编辑区（Issue 13）。编辑器保留在下层，
+                // 「切回编辑器」只藏窗格、不打断 dev server，切回即原样
+                editorContent(Modifier.fillMaxSize())
+                PreviewPane(
+                    onClose = {
+                        previewSuspended = false
+                        PreviewController.setOpen(false)
+                    },
+                    compact = true,
+                    onSwitchToEditor = { previewSuspended = true },
                     modifier = Modifier.fillMaxSize(),
                 )
+            } else if (previewVisible && previewState.vertical) {
+                // 宽屏左右分屏：编辑区占 6 成，预览窗格占 4 成
+                Row(modifier = Modifier.fillMaxSize()) {
+                    editorContent(
+                        Modifier
+                            .weight(1.2f)
+                            .fillMaxHeight(),
+                    )
+                    VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    PreviewPane(
+                        onClose = {
+                            previewSuspended = false
+                            PreviewController.setOpen(false)
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(),
+                    )
+                }
+            } else if (previewVisible) {
+                // 宽屏上下分屏
+                Column(modifier = Modifier.fillMaxSize()) {
+                    editorContent(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    PreviewPane(
+                        onClose = {
+                            previewSuspended = false
+                            PreviewController.setOpen(false)
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    )
+                }
+            } else {
+                editorContent(Modifier.fillMaxSize())
             }
 
-            // 片段候选面板（触发词输入中弹出）与跳位条（插入后逐个跳转占位符）
-            if (snippetPanel.open && activeTab != null && activeTab.editable) {
-                SnippetCandidatePanel(
-                    state = snippetPanel,
-                    onInsert = { snippet -> EditorController.insertSnippet(activeTab.path, snippet) },
-                    onDismiss = { EditorController.dismissSnippetPanel() },
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                )
-            } else if (activeTab != null && activeTab.editable) {
-                SnippetStopBar(
-                    session = snippetSession?.takeIf { it.path == activeTab.path },
-                    onNext = { EditorController.nextSnippetStop() },
-                    onDone = { EditorController.endSnippetSession() },
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                )
-            }
-
-            if (find.open && activeTab != null && activeTab.editable) {
-                FindBar(
-                    query = find.query,
-                    total = matchCount,
-                    current = find.index,
-                    onQueryChange = { EditorController.setFindQuery(it) },
-                    onNext = { EditorController.stepFind(1, matchCount) },
-                    onPrev = { EditorController.stepFind(-1, matchCount) },
-                    onClose = { EditorController.setFindOpen(false) },
-                    modifier = Modifier.align(Alignment.TopCenter),
-                )
-            }
-
+            // 以下浮层始终盖在编辑区 / 预览之上（检索、快速打开、文件树、轻提示）
             if (searchOpen) {
                 ProjectSearchOverlay(
                     onDismiss = {

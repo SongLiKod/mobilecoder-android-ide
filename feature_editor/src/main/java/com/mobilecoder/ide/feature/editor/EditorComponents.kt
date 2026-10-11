@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -647,6 +648,10 @@ fun EditorOptionsMenu(
     saveDirty: Boolean,
     onSave: () -> Unit,
     onBuild: () -> Unit,
+    onTogglePreview: () -> Unit = {},
+    /** 预览功能可用（设置里开着 + 当前项目有预览入口）；false 时不显示该项。 */
+    previewAvailable: Boolean = false,
+    previewOpen: Boolean = false,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onGotoLine: () -> Unit,
@@ -699,6 +704,24 @@ fun EditorOptionsMenu(
             },
             onClick = onBuild,
         )
+        if (previewAvailable) {
+            DropdownMenuItem(
+                text = { Text("实时预览") },
+                leadingIcon = {
+                    Icon(Icons.Default.Visibility, contentDescription = null)
+                },
+                trailingIcon = {
+                    if (previewOpen) {
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = "已展开",
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                },
+                onClick = onTogglePreview,
+            )
+        }
         HorizontalDivider()
         DropdownMenuItem(
             text = { Text("撤销上一步") },

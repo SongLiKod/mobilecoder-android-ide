@@ -11,6 +11,7 @@ import com.mobilecoder.ide.core.storage.FileNode
 import com.mobilecoder.ide.core.storage.FileRepository
 import com.mobilecoder.ide.core.storage.SafImport
 import com.mobilecoder.ide.core.storage.SnippetStore
+import com.mobilecoder.ide.feature.preview.PreviewController
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -61,6 +62,8 @@ object EditorController {
         val unopenableExts: List<String> = FileRepository.DEFAULT_UNOPENABLE_EXTS.toList(),
         /** 单个文件可打开的大小上限（MB），超过即提示不支持预览/编辑，默认 10。 */
         val maxOpenMb: Int = 10,
+        /** 侧边栏「实时预览」窗格总开关（Issue 13），设置页可关，默认开。 */
+        val previewPane: Boolean = true,
     )
 
     /** 文件内查找状态。 */
@@ -198,6 +201,7 @@ object EditorController {
             initialized = true
             appContext = context.applicationContext
             runCatching { AppStorage.init(context.applicationContext) }
+            runCatching { PreviewController.ensureInit(context.applicationContext) }
             // 片段库异步加载：面板打开前就绪即可，不阻塞首帧
             scope.launch { runCatching { SnippetStore.ensureLoaded() } }
         }
@@ -224,6 +228,7 @@ object EditorController {
                 ),
                 maxOpenMb = runCatching { prefs.editorMaxOpenMb() }.getOrDefault(10)
                     .coerceIn(1, 1024),
+                previewPane = runCatching { prefs.editorPreviewPane() }.getOrDefault(true),
             )
             val showHiddenChanged = loaded.showHiddenFiles != _settings.value.showHiddenFiles
             val hiddenNamesChanged = loaded.hiddenNames != _settings.value.hiddenNames
@@ -294,6 +299,8 @@ object EditorController {
         }
         refreshHistory()
         refreshTree()
+        // 预览窗格跟随项目：换项目要停掉上一个项目的 dev server 并重新识别预览形态
+        runCatching { PreviewController.setProject(path) }
     }
 
     fun refreshTree() {
@@ -497,6 +504,8 @@ object EditorController {
             _tabs.value = _tabs.value.map {
                 if (it.path == path) it.copy(savedText = text) else it
             }
+            // 保存成功 → 通知预览窗格刷新（静态 HTML 保存即刷新，见 Issue 13）
+            runCatching { PreviewController.notifySaved(path) }
             if (!silent) showMessage("已保存 ${tab.name}")
         } else if (!silent) {
             showMessage("保存失败，请检查存储权限")
@@ -921,6 +930,19 @@ object EditorController {
         _settings.value = _settings.value.copy(autoSave = value)
         persist { it.setEditorAutoSave(value) }
     }
+
+    /**
+     * 侧边栏「实时预览」窗格总开关（Issue 13：设置页可开关）。
+     * 关闭时立即收起已展开的窗格（顺带停掉 dev server）。
+     */
+    fun setPreviewPane(enabled: Boolean) {
+        if (enabled == _settings.value.previewPane) return
+        _settings.value = _settings.value.copy(previewPane = enabled)
+        persist { it.setEditorPreviewPane(enabled) }
+        if (!enabled) runCatching { PreviewController.setOpen(false) }
+    }
+
+    fun togglePreviewPane() = setPreviewPane(!_settings.value.previewPane)
 
     /** 文件树「显示隐藏文件」开关：切换后按新口径重建树（保留用户展开状态）。 */
     fun toggleShowHiddenFiles() {

@@ -388,7 +388,7 @@
 | 10 | Git 分支图 + stash / amend | enhancement | P1 | feature_git |
 | 11 | AI 长会话上下文管理 | enhancement | P1 | feature_ai |
 | 12 | 构建耗时统计与产物管理 | enhancement | P2 | feature_build |
-| 13 | HTML/Web 实时预览窗格 | enhancement | P1 | feature_editor / feature_build |
+| 13 | HTML/Web 实时预览窗格 | enhancement | P1 | feature_editor / feature_preview / feature_build |
 | 14 | 多光标编辑 | enhancement | P2 | feature_editor |
 | 15 | 终端输出搜索与会话重命名 | enhancement | P3 | feature_terminal |
 | 16 | 折叠屏/大屏分屏优化 | enhancement | P2 | app |

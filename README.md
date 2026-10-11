@@ -85,6 +85,17 @@ MobileCoder = 代码编辑器 + 内置完整终端 + proot Linux 环境
 - 撤销 / 重做历史（每文件独立，连续打字 800ms 内合并为一步，容量 120 步）
 - 自动保存（800ms 防抖）、跳转行号、双指缩放字号（10–28）、每 Tab 独立滚动位置
 
+### 2.2.1 Web / HTML 实时预览（`feature_preview`）
+
+编辑器侧边栏「实时预览」窗格（⋮ 菜单入口），WebView 承载，与编辑区可分屏。
+
+- **静态站点**：项目根有 `index.html` 即直接以 `file://` 加载（WebView 开文件访问与 file-URL 跨源读取，相对引用的 css / js / 图片可正常加载）；保存资源文件后 500ms 防抖自动 `reload()`——「改完即见」
+- **Vite / webpack 工程**：`package.json` 的 `scripts` 里有 `dev` 即识别为开发服务器（优先级高于 `index.html`，因为 Vite 的 index.html 依赖模块脚本，`file://` 打不开）；点「启动预览」先体检 **Node.js + Linux 环境**，`node_modules` 缺失时先 `npm install`，再在 proot 内后台 `npm run dev`（Vite 项目追加 `--host 127.0.0.1`，避免绑到 IPv6 字面量）
+- **地址识别**：只认回环写法（`localhost` / `127.0.0.1` / `0.0.0.0` / `::1`）并统一归一成 `127.0.0.1`，必须带端口；`npm install` 刷出的 registry 外链不会被误判，识别到地址即加载、进程日志实时回显
+- **布局**：<600dp 以浮层覆盖编辑区（头部按钮切回，编辑器状态原样保留），宽屏可左右 / 上下分屏并一键切换方向
+- **生命周期**：收起窗格 / 切换项目即停止 dev server（移动端内存宝贵，不留后台进程）；外链交给系统浏览器
+- 设置页「实时预览」开关关闭后，⋮ 菜单项与分屏入口一并隐藏
+
 ### 2.3 内置终端（`feature_terminal`）
 
 - JNI `forkpty()` 创建真实 PTY，**最多 8 个并行会话**
@@ -173,6 +184,7 @@ mobilecoder-android-ide
 ├── app                # 入口、全局导航（底栏 + 二级页）、AppState 项目上下文、设置/关于、应用内更新
 │
 ├── feature_editor     # 代码编辑器
+├── feature_preview    # Web / HTML 实时预览窗格（WebView + dev server 拉起）
 ├── feature_terminal   # 内置终端（PTY / 模拟器 / 前台服务）
 ├── feature_git        # Git 图形界面 + 进程内 git CLI（GitCli/GitController）
 ├── feature_ssh        # SSH 密钥生成/导入/测试
@@ -195,9 +207,10 @@ mobilecoder-android-ide
         ▼          ▼          ▼          ▼          ▼          ▼         ▼
   feature_editor feature_terminal feature_git  feature_ssh feature_build feature_ai feature_history
         │          │          │          │          │          │           │
-        │          │          │ (唯一 feature→feature：Git 依赖 SSH 预留)
         │          │          └────┬─────┘          │          │           │
+        │          │               │                │          │           │
         ▼          ▼               ▼                ▼          ▼           ▼
+  feature_preview  │               │                │          │           │
         └──────────┴───────┬───────┴────────────────┴──────────┴───────────┘
                            ▼
               ┌────────────┼────────────┐
@@ -215,7 +228,7 @@ mobilecoder-android-ide
 
 - `core_common` 不依赖任何项目模块（最底层横切层）
 - `core_storage → core_common`（实现主题持久化接口）
-- 所有 `feature_* → core_common + core_storage`；除 `feature_git → feature_ssh`（预留路由）外，**feature 之间互不依赖**
+- 所有 `feature_* → core_common + core_storage`；feature 之间的跨模块依赖只保留三处：`feature_git → feature_ssh`（预留路由）、`feature_editor → feature_preview`（编辑器侧边栏的预览窗格，仅内部使用）、`feature_preview → feature_build`（复用 `BuildEnvironment` / `EnvKind` 做 Node + Linux 环境体检与 proot 执行）
 - `app` 汇总全部模块，负责导航与全局状态
 
 ### 3.3 关键全局单例（object + StateFlow，无 DI 框架）
@@ -387,6 +400,7 @@ mobilecoder-android-ide/
 │   └── .../storage/                       # AppStorage/Preferences/CryptoBox/Project/File/
 │                                          # History/SshKey/ThemePersistence/StoragePaths
 ├── feature_editor/    # 编辑器（高亮/分析/大纲/历史/组件/控制器/文件树）
+├── feature_preview/   # 实时预览（PreviewSupport 判定 / Controller 进程编排 / Pane WebView）
 ├── feature_terminal/  # 终端（Session/Manager/Emulator/Interceptor/Mouse/Screen/Service）
 ├── feature_git/       # Git（Controller/Cli/Porcelain/Models/Text/Diff/各 Tab/Screen）
 ├── feature_ssh/       # SSH（KeyFactory/KeyStore 桥/Controller/Dialogs/Detail/Tester/Screen）
@@ -504,7 +518,7 @@ App 内构建 / 软件市场需要一次性准备运行环境（在「环境中�
 ./gradlew testDebugUnitTest
 ```
 
-- **26 个测试类，204 个 `@Test` 用例**（纯 JVM 单测，JUnit4 + kotlinx-coroutines-test）
+- **44 个测试类，305 个 `@Test` 用例**（纯 JVM 单测，JUnit4 + kotlinx-coroutines-test）
 - 覆盖重点：
 
 | 模块 | 测试 | 关注点 |
@@ -512,6 +526,7 @@ App 内构建 / 软件市场需要一次性准备运行环境（在「环境中�
 | core_common | CliEngineTest / CliEngineCancelTest / ProotTest | 命令分发、取消语义、proot argv/env/bind 组装 |
 | core_storage | HistoryStoreTest / ProjectScaffoldTest | 历史去重收藏、7 种模板脚手架落盘 |
 | feature_editor | CodeOutlineTest / EditHistoryTest | 11 类语言符号提取、撤销合并窗口 |
+| feature_preview | PreviewSupportTest | 预览形态判定（dev 脚本优先于 index.html）、回环地址归一与外链排除、保存刷新过滤 |
 | feature_terminal | CommandInterceptorTest / EmulatorResizeTest / MouseTest / KeepAliveTest | 拦截状态机、resize 不丢内容、鼠标序列、通知 ID 不冲突 |
 | feature_git | GitTextTest / GitPorcelainTest / BranchFramesTest / DeleteTargetTest / RegistrationTest | 输出文案对齐真 git、帧解析兼容、路径逃逸、拦截注册 |
 | feature_build | MarketInstallerTest / RootfsManagerTest / EnvDownloaderSourceTest / ArchiveExtractor* 等 8 个 | 安装脚本阶段标记、镜像回退、zip-slip 防护、真源魔数校验 |

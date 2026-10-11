@@ -30,6 +30,9 @@ dependencies {
     implementation(project(":core_common"))
     implementation(project(":core_storage"))
     implementation(project(":core_native"))
+    // 编辑器侧边栏的实时预览窗格（Issue 13）。仅内部使用，未在本模块公开签名里暴露
+    // preview 的任何类型，故用 implementation 而非 api
+    implementation(project(":feature_preview"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
