@@ -364,7 +364,7 @@ fun ProviderSettingsView(
                                 color = MaterialTheme.colorScheme.onSurface,
                             )
                             Text(
-                                text = "开启后 AI 每轮改文件前弹窗确认（删除操作始终确认）",
+                                text = "开启后 AI 每轮改文件前弹窗确认（删除与执行命令始终确认）",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

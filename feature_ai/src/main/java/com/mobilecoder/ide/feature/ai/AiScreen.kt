@@ -215,7 +215,7 @@ fun AiScreen(
         )
     }
 
-    // 写操作确认（delete 恒确认 / 开启“写入前确认”后写类操作也走这里）
+    // 写操作确认（delete / run_command 恒确认 / 开启“写入前确认”后写类操作也走这里）
     confirmRequest?.let { req ->
         AppAlertDialog(
             title = req.title,

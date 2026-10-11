@@ -68,7 +68,10 @@ object AiController {
 3. 路径一律相对项目根，不使用绝对路径，不使用 ..。
 4. 不要删除文件或目录，除非用户在对话里明确要求。
 5. 工具返回失败原因时，先按提示修正参数再重试，不要原样重复调用。
-6. 结束后用一两句中文总结改了什么；没有要改的就直接回答。"""
+6. 改完代码后建议用 run_command 运行构建 / 测试验证（如 ./gradlew test、npm test、npm run build），并根据命令输出定位问题、继续修改；不要只改不验。
+7. 需要了解仓库状态时用 git_status / git_diff / git_log（只读），不要用 run_command 跑 git 写命令。
+8. run_command 会拦截危险命令（rm -rf /、shutdown、git reset --hard 等）；被拒绝时换用文件工具或更具体的目标，不要反复尝试同一命令。
+9. 结束后用一两句中文总结改了什么；没有要改的就直接回答。"""
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -81,13 +84,13 @@ object AiController {
     @Volatile
     private var cancelling = false
 
-    /** 写操作确认回调（AiScreen 挂载弹窗；null = 全部放行）。 */
+    /** 写操作 / 命令执行确认回调（AiScreen 挂载弹窗；null = 全部放行）。 */
     @Volatile
     var confirmHandler: (suspend (AiConfirmRequest) -> Boolean)? = null
 
     private var job: Job? = null
 
-    /** 「写入前确认」开关（delete_path 恒确认），来自 AppPreferences。 */
+    /** 「写入前确认」开关（delete_path / run_command 恒确认，与本开关无关），来自 AppPreferences。 */
     private val _confirmWrites = MutableStateFlow(false)
     val confirmWrites: StateFlow<Boolean> = _confirmWrites.asStateFlow()
 
@@ -142,6 +145,8 @@ object AiController {
         runCatching {
             sessionsFile = File(File(context.filesDir, "ai"), "sessions.json")
         }
+        // run_command / git_* 工具的执行通道（proot + CliNative + CliEngine）
+        runCatching { AiCommandRunner.init(context) }
         scope.launch {
             runCatching { ensureLoaded() }
             runCatching { refreshConfig() }
@@ -459,22 +464,30 @@ object AiController {
         )
 
         val mutating = reply.toolCalls.filter { AiTools.isMutating(it.name) }
+        // delete_path / run_command 恒确认（与「写入前确认」开关无关）
+        val confirmed = reply.toolCalls.filter { AiTools.needsConfirm(it.name) }
         var allowedIds: Set<String>? = null // null = 全部放行
-        if (mutating.isNotEmpty()) {
-            val hasDelete = mutating.any { it.name == "delete_path" }
-            if (hasDelete || needWriteConfirm) {
-                val ok = requestConfirm(
-                    AiConfirmRequest(
-                        title = if (hasDelete) {
-                            "AI 将执行 ${mutating.size} 项操作（含删除）"
-                        } else {
-                            "AI 将执行 ${mutating.size} 项写入操作"
-                        },
-                        items = mutating.map { "${AiTools.displayName(it.name)} ${pathOf(it)}" },
-                    ),
-                )
-                if (!ok) allowedIds = emptySet()
+        if (confirmed.isNotEmpty() || (mutating.isNotEmpty() && needWriteConfirm)) {
+            val asked = reply.toolCalls.filter {
+                AiTools.isMutating(it.name) || AiTools.needsConfirm(it.name)
             }
+            val hasDelete = confirmed.any { it.name == "delete_path" }
+            val hasCommand = confirmed.any { it.name == "run_command" }
+            val ok = requestConfirm(
+                AiConfirmRequest(
+                    title = when {
+                        hasDelete -> "AI 将执行 ${asked.size} 项操作（含删除）"
+
+                        hasCommand -> "AI 将执行 ${asked.size} 项操作（含命令执行）"
+
+                        else -> "AI 将执行 ${asked.size} 项写入操作"
+                    },
+                    items = asked.map {
+                        "${AiTools.displayName(it.name)} ${AiTools.targetOf(it.name, it.arguments)}"
+                    },
+                ),
+            )
+            if (!ok) allowedIds = emptySet()
         }
 
         // 快照：仅备份将真正执行的写类目标（P0 写保护，可整轮撤销）
@@ -485,7 +498,7 @@ object AiController {
                 AiSnapshotStore.capture(
                     projectRoot = root,
                     sessionId = sessionId,
-                    paths = toRun.mapNotNull { pathOf(it) },
+                    paths = toRun.mapNotNull { pathOf(it).ifBlank { null } },
                 )?.id
             }.getOrNull()
         }
@@ -493,26 +506,27 @@ object AiController {
         val events = ArrayList<AiToolEvent>()
         val outcomes = ArrayList<AiToolOutcome>()
         for (call in reply.toolCalls) {
-            val path = pathOf(call)
+            val target = AiTools.targetOf(call.name, call.arguments)
             if (cancelling) break
-            val rejected = AiTools.isMutating(call.name) && allowedIds != null && call.id !in allowedIds
+            val gated = AiTools.isMutating(call.name) || AiTools.needsConfirm(call.name)
+            val rejected = gated && allowedIds != null && call.id !in allowedIds
             if (rejected) {
-                events += AiToolEvent(call.name, path, ok = false, summary = "已拒绝执行（用户取消）")
-                outcomes += AiToolOutcome(call.id, "用户拒绝执行该操作：$path", rejected = true)
-                working += ApiMessage("tool", "用户拒绝执行该操作：$path", toolCallId = call.id)
+                events += AiToolEvent(call.name, target, ok = false, summary = "已拒绝执行（用户取消）")
+                outcomes += AiToolOutcome(call.id, "用户拒绝执行该操作：$target", rejected = true)
+                working += ApiMessage("tool", "用户拒绝执行该操作：$target", toolCallId = call.id)
                 continue
             }
             _progress.value = AiProgress(
                 sessionId = sessionId,
                 stage = AiStage.TOOL,
-                detail = "${AiTools.displayName(call.name)} $path",
+                detail = "${AiTools.displayName(call.name)} $target",
             )
             val result = runCatching {
                 AiTools.execute(call.name, call.arguments, root)
             }.getOrElse { t ->
                 AiToolResult(
                     ok = false,
-                    target = path,
+                    target = target,
                     summary = t.message ?: "执行失败",
                     content = "工具执行异常：${t.message}",
                 )
@@ -619,6 +633,7 @@ object AiController {
         }
     }
 
+    /** 写类工具的目标路径（快照用）：只认 `path`，命令文本绝不能当快照路径。 */
     private fun pathOf(call: ApiToolCall): String = runCatching {
         JSONObject(call.arguments).optString("path").ifBlank { "" }
     }.getOrDefault("")

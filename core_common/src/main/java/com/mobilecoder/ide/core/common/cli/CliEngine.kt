@@ -7,6 +7,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 
 /** 一条进程内命令的定义。 */
@@ -36,7 +37,9 @@ data class CliCommand(
  *  - **命令注册表**：各 feature 模块在 init 时注册（feature_git 注册 `git`）；
  *  - **协程任务队列**：Mutex 串行化，防止多指令并发冲突；
  *  - **协作式取消**：终端 Ctrl+C 走 [cancelCurrent]，配合注册方的 [onCancel] 钩子
- *    中止不受协程控制的 native 阻塞调用。
+ *    中止不受协程控制的 native 阻塞调用；
+ *  - **捕获式执行**：[runCaptured] 在同一把锁上取回输出与退出码（AI 工具用），
+ *    与终端里的同名命令天然互斥，不会出现两个仓库句柄互踩。
  *
  * 历史：前身为 apt CLI 引擎（`apt` 命令集 + 可视化面板）；apt CLI 已整体移除，
  * 命令记录改由「记录」页承载（core_storage/HistoryStore）。
@@ -44,6 +47,9 @@ data class CliCommand(
  * 引擎位于 core_common，保证 feature_terminal / feature_git / feature_build 之间无循环依赖。
  */
 object CliEngine {
+
+    /** 捕获式执行的默认输出上限（字符），超出部分截断并标注丢弃量。 */
+    const val DEFAULT_CAPTURE_CHARS = 16_000
 
     private val registry = LinkedHashMap<String, CliCommand>()
     private val mutex = Mutex()
@@ -153,6 +159,67 @@ object CliEngine {
                 if (currentJob === job) currentJob = null
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 捕获式执行（AI 工具 run_command / git_* 用：取回输出与退出码）
+    // ------------------------------------------------------------------
+
+    /**
+     * 捕获式执行的结果。
+     *
+     * @param exitCode 退出码；超时按 GNU `timeout` 惯例记 124
+     * @param output   已截断的合并输出（各 handler 通过 emit 回显的行）
+     * @param timedOut 是否因 [runCaptured] 的超时被终止
+     */
+    data class CliCapture(
+        val exitCode: Int,
+        val output: String,
+        val timedOut: Boolean = false,
+    )
+
+    /**
+     * 执行一行命令并**捕获输出**（与 [run] 共用同一把互斥锁，因此与终端里的
+     * 进程内命令天然串行，不会出现两个 libgit2 句柄互踩）。
+     *
+     * 供 AI 工具（`feature_ai` 的 `run_command` / `git_status` 等）取回命令结果：
+     * 输出边收边写进内存缓冲，超过 [maxChars] 只留头部并记录丢弃量，防止
+     * `gradlew test` 这类长输出把内存打爆。
+     *
+     * @param timeoutMs >0 时整条命令限时：超时抛出的取消会在锁的 `finally` 里释放
+     *                  互斥锁（handler 必须是可取消的挂起函数，见 GitCli），
+     *                  因此超时**不会**让引擎死锁
+     */
+    suspend fun runCaptured(
+        line: String,
+        cwd: File,
+        timeoutMs: Long = 0L,
+        maxChars: Int = DEFAULT_CAPTURE_CHARS,
+    ): CliCapture {
+        val buffer = StringBuilder()
+        var dropped = 0
+        val emit: (String) -> Unit = { s ->
+            synchronized(buffer) {
+                val room = maxChars - buffer.length
+                if (room <= 0) {
+                    dropped += s.length + 1
+                } else if (s.length + 1 <= room) {
+                    buffer.append(s).append('\n')
+                } else {
+                    buffer.append(s, 0, (room - 1).coerceAtLeast(0)).append('\n')
+                    dropped += s.length + 1 - room
+                }
+            }
+        }
+        val code = if (timeoutMs > 0) {
+            withTimeoutOrNull(timeoutMs) { run(line, cwd, emit) }
+        } else {
+            run(line, cwd, emit)
+        }
+        val body = synchronized(buffer) {
+            if (dropped > 0) buffer.append("\n…[输出过长，已截断 $dropped 字符]") else buffer
+        }.toString()
+        return CliCapture(exitCode = code ?: 124, output = body, timedOut = code == null)
     }
 
     /** 支持引号：`git commit -m "fix: hello world"`。 */

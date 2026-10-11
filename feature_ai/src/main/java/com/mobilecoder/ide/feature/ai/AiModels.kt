@@ -133,10 +133,10 @@ data class AiProviderPreset(
 )
 
 /**
- * 待用户确认的 AI 写操作请求（delete_path 恒确认；开启「写入前确认」后写类操作也确认）。
+ * 待用户确认的 AI 操作请求（delete_path / run_command 恒确认；开启「写入前确认」后写类操作也确认）。
  *
  * @param title 摘要标题，如「AI 将执行 3 项操作（含删除）」
- * @param items 逐项描述（每行一条，如「写入 src/Main.kt」）
+ * @param items 逐项描述（每行一条，如「写入 src/Main.kt」「执行 ./gradlew test」）
  */
 data class AiConfirmRequest(
     val title: String,
@@ -187,7 +187,10 @@ data class AiProgress(
 
 /** 一次工具调用的展示记录（会话里可见“AI 改了哪些文件”）。 */
 data class AiToolEvent(
-    /** 工具名：list_files / read_file / write_file / search_replace / delete_path。 */
+    /**
+     * 工具名：list_files / read_file / write_file / search_replace / delete_path /
+     * run_command / git_status / git_diff / git_log。
+     */
     val name: String,
     /** 目标路径（项目内相对路径）。 */
     val target: String,
