@@ -268,7 +268,7 @@ private fun ToolEventRow(
     event: AiToolEvent,
     onOpenFile: (String) -> Unit,
 ) {
-    val clickableFile = event.target.isNotBlank() && event.name != "list_files"
+    val clickableFile = event.target.isNotBlank() && AiTools.opensFile(event.name)
     Row(
         modifier = Modifier
             .fillMaxWidth()

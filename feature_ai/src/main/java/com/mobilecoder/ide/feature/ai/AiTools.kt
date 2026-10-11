@@ -2,15 +2,18 @@ package com.mobilecoder.ide.feature.ai
 
 import com.mobilecoder.ide.core.storage.FileRepository
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AI 可调用的项目工具集：浏览 + 修改项目文件，全部在应用进程内执行。
+ * AI 可调用的项目工具集：浏览 + 修改项目文件 + 执行命令 / 查看 Git（Issue 6），
+ * 文件类工具在应用进程内执行，命令类工具走 [AiCommandRunner]（proot + CliNative）。
  *
  * 安全约束：
  *  - 所有路径相对项目根，canonical 化后必须仍在根内（防目录穿越）；
  *  - 跳过构建产物 / VCS 内部目录（[FileRepository.isIgnored]）；
+ *  - `run_command` 先过 [AiCommandGuard] 危险命令拦截，且恒需用户确认；
  *  - 回传给模型的文本统一截断，防止上下文爆炸。
  */
 object AiTools {
@@ -22,6 +25,17 @@ object AiTools {
     private const val DEFAULT_READ_LINES = 400
     private const val MAX_READ_LINES = 2000
 
+    /** `run_command` 默认/最大超时（秒）。 */
+    private const val DEFAULT_CMD_TIMEOUT_SEC = 300
+    private const val MAX_CMD_TIMEOUT_SEC = 1800
+
+    /** 只读 git 工具的超时（毫秒）：进程内 libgit2 操作，通常毫秒级返回。 */
+    private const val GIT_TIMEOUT_MS = 30_000L
+
+    /** 命令结果里 stdout / stderr 各自的保留上限（字符）。 */
+    private const val MAX_STDOUT_CHARS = 12_000
+    private const val MAX_STDERR_CHARS = 3_000
+
     /** 工具中文名（确认弹窗 / 事件行共用）。 */
     fun displayName(name: String): String = when (name) {
         "list_files" -> "列出"
@@ -29,12 +43,38 @@ object AiTools {
         "write_file" -> "写入"
         "search_replace" -> "替换"
         "delete_path" -> "删除"
+        "run_command" -> "执行"
+        "git_status", "git_diff", "git_log" -> "查看"
         else -> name
     }
 
     /** 会改写项目文件的工具（需快照保护；delete 恒需确认）。 */
     fun isMutating(name: String): Boolean =
         name == "write_file" || name == "search_replace" || name == "delete_path"
+
+    /**
+     * 无条件需要用户确认的工具：删除不可恢复，命令执行可绕过文件工具直接改动
+     * 项目外的绑定目录（proot 里 `/sdcard`、`/data` 同路径可见）。与「写入前确认」开关无关。
+     */
+    fun needsConfirm(name: String): Boolean = name == "delete_path" || name == "run_command"
+
+    /** 事件目标是项目内文件路径（对话里可点行跳编辑器）。 */
+    fun opensFile(name: String): Boolean =
+        name == "read_file" || name == "write_file" || name == "search_replace" || name == "delete_path"
+
+    /**
+     * 确认弹窗 / 事件行里的目标文本：命令类工具显示命令本身，其余显示 `path`
+     * （[AiSnapshotStore] 只认 `path`，命令文本绝不能当快照路径）。
+     */
+    fun targetOf(name: String, argsJson: String): String = when (name) {
+        "run_command" -> parseArgs(argsJson)?.optString("command").orEmpty().trim()
+        "git_status", "git_diff", "git_log" -> parseArgs(argsJson)
+            ?.let { gitLine(name, it) }.orEmpty()
+        else -> parseArgs(argsJson)?.optString("path").orEmpty()
+    }
+
+    /** 解析工具参数（非法 JSON 返回 null，调用方一律回空串）。 */
+    private fun parseArgs(raw: String): JSONObject? = runCatching { JSONObject(raw) }.getOrNull()
 
     /** OpenAI function-calling 工具 schema。 */
     fun schemas(): JSONArray = JSONArray(
@@ -80,11 +120,47 @@ object AiTools {
                 properties = JSONObject().put("path", strProp("要删除的路径（相对项目根）")),
                 required = listOf("path"),
             ),
+            tool(
+                "run_command",
+                "在项目目录里执行一条 shell 命令（构建 / 测试 / linter / 生成器等），" +
+                    "返回退出码与 stdout/stderr。修改代码后应运行构建或测试进行验证；" +
+                    "危险命令（rm -rf /、shutdown、git reset --hard 等）会被拦截。" +
+                    "gradlew 若缺执行位可用 `sh ./gradlew …`；git 命令请优先用 " +
+                    "git_status / git_diff / git_log。",
+                properties = JSONObject()
+                    .put("command", strProp("要执行的命令行，如 ./gradlew test、npm run build"))
+                    .put("cwd", strProp("工作目录（相对项目根，默认项目根）"))
+                    .put(
+                        "timeout",
+                        intProp("超时秒数（默认 300，最大 1800；超时后进程被终止）"),
+                    ),
+                required = listOf("command"),
+            ),
+            tool(
+                "git_status",
+                "查看 git 工作区状态（只读，进程内执行）。",
+                properties = JSONObject().put("short", boolProp("true 输出短格式")),
+                required = emptyList(),
+            ),
+            tool(
+                "git_diff",
+                "查看 git 差异（只读，进程内执行）。",
+                properties = JSONObject()
+                    .put("staged", boolProp("true 查看暂存区差异，false 查看工作区差异"))
+                    .put("stat", boolProp("true 只看统计摘要")),
+                required = emptyList(),
+            ),
+            tool(
+                "git_log",
+                "查看提交历史（只读，进程内执行）。",
+                properties = JSONObject().put("limit", intProp("条数（默认 20）")),
+                required = emptyList(),
+            ),
         ),
     )
 
     /** 执行工具调用。绝不抛异常：失败一律转成 `ok=false` 的结果回传模型。 */
-    fun execute(name: String, argsJson: String, projectRoot: File): AiToolResult {
+    suspend fun execute(name: String, argsJson: String, projectRoot: File): AiToolResult {
         val args = runCatching { JSONObject(argsJson) }.getOrElse {
             return fail(name, "", "参数不是合法 JSON：${it.message}")
         }
@@ -95,8 +171,13 @@ object AiTools {
                 "write_file" -> writeFile(projectRoot, args)
                 "search_replace" -> searchReplace(projectRoot, args)
                 "delete_path" -> deletePath(projectRoot, args)
+                "run_command" -> runCommand(projectRoot, args)
+                "git_status", "git_diff", "git_log" -> runGitTool(name, projectRoot, args)
                 else -> fail(name, "", "未知工具：$name")
             }
+        } catch (c: CancellationException) {
+            // 命令执行中被用户停止：取消必须继续向上传播（不能伪装成工具失败）
+            throw c
         } catch (t: Throwable) {
             fail(name, args.optString("path"), t.message ?: t.javaClass.simpleName)
         }
@@ -223,6 +304,95 @@ object AiTools {
     }
 
     // ------------------------------------------------------------------
+    // 命令与 Git（Issue 6：改代码 → 跑命令 → 看结果）
+    // ------------------------------------------------------------------
+
+    /**
+     * `run_command`：proot 内 `/bin/sh -c <command>`（git 等进程内命令走 CliEngine）。
+     *
+     * 顺序：cwd 沙箱校验 → 危险命令拦截 → 执行（超时/取消会杀掉进程组）→
+     * 组装「退出码 + stderr + stdout」回传模型。
+     */
+    private suspend fun runCommand(root: File, args: JSONObject): AiToolResult {
+        val command = args.optString("command").trim()
+        if (command.isBlank()) return fail("run_command", "", "缺少 command")
+        val cwdArg = args.optString("cwd")
+        val dir = resolve(root, cwdArg) ?: return fail("run_command", cwdArg, "cwd 超出项目根目录")
+        if (!dir.isDirectory) return fail("run_command", cwdArg, "cwd 不是目录：$cwdArg")
+
+        AiCommandGuard.rejectReason(command, dir, root)?.let { reason ->
+            return fail("run_command", clip(command, 80), "危险命令已拦截：$reason")
+        }
+
+        val timeoutSec = args.optInt("timeout", DEFAULT_CMD_TIMEOUT_SEC)
+            .coerceIn(1, MAX_CMD_TIMEOUT_SEC)
+        val output = AiCommandRunner.run(command, dir, timeoutSec * 1000L)
+        val body = buildString {
+            append("命令：").append(command).append('\n')
+            append("工作目录：").append(relOf(root, dir)).append('\n')
+            append("退出码：").append(output.exitCode).append('\n')
+            if (output.timedOut) append("已超时（${timeoutSec}s）并终止进程\n")
+            output.hint?.let { append(it).append('\n') }
+            if (output.stderr.isNotBlank()) {
+                append("—— stderr ——\n").append(clip(output.stderr, MAX_STDERR_CHARS)).append('\n')
+            }
+            if (output.stdout.isNotBlank()) {
+                append("—— stdout ——\n").append(clip(output.stdout, MAX_STDOUT_CHARS))
+            }
+        }.trim()
+        val summary = when {
+            output.timedOut -> "超时（${timeoutSec}s）已终止"
+            output.exitCode == 0 -> "退出码 0"
+            else -> "退出码 ${output.exitCode}"
+        }
+        return AiToolResult(
+            ok = output.exitCode == 0 && !output.timedOut,
+            target = clip(command, 80),
+            summary = summary,
+            content = clip(body, MAX_RESULT_CHARS),
+        )
+    }
+
+    /** 只读 git 工具：进程内执行（与终端 Git 共用 CliEngine 锁与仓库句柄）。 */
+    private suspend fun runGitTool(name: String, root: File, args: JSONObject): AiToolResult {
+        val line = gitLine(name, args)
+        val output = AiCommandRunner.runInProcess(line, root, GIT_TIMEOUT_MS)
+        if (output.exitCode == 127) {
+            return fail(name, line, "Git 命令引擎未初始化，请稍后重试或重启应用")
+        }
+        val body = if (output.exitCode == 0) {
+            output.stdout
+        } else {
+            "退出码 ${output.exitCode}\n" + output.stderr.ifBlank { output.stdout }
+        }
+        val summary = if (output.exitCode == 0) {
+            "退出码 0"
+        } else {
+            "退出码 ${output.exitCode}：" +
+                output.stderr.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty().trim().take(40)
+        }
+        return AiToolResult(
+            ok = output.exitCode == 0,
+            target = line,
+            summary = summary.trim(),
+            content = clip(body, MAX_RESULT_CHARS),
+        )
+    }
+
+    /** 只读 git 工具的命令行（展示与执行共用，事件行里的命令与实际执行完全一致）。 */
+    internal fun gitLine(name: String, args: JSONObject): String = when (name) {
+        "git_status" -> if (args.optBoolean("short", false)) "git status --short" else "git status"
+        "git_diff" -> buildString {
+            append("git diff")
+            if (args.optBoolean("staged", false)) append(" --staged")
+            if (args.optBoolean("stat", false)) append(" --stat")
+        }
+
+        "git_log" -> "git log -n ${args.optInt("limit", 20).coerceIn(1, 200)}"
+        else -> name
+    }
+
+    // ------------------------------------------------------------------
     // 工具
     // ------------------------------------------------------------------
 
@@ -253,6 +423,9 @@ object AiTools {
     private fun intProp(desc: String): JSONObject =
         JSONObject().put("type", "integer").put("description", desc)
 
+    private fun boolProp(desc: String): JSONObject =
+        JSONObject().put("type", "boolean").put("description", desc)
+
     private fun resolve(root: File, path: String): File? {
         val clean = path.trim().ifBlank { "." }.removePrefix("./").removePrefix("/")
         val canonicalRoot = runCatching { root.canonicalFile }.getOrNull() ?: root
@@ -282,7 +455,7 @@ object AiTools {
         ok = true,
         target = target,
         summary = summary,
-        content = content.take(MAX_RESULT_CHARS),
+        content = clip(content, MAX_RESULT_CHARS),
     )
 
     private fun fail(name: String, target: String, reason: String) = AiToolResult(
@@ -291,4 +464,21 @@ object AiTools {
         summary = reason,
         content = "工具 $name 执行失败：$reason",
     )
+
+    /**
+     * 截断到 [max] 字符：超出时保留头部 + 尾部（中间省略并标注丢弃量）。
+     *
+     * 构建 / 测试日志的**结论在结尾**、文件内容的**上下文在开头**，
+     * 两头都留才不会让模型看不到关键信息（纯 `take` 会把 stderr 结论截掉）。
+     */
+    private fun clip(text: String, max: Int): String = when {
+        text.length <= max -> text
+        else -> {
+            val head = (max * 3 / 4).coerceAtLeast(1)
+            val tail = (max - head).coerceAtLeast(0)
+            text.take(head) +
+                "\n…[输出过长，已截断 ${text.length - max} 字符]…\n" +
+                text.takeLast(tail)
+        }
+    }
 }

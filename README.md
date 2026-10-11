@@ -155,8 +155,8 @@ MobileCoder = 代码编辑器 + 内置完整终端 + proot Linux 环境
 ### 2.8 AI 助手（`feature_ai`）
 
 - **OpenAI 兼容端点**（`POST {baseUrl}/chat/completions`，SSE 流式），可对接 OpenAI / DeepSeek / Kimi / 通义 / 本地 Ollama（Key 留空）
-- **5 个项目工具**的 function calling：`list_files`、`read_file`、`write_file`、`search_replace`、`delete_path`；最多 12 轮工具循环，工具事件在对话中以 chips 展示
-- 工具安全约束：路径 canonical 化防穿越、禁删项目根、跳过 build/.git 等目录、单次结果 16000 字符截断、失败不抛异常
+- **9 个项目工具**的 function calling：文件类 `list_files`、`read_file`、`write_file`、`search_replace`、`delete_path`；命令类 `run_command`（proot 内 `/bin/sh -c` 执行构建 / 测试，stdout 与 stderr 分离、超时自动终止进程组）与只读 git 工具 `git_status`、`git_diff`、`git_log`（进程内 libgit2，与终端 Git 共用引擎锁与仓库句柄）。工具调用轮数上限可在设置里自定义，工具事件在对话中以 chips 展示
+- 工具安全约束：路径 canonical 化防穿越、禁删项目根、跳过 build/.git 等目录、`run_command` 危险命令拦截（`rm -rf /`、`shutdown`、`git reset --hard`、`curl … | sh` 等，见 `AiCommandGuard`）且恒需用户确认、单次结果 16000 字符截断、失败不抛异常
 - 会话持久化 `files/ai/sessions.json`；API Key 加密存储；可随时取消请求
 
 ### 2.9 记录页（`feature_history`）

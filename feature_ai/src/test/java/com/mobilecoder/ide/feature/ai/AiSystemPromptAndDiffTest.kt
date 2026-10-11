@@ -23,6 +23,16 @@ class AiSystemPromptAndDiffTest {
         assertTrue(prompt.contains("简体中文"))
     }
 
+    /** Issue 6：提示词要让模型改完代码就跑构建/测试，并优先用只读 git 工具。 */
+    @Test
+    fun `default prompt asks the model to verify changes with run_command`() {
+        val prompt = AiController.systemPrompt(File("C:/projects/MyApp"))
+        assertTrue(prompt.contains("run_command"))
+        assertTrue(prompt.contains("构建 / 测试验证"))
+        assertTrue(prompt.contains("git_status"))
+        assertTrue(prompt.contains("危险命令"))
+    }
+
     // ---------------- diff（第二返回值为“是否因超限截断”，小输入恒为 false） ----------------
 
     @Test
