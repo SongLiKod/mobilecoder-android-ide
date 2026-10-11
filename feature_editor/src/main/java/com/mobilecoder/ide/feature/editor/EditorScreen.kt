@@ -100,6 +100,9 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
     var menuOpen by remember { mutableStateOf(false) }
     var searchOpen by rememberSaveable { mutableStateOf(false) }
     var pendingClosePath by remember { mutableStateOf<String?>(null) }
+    var snippetManagerOpen by rememberSaveable { mutableStateOf(false) }
+    val snippetPanel by EditorController.snippetPanel.collectAsStateWithLifecycle()
+    val snippetSession by EditorController.snippetSession.collectAsStateWithLifecycle()
 
     // 软键盘弹出时底部问题面板隐藏（保持 open 状态，收起键盘后自动恢复）
     val imeVisible = isImeVisible()
@@ -196,6 +199,10 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                             panelTab = EditorPanelTab.OUTLINE
                         }
                     },
+                    onOpenSnippets = {
+                        menuOpen = false
+                        snippetManagerOpen = true
+                    },
                     onToggleLineNumbers = { EditorController.toggleLineNumbers() },
                     onToggleWordWrap = { EditorController.toggleWordWrap() },
                     onToggleAutoSave = { EditorController.toggleAutoSave() },
@@ -236,6 +243,23 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                     colors = colors,
                     find = find,
                     modifier = Modifier.fillMaxSize(),
+                )
+            }
+
+            // 片段候选面板（触发词输入中弹出）与跳位条（插入后逐个跳转占位符）
+            if (snippetPanel.open && activeTab != null && activeTab.editable) {
+                SnippetCandidatePanel(
+                    state = snippetPanel,
+                    onInsert = { snippet -> EditorController.insertSnippet(activeTab.path, snippet) },
+                    onDismiss = { EditorController.dismissSnippetPanel() },
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            } else if (activeTab != null && activeTab.editable) {
+                SnippetStopBar(
+                    session = snippetSession?.takeIf { it.path == activeTab.path },
+                    onNext = { EditorController.nextSnippetStop() },
+                    onDone = { EditorController.endSnippetSession() },
+                    modifier = Modifier.align(Alignment.BottomCenter),
                 )
             }
 
@@ -343,6 +367,21 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
         )
     }
 
+    // 代码片段管理（⋮ 菜单「代码片段」）：全屏浮层，选中即插入到当前光标处
+    if (snippetManagerOpen) {
+        SnippetManagerOverlay(
+            onDismiss = { snippetManagerOpen = false },
+            onInsert = { snippet ->
+                val target = activeTab
+                snippetManagerOpen = false
+                if (target != null && target.editable) {
+                    EditorController.insertSnippet(target.path, snippet)
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+
     if (gotoOpen && activeTab != null) {
         GotoLineDialog(
             currentLine = cursorLine,
@@ -416,6 +455,9 @@ private fun EditorBody(
     val heightCache = remember { HashMap<String, Float>() }
 
     val analysis = tab.analysis
+
+    // 片段候选面板展开时，回车键插入首条候选（见 BasicTextField onValueChange）
+    val snippetPanel by EditorController.snippetPanel.collectAsStateWithLifecycle()
     val appliedFolds = remember(text, analysis.folds, tab.collapsedFolds) {
         buildAppliedFolds(text, analysis.folds, tab.collapsedFolds)
     }
@@ -579,10 +621,18 @@ private fun EditorBody(
                 BasicTextField(
                     value = tab.value,
                     onValueChange = { newValue ->
-                        EditorController.onEditorValue(
-                            tab.path,
-                            applySmartEdit(tab.value, newValue),
-                        )
+                        // 片段面板展开时按回车 = 插入首条候选（Issue 7：回车插入 + 跳位）。
+                        // 判定用原始 newValue（applySmartEdit 会补缩进，改后长度不止 +1）
+                        val at = newValue.selection.start - 1
+                        if (
+                            snippetPanel.open && snippetPanel.items.isNotEmpty() &&
+                            newValue.text.length == tab.value.text.length + 1 &&
+                            at >= 0 && newValue.text[at] == '\n'
+                        ) {
+                            EditorController.insertSnippet(tab.path, snippetPanel.items.first())
+                        } else {
+                            EditorController.onEditorValue(tab.path, applySmartEdit(tab.value, newValue))
+                        }
                     },
                     enabled = tab.editable,
                     readOnly = false,
