@@ -518,7 +518,7 @@ App 内构建 / 软件市场需要一次性准备运行环境（在「环境中�
 ./gradlew testDebugUnitTest
 ```
 
-- **44 个测试类，305 个 `@Test` 用例**（纯 JVM 单测，JUnit4 + kotlinx-coroutines-test）
+- **55 个测试类，408 个 `@Test` 用例**（纯 JVM 单测，JUnit4 + kotlinx-coroutines-test）
 - 覆盖重点：
 
 | 模块 | 测试 | 关注点 |
