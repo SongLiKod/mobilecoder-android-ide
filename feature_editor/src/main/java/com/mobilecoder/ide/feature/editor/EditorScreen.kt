@@ -660,20 +660,38 @@ private fun EditorBody(
         }
     }
 
-    // 光标跟随滚动（输入 / 点击 / 跳转时保持光标可见）
+    // 光标跟随滚动：只在光标行完全离开视口时做最小滚动。
+    // 点击视口内（含边缘半行）的位置一律不动视图，避免「点一下内容就跟着跳一下」；
+    // 光标落入折叠隐藏区（点折叠标记 / 查找命中 / 大纲跳转）时先展开该折叠，
+    // 保证光标始终落在可见的文字上。
     LaunchedEffect(tab.value.selection.start) {
+        val caret = tab.value.selection.start
+        appliedFolds.firstOrNull { caret >= it.removedStart && caret < it.removedEnd }
+            ?.let { fold -> EditorController.toggleFold(tab.path, fold.region.startLine) }
         if (viewportHeight <= 0 || lineHeightPx <= 0f) return@LaunchedEffect
-        val line = EditorController.lineOfOffset(text, tab.value.selection.start)
-        val cellIndex = cellIndexByLine?.get(line) ?: (line - 1)
+        val line = EditorController.lineOfOffset(text, caret)
+        // 行号 → 可视行下标：折叠隐藏区内的行映射到它的折叠标记行，
+        // 避免用错下标算出偏差的位置导致视图乱滚
+        val cellIndex = cellIndexByLine?.get(line)
+            ?: appliedFolds
+                .lastOrNull { line > it.region.startLine && line <= it.region.endLine }
+                ?.let { fold -> cellIndexByLine?.get(fold.region.startLine)?.plus(1) }
+            ?: (line - 1)
         if (cellIndex < 0) return@LaunchedEffect
-        val y = tops?.getOrNull(cellIndex) ?: (cellIndex * lineHeightPx)
-        if (y > vScroll.value + viewportHeight - 2 * lineHeightPx) {
-            vScroll.animateScrollTo(
-                (y - viewportHeight + 3 * lineHeightPx).roundToInt().coerceAtLeast(0),
-            )
-        } else if (y < vScroll.value) {
-            vScroll.animateScrollTo((y - lineHeightPx).roundToInt().coerceAtLeast(0))
+        val lineTop = tops?.getOrNull(cellIndex) ?: (cellIndex * lineHeightPx)
+        val lineBottom = lineTop + (heights?.getOrNull(cellIndex) ?: lineHeightPx)
+        val viewTop = vScroll.value.toFloat()
+        val viewBottom = viewTop + viewportHeight
+        // 光标行与视口还有交叠（视口内点击、边缘半行）→ 不滚动，视图保持纹丝不动
+        if (lineBottom > viewTop && lineTop < viewBottom) return@LaunchedEffect
+        val target = if (lineTop >= viewBottom) {
+            // 在视口下方：滚到刚好完整可见，再留一行余量（输入到行尾换行时的常规滚动）
+            lineBottom + lineHeightPx - viewBottom
+        } else {
+            // 在视口上方：让光标行落在顶部下一行
+            lineTop - lineHeightPx
         }
+        vScroll.scrollTo(target.roundToInt().coerceAtLeast(0))
     }
 
     Box(
