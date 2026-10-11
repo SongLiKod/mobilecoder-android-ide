@@ -326,7 +326,53 @@
 
 ---
 
-## 三、汇总表
+### Issue 19：息屏保活——终端/构建长任务在锁屏、息屏下稳定执行
+
+- **类型**：enhancement（稳定性 / 体验）
+- **优先级**：P1
+- **涉及模块**：feature_terminal（TerminalManager / TerminalForegroundService）、feature_build（BuildForegroundService）、app（SettingsScreen / MainActivity / AndroidManifest）、core_storage（AppPreferences）
+
+**背景**：用户希望「息屏（锁屏/灭屏）后任务照常执行」——例如终端里跑 `npm install` / `git push` / 长编译、或构建打包时，手机可以熄灭屏幕（省电），任务不被中断。当前保活只做了一半：
+
+- ✅ 前台服务已有（Build / Terminal 两个），解决「进程不被杀」；
+- ⚠️ 构建服务持 `PARTIAL_WAKE_LOCK`，但终端服务**刻意不持锁**（注释明确「常驻持锁会整夜耗电」）→ 终端长任务息屏后线程可能被挂起、CPU 受限；
+- ❌ 未接入系统「电池优化白名单」，Android 6+ 的 Doze 模式会**禁用网络、忽略唤醒锁**，这是息屏长任务「不稳定」的根本原因；
+- ❌ 两个前台服务均为 `START_NOT_STICKY`，被系统杀掉后不会自动重建。
+
+**方案（三层保障）**：
+1. **前台服务**（已有，保留）：进程不被回收、通知常驻；
+2. **`PARTIAL_WAKE_LOCK`**：终端服务在「存在会话」期间持锁，全部会话关闭即释放（对齐构建服务做法）；构建服务保持现有持锁逻辑；
+3. **电池优化白名单（关键新增）**：提供设置项引导用户加入白名单，Doze 下网络不禁用、WakeLock 不忽略，长任务才能真正稳定跑完。
+
+**建议改动**：
+1. `TerminalForegroundService`：补 `PARTIAL_WAKE_LOCK`（会话期间持锁 / 全部关闭释放）；`START_NOT_STICKY → START_STICKY`；
+2. `BuildForegroundService`：`START_NOT_STICKY → START_STICKY`（构建中断自动续跑）；
+3. `app/AndroidManifest.xml`：新增 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 权限（仅用于引导到系统白名单页）；
+4. `SettingsScreen`：新增「息屏保活」设置区：开关（持久化到 `AppPreferences`，默认开）+「加入电池优化白名单」入口（跳系统设置页）+ 说明文案（含国产 ROM 后台限制提示）；
+5. `AppPreferences`：新增 `keepRunningOnLockScreen()` 开关（默认开）；
+6. （可选）`core_common` 新增 `PowerKeepAlive` 统一封装：白名单状态检查 / 请求 / `SCREEN_OFF`/`ON` 监听 / 持锁与释放；
+7. 触发时机沿用现有钩子：`TerminalManager.syncKeepAlive()`（会话增删时）、`BuildRunner`（构建开始/结束），无需用户额外操作；未授权白名单时首启给一次性引导提示。
+
+**验收标准**：
+1. 开着终端会话息屏 10 分钟以上，`npm install` / `git push` 等长任务不被中断、网络不通断（原生 Android 与主流国产 ROM 各验一轮）；
+2. 构建全程息屏不被中断，构建完有完成通知（现有流程）；
+3. 全部终端会话关闭后 WakeLock 释放、通知消失，无异常耗电（对比测试：关闭保活开关后耗电曲线正常）；
+4. 服务被系统杀掉后可自动重启并续跑任务（`START_STICKY` 验证）；
+5. 设置项开关持久化、权限引导跳转正确、未授权时有明确中文提示；
+6. 新增单测：持锁/释放边界（会话 0↔N）、白名单状态判断；相关文案单测。
+
+**实施参考**：`docs/implementation/issue-19-screen-off-task.md`（含代码级改动清单）
+
+---
+
+## 三、分离文档 FAQ
+
+> 各 Issue 的可落地实施方案（改动文件清单、代码级步骤、验收细则）见对应《实施参考》文档：
+> - `docs/implementation/` 目录下按 Issue 编号命名，如 `docs/implementation/issue-19-screen-off-task.md`。
+
+---
+
+## 四、汇总表
 
 | # | 标题 | 类型 | 优先级 | 模块 |
 | --- | --- | --- | --- | --- |
@@ -342,9 +388,10 @@
 | 10 | Git 分支图 + stash / amend | enhancement | P1 | feature_git |
 | 11 | AI 长会话上下文管理 | enhancement | P1 | feature_ai |
 | 12 | 构建耗时统计与产物管理 | enhancement | P2 | feature_build |
-| 13 | HTML/Web 实时预览窗格 | enhancement | P1 | feature_editor / feature_build |
+| 13 | HTML/Web 实时预览窗格 | enhancement | P1 | feature_editor / feature_preview / feature_build |
 | 14 | 多光标编辑 | enhancement | P2 | feature_editor |
 | 15 | 终端输出搜索与会话重命名 | enhancement | P3 | feature_terminal |
 | 16 | 折叠屏/大屏分屏优化 | enhancement | P2 | app |
 | 17 | 代码分享卡片 | enhancement | P3 | feature_editor / app |
 | 18 | 「AI 修 Bug」向导模式 | enhancement | P2 | feature_ai / feature_build |
+| 19 | 息屏保活：长任务在锁屏/息屏下稳定执行 | enhancement | P1 | feature_terminal / feature_build / app / core_storage |

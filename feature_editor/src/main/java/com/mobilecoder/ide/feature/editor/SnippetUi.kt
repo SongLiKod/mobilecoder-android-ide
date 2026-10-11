@@ -4,6 +4,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -149,6 +150,9 @@ fun SnippetCandidatePanel(
                             } else {
                                 MaterialTheme.colorScheme.primary
                             },
+                            // 行尾 tag 永不换行：名字再长也只省略，不把触发词 / 描述挤下去
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -288,6 +292,8 @@ fun SnippetManagerOverlay(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        // 8 个 chip 在手机宽度上放不下，横向滚动而不是被裁掉
+                        .horizontalScroll(rememberScrollState())
                         .padding(horizontal = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
@@ -338,6 +344,8 @@ fun SnippetManagerOverlay(
                                     if (snippet.builtin) " · 内置" else "",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         Text(
@@ -492,7 +500,10 @@ private fun SnippetEditDialog(
                         .padding(top = 8.dp),
                 )
                 Row(
-                    modifier = Modifier.padding(top = 10.dp),
+                    // 语言 chip 横向滚动，窄屏上不会把「通用」等靠后的选项裁掉
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(top = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     SnippetStore.LANGUAGES.forEach { lang ->

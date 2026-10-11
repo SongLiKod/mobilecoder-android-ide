@@ -105,6 +105,14 @@ class AppPreferences(
     suspend fun editorMaxOpenMb(): Int = getInt(KEY_EDITOR_MAX_OPEN_MB, 10)
     suspend fun setEditorMaxOpenMb(value: Int) = setInt(KEY_EDITOR_MAX_OPEN_MB, value.coerceIn(1, 1024))
 
+    /**
+     * 编辑器侧边栏「实时预览」窗格总开关（Issue 13 验收：设置里可开关），默认开。
+     * 关掉后 ⋮ 菜单与分屏入口一并隐藏，已展开的窗格立即收起。
+     */
+    suspend fun editorPreviewPane(): Boolean = get(KEY_EDITOR_PREVIEW_PANE) != "0"
+    suspend fun setEditorPreviewPane(value: Boolean) =
+        set(KEY_EDITOR_PREVIEW_PANE, if (value) "1" else "0")
+
     // ---------------- 终端 ----------------
 
     suspend fun terminalFontSize(): Int = getInt(KEY_TERM_FONT, 13)
@@ -307,6 +315,7 @@ class AppPreferences(
         private val KEY_EDITOR_HIDDEN_NAMES = stringPreferencesKey("editor_hidden_names")
         private val KEY_EDITOR_UNOPENABLE_EXTS = stringPreferencesKey("editor_unopenable_exts")
         private val KEY_EDITOR_MAX_OPEN_MB = intPreferencesKey("editor_max_open_mb")
+        private val KEY_EDITOR_PREVIEW_PANE = stringPreferencesKey("editor_preview_pane")
         private val KEY_TERM_FONT = intPreferencesKey("terminal_font_size")
         private val KEY_TERM_SCREEN_ON = stringPreferencesKey("terminal_screen_on")
         private val KEY_TERM_HISTORY = stringPreferencesKey("terminal_history")

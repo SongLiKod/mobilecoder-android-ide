@@ -148,6 +148,40 @@ fun SettingsScreen(
 
         HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
 
+        // ---------------- 实时预览（Issue 13）----------------
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            SectionHeader(title = "实时预览")
+            Spacer(modifier = Modifier.padding(top = 4.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "编辑器预览窗格",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    Text(
+                        text = "HTML / Web 项目在编辑器侧边栏开一个预览窗格：静态 index.html " +
+                            "保存即刷新，Vite 项目一键启动 dev server；小屏以浮层切换，" +
+                            "宽屏可左右 / 上下分屏。关闭后 ⋮ 菜单里的「实时预览」一并隐藏",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                Switch(
+                    checked = editorSettings.previewPane,
+                    onCheckedChange = { EditorController.setPreviewPane(it) },
+                )
+            }
+        }
+
+        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+
         // ---------------- 导航 ----------------
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             SectionHeader(title = "导航")
