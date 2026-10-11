@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Tag
@@ -650,6 +651,7 @@ fun EditorOptionsMenu(
     onRedo: () -> Unit,
     onGotoLine: () -> Unit,
     onOpenOutline: () -> Unit,
+    onOpenSnippets: () -> Unit = {},
     onToggleLineNumbers: () -> Unit,
     onToggleWordWrap: () -> Unit,
     onToggleAutoSave: () -> Unit,
@@ -727,6 +729,13 @@ fun EditorOptionsMenu(
                 Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = null)
             },
             onClick = onOpenOutline,
+        )
+        DropdownMenuItem(
+            text = { Text("代码片段") },
+            leadingIcon = {
+                Icon(Icons.Default.PlaylistAdd, contentDescription = null)
+            },
+            onClick = onOpenSnippets,
         )
         DropdownMenuItem(
             text = { Text("行号") },

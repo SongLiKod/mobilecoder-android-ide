@@ -6,9 +6,11 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.mobilecoder.ide.core.storage.AppPreferences
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.core.storage.CodeSnippet
 import com.mobilecoder.ide.core.storage.FileNode
 import com.mobilecoder.ide.core.storage.FileRepository
 import com.mobilecoder.ide.core.storage.SafImport
+import com.mobilecoder.ide.core.storage.SnippetStore
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -83,6 +85,32 @@ object EditorController {
         val files: List<String> = emptyList(),
     )
 
+    /**
+     * 片段候选面板（Issue 7）：敲触发词时在编辑区底部弹出。
+     *
+     * [word] 为光标前的触发词干、[start] 为它在正文里的起始下标（插入时整段替换），
+     * [items] 为空即收起——UI 只订阅本状态，不必各自算匹配。
+     */
+    data class SnippetPanelState(
+        val open: Boolean = false,
+        val word: String = "",
+        val start: Int = 0,
+        val items: List<CodeSnippet> = emptyList(),
+    )
+
+    /**
+     * 插入后的跳位会话：[stops] 为各跳位在正文里的下标，[index] 为当前跳位。
+     * 用户继续输入时由 [SnippetEngine.adjustStops] 平移；越过末位即结束。
+     */
+    data class SnippetSession(
+        val path: String,
+        val stops: List<Int>,
+        val index: Int,
+    ) {
+        val current: Int get() = stops.getOrElse(index) { stops.lastOrNull() ?: 0 }
+        val total: Int get() = stops.size
+    }
+
     /** 撤销 / 重做可用状态（对应活动文件，供工具栏按钮点亮）。 */
     data class HistoryAvailability(val canUndo: Boolean, val canRedo: Boolean)
 
@@ -126,6 +154,15 @@ object EditorController {
     private val _openPicker = MutableStateFlow(OpenPickerState())
     val openPicker: StateFlow<OpenPickerState> = _openPicker.asStateFlow()
 
+    private val _snippetPanel = MutableStateFlow(SnippetPanelState())
+    val snippetPanel: StateFlow<SnippetPanelState> = _snippetPanel.asStateFlow()
+
+    private val _snippetSession = MutableStateFlow<SnippetSession?>(null)
+    val snippetSession: StateFlow<SnippetSession?> = _snippetSession.asStateFlow()
+
+    /** 全部片段（内置 + 自定义，已按覆盖规则合并），UI 直接订阅。 */
+    val snippets: StateFlow<List<CodeSnippet>> = SnippetStore.snippets
+
     private val _history = MutableStateFlow(HistoryAvailability(false, false))
     val history: StateFlow<HistoryAvailability> = _history.asStateFlow()
 
@@ -155,12 +192,14 @@ object EditorController {
     // 初始化
     // ------------------------------------------------------------------
 
-    /** 幂等初始化（AppStorage.init 幂等），并加载编辑器设置。 */
+    /** 幂等初始化（AppStorage.init 幂等），并加载编辑器设置与片段库。 */
     fun ensureInit(context: Context) {
         if (!initialized) {
             initialized = true
             appContext = context.applicationContext
             runCatching { AppStorage.init(context.applicationContext) }
+            // 片段库异步加载：面板打开前就绪即可，不阻塞首帧
+            scope.launch { runCatching { SnippetStore.ensureLoaded() } }
         }
         if (!settingsLoaded) {
             settingsLoaded = true
@@ -412,6 +451,7 @@ object EditorController {
 
     fun activate(path: String) {
         if (_tabs.value.any { it.path == path }) {
+            if (_snippetPanel.value.open) dismissSnippetPanel()
             _activePath.value = path
             locateInTree(path)
             refreshHistory()
@@ -423,6 +463,8 @@ object EditorController {
         if (index < 0) return
         analysisJobs.remove(path)?.cancel()
         histories.remove(path)
+        if (_snippetSession.value?.path == path) endSnippetSession()
+        if (_snippetPanel.value.open && _activePath.value == path) dismissSnippetPanel()
         val rest = _tabs.value.filterNot { it.path == path }
         _tabs.value = rest
         if (_activePath.value == path) {
@@ -517,8 +559,212 @@ object EditorController {
         _tabs.value = _tabs.value.map {
             if (it.path == path) it.copy(value = value) else it
         }
+        adjustSnippetSession(path, current.value.text, value.text)
+        refreshSnippetPanel(path, value)
         scheduleAnalysis(path, value.text, current.language)
         scheduleAutoSave(path)
+    }
+
+    // ------------------------------------------------------------------
+    // 代码片段（Issue 7）
+    // ------------------------------------------------------------------
+
+    /**
+     * 按光标前的触发词刷新候选面板：有命中才弹，词干吃空（退格到标点 /
+     * 空格）即收起。非活动文件不参与（面板只服务正在编辑的那一份）。
+     */
+    private fun refreshSnippetPanel(path: String, value: TextFieldValue) {
+        if (path != _activePath.value) {
+            if (_snippetPanel.value.open) _snippetPanel.value = SnippetPanelState()
+            return
+        }
+        val tab = _tabs.value.firstOrNull { it.path == path }
+        val trigger = if (tab?.editable == true) {
+            SnippetEngine.triggerAt(value.text, value.selection.start)
+        } else {
+            null
+        }
+        if (trigger == null) {
+            _snippetPanel.value = SnippetPanelState()
+            return
+        }
+        val languageKey = tab?.let { SnippetEngine.languageKeyOf(it.language) }
+        val items = SnippetEngine.candidates(
+            snippets = snippets.value,
+            word = trigger.word,
+            languageKey = languageKey,
+        )
+        _snippetPanel.value = if (items.isEmpty()) {
+            SnippetPanelState()
+        } else {
+            SnippetPanelState(open = true, word = trigger.word, start = trigger.start, items = items)
+        }
+    }
+
+    /** 手动关闭候选面板（点空白 / 选完即关）。 */
+    fun dismissSnippetPanel() {
+        _snippetPanel.value = SnippetPanelState()
+    }
+
+    /**
+     * 插入片段：用展开后的正文整体替换触发词干，光标落到第一个跳位
+     * （无跳位则落 `$0` / 末尾），并开启跳位会话供「下一个」继续跳。
+     *
+     * 插入是**单步撤销**：整段正文替换一次 recordHistory，不会拆成逐字符。
+     */
+    fun insertSnippet(path: String, snippet: CodeSnippet) {
+        val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        if (!tab.editable) return
+        val text = tab.value.text
+        val cursor = tab.value.selection.start.coerceIn(0, text.length)
+        val trigger = SnippetEngine.triggerAt(text, cursor)
+        val start = trigger?.start ?: cursor
+        val indent = indentOfLine(text, start)
+        val expansion = SnippetEngine.expand(snippet.body, indent)
+        val newText = text.substring(0, start) + expansion.text + text.substring(cursor)
+        val firstStop = expansion.stops.firstOrNull() ?: expansion.cursor
+        val caret = (start + firstStop).coerceIn(0, newText.length)
+        onEditorValue(
+            path,
+            TextFieldValue(text = newText, selection = TextRange(caret), composition = null),
+        )
+        _snippetPanel.value = SnippetPanelState()
+        _snippetSession.value = if (expansion.stops.size > 1) {
+            SnippetSession(
+                path = path,
+                stops = expansion.stops.map { (start + it).coerceIn(0, newText.length) },
+                index = 0,
+            )
+        } else {
+            null
+        }
+        requestEditorFocus()
+    }
+
+    /** 跳到下一个跳位；越过末位自动结束会话。 */
+    fun nextSnippetStop() {
+        val session = _snippetSession.value ?: return
+        val next = session.index + 1
+        if (next >= session.total) {
+            endSnippetSession()
+            return
+        }
+        val tab = _tabs.value.firstOrNull { it.path == session.path }
+        if (tab == null) {
+            endSnippetSession()
+            return
+        }
+        val target = session.stops[next].coerceIn(0, tab.value.text.length)
+        _tabs.value = _tabs.value.map {
+            if (it.path == session.path) {
+                it.copy(value = tab.value.copy(selection = TextRange(target), composition = null))
+            } else {
+                it
+            }
+        }
+        _snippetSession.value = session.copy(index = next)
+        requestEditorFocus()
+    }
+
+    /** 手动结束跳位会话（「完成」按钮 / 关文件）。 */
+    fun endSnippetSession() {
+        _snippetSession.value = null
+    }
+
+    /**
+     * 用户继续编辑时平移会话跳位（插入后到下一次跳转之间的输入 / 删除）。
+     * 文件不匹配或会话不存在时是空操作。
+     */
+    private fun adjustSnippetSession(path: String, prev: String, cur: String) {
+        val session = _snippetSession.value ?: return
+        if (session.path != path) return
+        val stops = SnippetEngine.adjustStops(prev, cur, session.stops)
+        _snippetSession.value = session.copy(stops = stops)
+    }
+
+    /** 自定义片段增删改（持久化由 SnippetStore 负责；错误信息直接以轻提示返回）。 */
+    fun saveSnippet(
+        id: String? = null,
+        prefix: String,
+        description: String,
+        language: String,
+        body: String,
+    ) {
+        scope.launch {
+            val error = SnippetStore.upsert(id, prefix, description, language, body)
+            if (error == null) {
+                showMessage(if (id == null) "已添加片段" else "已保存片段")
+            } else {
+                showMessage(error)
+            }
+        }
+    }
+
+    fun deleteSnippet(id: String) {
+        scope.launch {
+            val ok = SnippetStore.remove(id)
+            showMessage(if (ok) "已删除片段" else "内置片段不可删除")
+        }
+    }
+
+    /** 导出全部自定义片段到 [uri]（SAF 建档选择器返回）。 */
+    fun exportSnippets(uri: Uri) {
+        val context = appContext
+        if (context == null) {
+            showMessage("导出失败：存储未初始化")
+            return
+        }
+        scope.launch {
+            val json = runCatching { SnippetStore.exportJson() }.getOrDefault("")
+            if (json.isEmpty()) {
+                showMessage("导出失败：没有可导出的自定义片段")
+                return@launch
+            }
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                        out.write(json.toByteArray(Charsets.UTF_8))
+                    } != null
+                }.getOrDefault(false)
+            }
+            showMessage(if (ok) "已导出自定义片段" else "导出失败：目标不可写")
+        }
+    }
+
+    /** 从 [uri] 导入片段（与现有合并，同「语言 + 触发词」覆盖）。 */
+    fun importSnippets(uri: Uri) {
+        val context = appContext
+        if (context == null) {
+            showMessage("导入失败：存储未初始化")
+            return
+        }
+        scope.launch {
+            val text = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
+                }.getOrNull()
+            }
+            if (text.isNullOrBlank()) {
+                showMessage("导入失败：文件不可读")
+                return@launch
+            }
+            val result = runCatching { SnippetStore.importJson(text, replace = false) }
+                .getOrElse { showMessage("导入失败：不是有效的片段 JSON"); return@launch }
+            showMessage("已导入 ${result.added} 条片段" + if (result.updated > 0) "（覆盖 ${result.updated} 条）" else "")
+        }
+    }
+
+    /** 当前光标所在行的缩进空白（片段续行对齐用）。 */
+    private fun indentOfLine(text: String, offset: Int): String {
+        val at = offset.coerceIn(0, text.length)
+        val lineStart = if (at == 0) {
+            0
+        } else {
+            text.lastIndexOf('\n', at - 1).let { if (it < 0) 0 else it + 1 }
+        }
+        var end = lineStart
+        while (end < text.length && (text[end] == ' ' || text[end] == '\t')) end++
+        return text.substring(lineStart, end)
     }
 
     // ------------------------------------------------------------------
