@@ -2,7 +2,8 @@ package com.mobilecoder.ide.feature.editor
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -680,11 +681,30 @@ private fun EditorBody(
             .fillMaxSize()
             .onSizeChanged { size -> viewportHeight = size.height }
             .pointerInput(tab.path) {
-                detectTransformGestures { _, _, zoom, _ ->
-                    if (abs(zoom - 1f) > 0.01f) {
-                        val base = EditorController.settings.value.fontSize
-                        val next = (base * zoom).roundToInt().coerceIn(10, 28)
-                        if (next != base) EditorController.setFontSize(next)
+                // 双指缩放改字号。单指事件（滚动 / 点选 / 长按选择 / 拖手柄）全程不消费，
+                // 避免祖先层手势检测吞掉事件流导致无法选中复制
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var lastSpan = -1f
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+                        if (pressed.size < 2) {
+                            lastSpan = -1f
+                            continue
+                        }
+                        val span = (pressed.first().position - pressed.last().position).getDistance()
+                        if (lastSpan > 0f) {
+                            val zoom = span / lastSpan
+                            if (abs(zoom - 1f) > 0.01f) {
+                                val base = EditorController.settings.value.fontSize
+                                val next = (base * zoom).roundToInt().coerceIn(10, 28)
+                                if (next != base) EditorController.setFontSize(next)
+                            }
+                            pressed.forEach { it.consume() }
+                        }
+                        lastSpan = span
                     }
                 }
             },
@@ -715,6 +735,7 @@ private fun EditorBody(
             Box(
                 modifier = Modifier
                     .weight(1f)
+                    .onSizeChanged { size -> boxWidth = size.width }
                     .then(if (settings.wordWrap) Modifier.fillMaxWidth() else Modifier.horizontalScroll(hScroll)),
             ) {
                 BasicTextField(
