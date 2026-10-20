@@ -6,7 +6,7 @@ package com.mobilecoder.ide.core.nativebridge;
  * 返回约定（与 C 层一致，见 git_jni.c 头部注释）：
  *  - boolean 方法：true 成功 / false 失败（错误详情 {@link #lastError()}）
  *  - int 状态方法：0 成功；1 冲突/需人工处理；2 已是最新/无变更；-1 错误
- *    （fetch / push 透传 libgit2 的负错误码，-16 = {@link #RC_NEED_AUTH} 需要登录）
+ *    （clone / fetch / push 透传 libgit2 的负错误码，-16 = {@link #RC_NEED_AUTH} 需要登录）
  *  - String 列表：记录以 '\n' 分隔，字段以 '\x01' 分隔
  *
  * 注意：native 层内部只维护**一个**仓库句柄（g_repo），
@@ -71,7 +71,7 @@ public final class GitNative {
      * 克隆仓库。
      *
      * @param branch 分支，可空/空串表示默认分支
-     * @return 0 成功 / -1 失败
+     * @return 0 成功；负数失败（libgit2 错误码，-16 = {@link #RC_NEED_AUTH} 需要登录）
      */
     public static native int clone(String url, String path, String branch);
 

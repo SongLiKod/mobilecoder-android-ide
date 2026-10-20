@@ -950,7 +950,10 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_clone(
         free(c_url);
         free(c_path);
         free(c_branch);
-        return -1;
+        /* 透传 libgit2 返回码（如 GIT_EAUTH=-16“需要登录”），Kotlin 据此弹凭据
+         * 对话框。之前这里固定返回 -1，把需要登录盖成了普通失败，界面上只能显示
+         * “服务器要求登录…但没有可用凭据”的死胡同文案，对话框永远弹不出来。 */
+        return rc;
     }
 
     if (g_repo != NULL) {
