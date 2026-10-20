@@ -59,6 +59,15 @@ static char g_cred_pubkey[16 * 1024];
 static char g_cred_passphrase[512];
 static char g_cert_file[1024];
 
+/*
+ * 本次网络操作里是否已经交出过一组 HTTP 账号密码。
+ * 服务器拒绝（401）后 libgit2 会再次回调要凭据；若每次都返回同一组，
+ * 就会 401 → 要凭据 → 401 …… 死循环。第二次一律返回 GIT_PASSTHROUGH，
+ * 让 libgit2 转成 GIT_EAUTH(-16) 结束本次操作，上层据此弹凭据对话框。
+ * 每次 setCredentials / clearCredentials 时复位。
+ */
+static int g_cred_userpass_tried = 0;
+
 /* 进行中的网络操作句柄：供跨线程 cancelNetwork() 中止 fetch / push */
 static git_remote *g_active_remote = NULL;
 static pthread_mutex_t g_active_remote_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -80,13 +89,55 @@ static void mc_clear_error(void) {
     g_err[0] = '\0';
 }
 
+/*
+ * libgit2 在 connect 阶段会查 `http.followRedirects`；该配置在本应用里永远
+ * 不存在，查询本身已在 remote.c/lookup_redirect_config 里按 ENOTFOUND 正常
+ * 处理（回落到默认值 INITIAL），但 git_config 会把
+ *     "config value 'http.followRedirects' was not found"
+ * 写进线程级“最后一条错误”且不会清理。
+ *
+ * 于是当随后的真正失败只记录在回调里（凭据 / 证书回调不写 libgit2 错误）时，
+ * mc_set_error() 取到的就是这条与本次失败无关的残留，界面上曾显示成
+ * “克隆失败：config value 'http.followRedirects' was not found”，把真正的
+ * 失败原因（如服务器要求登录）完全盖住。这里把它视为“没有错误信息”。
+ */
+static int mc_error_is_stale(const char *msg) {
+    static const char prefix[] = "config value 'http.followRedirects'";
+    return msg != NULL && strncmp(msg, prefix, sizeof(prefix) - 1) == 0;
+}
+
+/*
+ * mbedTLS 的“对端致命告警”只有英文原文
+ * （0xffff8880 = -0x7780 = MBEDTLS_ERR_SSL_FATAL_ALERT_MESSAGE），
+ * 界面上无从判断。补一句中文定位提示：这种错误几乎都出在网络路径上
+ * （SNI/TLS 被拦截、连到了错误的服务器、该网络需走代理），
+ * 与仓库地址、CA 证书包都无关。
+ */
+static void mc_append_ssl_hint(void) {
+    static const char hint[] =
+            "（TLS 握手被对端拒绝：多为网络拦截/劫持或该网络需走代理，"
+            "可切换网络、挂代理后重试）";
+    size_t n;
+
+    if (strstr(g_err, "peer fatal alert") == NULL ||
+        strstr(g_err, "TLS 握手被对端拒绝") != NULL) {
+        return;
+    }
+    n = strlen(g_err);
+    if (n + sizeof(hint) <= sizeof(g_err)) {
+        memcpy(g_err + n, hint, sizeof(hint)); /* 含结尾 '\0' */
+    }
+}
+
 static void mc_set_error(const char *fallback) {
     const git_error *e = git_error_last();
-    if (e != NULL && e->message != NULL && e->message[0] != '\0') {
+    if (e != NULL && e->message != NULL && e->message[0] != '\0' &&
+        !mc_error_is_stale(e->message)) {
         snprintf(g_err, sizeof(g_err), "%s", e->message);
     } else {
         snprintf(g_err, sizeof(g_err), "%s", fallback != NULL ? fallback : "unknown error");
     }
+    mc_append_ssl_hint();
     MC_LOGE("git error: %s", g_err);
 }
 
@@ -324,10 +375,17 @@ static int mc_credentials_cb(git_credential **out, const char *url,
     (void) url;
     (void) payload;
 
+    /*
+     * 注意：这里必须用 mc_set_errorf()（无条件写 g_err），不能用
+     * mc_set_error()——后者优先取 libgit2 的 last error，而回调返回 -1 时
+     * libgit2 不会覆盖它（http.c/handle_auth 直接向上返回），
+     * 取到的会是 connect 阶段残留的无关消息。
+     * g_err 一旦写入，clone/fetch/push 的失败分支也不会再覆盖它。
+     */
     if ((allowed_types & GIT_CREDENTIAL_SSH_KEY) != 0 && g_cred_privkey[0] != '\0') {
         user = g_cred_ssh_user[0] != '\0' ? g_cred_ssh_user : username_from_url;
         if (user == NULL || user[0] == '\0') {
-            mc_set_error("SSH 用户名为空");
+            mc_set_errorf("SSH 用户名为空（地址里没写用户名，SSH 页也没配置）");
             return -1;
         }
         return git_credential_ssh_key_memory_new(
@@ -337,15 +395,37 @@ static int mc_credentials_cb(git_credential **out, const char *url,
                 g_cred_passphrase[0] != '\0' ? g_cred_passphrase : NULL);
     }
 
-    if ((allowed_types & GIT_CREDENTIAL_USERPASS_PLAINTEXT) != 0 && g_cred_user[0] != '\0') {
-        return git_credential_userpass_plaintext_new(out, g_cred_user, g_cred_pass);
+    if ((allowed_types & GIT_CREDENTIAL_USERPASS_PLAINTEXT) != 0) {
+        if (g_cred_user[0] != '\0' && !g_cred_userpass_tried) {
+            g_cred_userpass_tried = 1;
+            return git_credential_userpass_plaintext_new(out, g_cred_user, g_cred_pass);
+        }
+        /*
+         * 没有可用凭据，或已交出一组却被服务器拒绝（见 g_cred_userpass_tried）。
+         * 返回 GIT_PASSTHROUGH：http.c/handle_auth 会把它转成 GIT_EAUTH(-16)，
+         * 上层（Kotlin）据此知道“需要重新输入账号密码”并弹对话框，
+         * 而不是当成普通失败。地址里内嵌的 用户名:密码 由 libgit2 优先使用
+         * （http.c/apply_url_credentials），走到这里说明地址里也没有（或同样被拒）。
+         */
+        if (g_cred_user[0] != '\0') {
+            mc_set_errorf("服务器拒绝了已保存的账号密码，请重新输入");
+        } else {
+            mc_set_errorf("服务器要求登录（HTTP 账号密码认证），但没有可用凭据；"
+                          "可在仓库地址里写成 协议://用户名:密码@主机/仓库.git");
+        }
+        return GIT_PASSTHROUGH;
     }
 
     if ((allowed_types & GIT_CREDENTIAL_USERNAME) != 0 && g_cred_ssh_user[0] != '\0') {
         return git_credential_username_new(out, g_cred_ssh_user);
     }
 
-    mc_set_error("缺少可用凭据（未配置账号或 SSH 私钥）");
+    if ((allowed_types & GIT_CREDENTIAL_SSH_KEY) != 0) {
+        mc_set_errorf("服务器要求 SSH 登录，但尚未配置私钥（请先到「SSH」页生成并激活密钥）");
+        return -1;
+    }
+
+    mc_set_errorf("缺少可用凭据（未配置账号或 SSH 私钥）");
     return -1;
 }
 
@@ -596,6 +676,7 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_setCredentials(
     mc_strlcpy(g_cred_privkey, pk != NULL ? pk : "", sizeof(g_cred_privkey));
     mc_strlcpy(g_cred_pubkey, pub != NULL ? pub : "", sizeof(g_cred_pubkey));
     mc_strlcpy(g_cred_passphrase, pp != NULL ? pp : "", sizeof(g_cred_passphrase));
+    g_cred_userpass_tried = 0;
 
     free(u);
     free(p);
@@ -616,6 +697,7 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_clearCredentials(JNIEnv *en
     memset(g_cred_privkey, 0, sizeof(g_cred_privkey));
     memset(g_cred_pubkey, 0, sizeof(g_cred_pubkey));
     memset(g_cred_passphrase, 0, sizeof(g_cred_passphrase));
+    g_cred_userpass_tried = 0;
 }
 
 JNIEXPORT void JNICALL
@@ -860,7 +942,11 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_clone(
     mc_emit_progress("clone", c_url, -1, -1);
     rc = git_clone(&cloned, c_url, c_path, &opts);
     if (rc < 0) {
-        mc_set_error("克隆失败");
+        /* 与 fetch/push 一致：回调（凭据 / 证书）已经给出的具体原因优先，
+         * 只在完全没有记录时才回落到 libgit2 的 last error / 兜底文案。 */
+        if (g_err[0] == '\0') {
+            mc_set_error("克隆失败（服务器未说明原因，可查看 logcat 标签 MobileCoderNative）");
+        }
         free(c_url);
         free(c_path);
         free(c_branch);
@@ -3238,7 +3324,8 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_fetch(
         if (g_err[0] == '\0') {
             mc_set_error("拉取失败");
         }
-        return -1;
+        /* 透传 libgit2 返回码（如 GIT_EAUTH=-16“需要登录”），Kotlin 据此弹凭据对话框 */
+        return rc;
     }
     mc_emit_progress("fetch", "done", -1, -1);
     return 0;
@@ -3301,7 +3388,8 @@ Java_com_mobilecoder_ide_core_nativebridge_GitNative_push(
         if (g_err[0] == '\0') {
             mc_set_error("推送失败");
         }
-        return -1;
+        /* 透传 libgit2 返回码（如 GIT_EAUTH=-16“需要登录”），Kotlin 据此弹凭据对话框 */
+        return rc;
     }
     mc_emit_progress("push", "done", -1, -1);
     return 0;

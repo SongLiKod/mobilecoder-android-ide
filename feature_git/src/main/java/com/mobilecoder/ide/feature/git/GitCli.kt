@@ -943,7 +943,12 @@ object GitCli {
         } else {
             // 已被用户取消：直接抛出 CancellationException，不打印误导性的失败信息
             coroutineContext.ensureActive()
-            emit("error: fetch 失败：" + lastError() + "（检查地址、网络与凭据）")
+            if (rc == GitNative.RC_NEED_AUTH) {
+                emit("error: 服务器要求登录（$url）：请在弹出的窗口输入账号密码后重新执行命令")
+                GitController.notifyAuthRequired(url)
+            } else {
+                emit("error: fetch 失败：" + lastError() + "（检查地址、网络与凭据）")
+            }
             1
         }
     }
@@ -1189,7 +1194,12 @@ object GitCli {
                 0
             } else {
                 coroutineContext.ensureActive()
-                emit("error: push 失败：" + lastError() + "（检查凭据与权限）")
+                if (rc == GitNative.RC_NEED_AUTH) {
+                    emit("error: 服务器要求登录（$url）：请在弹出的窗口输入账号密码后重新执行命令")
+                    GitController.notifyAuthRequired(url)
+                } else {
+                    emit("error: push 失败：" + lastError() + "（检查凭据与权限）")
+                }
                 1
             }
         }
@@ -1327,11 +1337,13 @@ object GitCli {
             return 1
         }
         emit("Cloning into '${target.name}'...")
+        // 地址里内嵌的 用户名:密码 先入库、再用干净地址克隆（密码不进 .git/config）
+        val cleanUrl = runCatching { GitController.adoptUrlCredentials(url) }.getOrDefault(url)
         var rc = -1
         GitController.runExclusive(1) {
-            rc = GitController.withCredentials(url, -1) {
+            rc = GitController.withCredentials(cleanUrl, -1) {
                 runWithProgress(emit, CLONE_STAGES) {
-                    runCatching { GitNative.clone(url, target.path, branch) }.getOrDefault(-1)
+                    runCatching { GitNative.clone(cleanUrl, target.path, branch) }.getOrDefault(-1)
                 }
             }
         }
@@ -1339,6 +1351,12 @@ object GitCli {
             0 -> {
                 emit("Clone completed: ${target.path}")
                 0
+            }
+
+            GitNative.RC_NEED_AUTH -> {
+                emit("error: 服务器要求登录：请在弹出的窗口输入账号密码后重新执行命令")
+                GitController.notifyAuthRequired(cleanUrl)
+                1
             }
 
             else -> {

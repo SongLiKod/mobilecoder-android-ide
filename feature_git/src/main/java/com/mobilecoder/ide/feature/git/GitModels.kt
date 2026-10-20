@@ -370,6 +370,18 @@ data class GitMessage(
     val isError: Boolean,
 )
 
+/**
+ * 服务器要求登录（HTTP 401 / libgit2 的 GIT_EAUTH）：UI 订阅后弹账号密码对话框。
+ *
+ * @param origin 如 `https://gitea.example.com:8000`，对话框标题与保存目标
+ * @param retry 保存凭据后要重跑的那次操作；null 表示无法自动重跑
+ *              （终端 `git pull` 等，用户保存后重新执行命令即可）
+ */
+data class GitAuthChallenge(
+    val origin: String,
+    val retry: (suspend () -> Unit)? = null,
+)
+
 /** 网络进度（native 任意线程回调 → StateFlow → 主线程 collectAsStateWithLifecycle 订阅）。 */
 data class GitProgress(
     val stage: String = "",

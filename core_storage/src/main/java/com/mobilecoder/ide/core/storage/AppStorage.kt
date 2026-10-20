@@ -43,6 +43,7 @@ object AppStorage {
             preferences = AppPreferences(dataStore, crypto)
             projects = ProjectRepository(paths, dataStore)
             sshKeys = SshKeyStore(paths, dataStore, crypto)
+            gitCredentials = GitCredentialStore(preferences, crypto)
             initialized = true
         }
         // 预热：Keystore 探测 + 密钥索引恢复（不阻塞冷启动，TECH.md 8 ≤2s）
@@ -82,6 +83,10 @@ object AppStorage {
         private set
 
     lateinit var sshKeys: SshKeyStore
+        private set
+
+    /** Git HTTP(S) 服务器登录凭据库（弹窗输入 / 地址内嵌凭据共用，可统一管理）。 */
+    lateinit var gitCredentials: GitCredentialStore
         private set
 
     /** 存储结构根（`files/`）。 */

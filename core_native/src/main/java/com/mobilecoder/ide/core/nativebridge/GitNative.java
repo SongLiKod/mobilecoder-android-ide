@@ -6,12 +6,20 @@ package com.mobilecoder.ide.core.nativebridge;
  * 返回约定（与 C 层一致，见 git_jni.c 头部注释）：
  *  - boolean 方法：true 成功 / false 失败（错误详情 {@link #lastError()}）
  *  - int 状态方法：0 成功；1 冲突/需人工处理；2 已是最新/无变更；-1 错误
+ *    （fetch / push 透传 libgit2 的负错误码，-16 = {@link #RC_NEED_AUTH} 需要登录）
  *  - String 列表：记录以 '\n' 分隔，字段以 '\x01' 分隔
  *
  * 注意：native 层内部只维护**一个**仓库句柄（g_repo），
  * 因此同一时刻只能打开一个仓库；切换仓库前调用 {@link #closeRepo()}。
  */
 public final class GitNative {
+
+    /**
+     * 网络操作（clone / fetch / push）因“服务器要求登录但没有可用凭据”而中止
+     * （libgit2 的 GIT_EAUTH）。上层收到该返回码时应弹出账号密码对话框，
+     * 保存后重试同一次操作。
+     */
+    public static final int RC_NEED_AUTH = -16;
 
     static {
         System.loadLibrary("mobilecoder");
@@ -211,10 +219,10 @@ public final class GitNative {
 
     public static native boolean setRemoteUrl(String name, String url);
 
-    /** @return 0 成功 / -1 失败 */
+    /** @return 0 成功；负数失败（libgit2 错误码，-16 = {@link #RC_NEED_AUTH} 需要登录） */
     public static native int fetch(String name);
 
-    /** @return 0 成功 / -1 失败 */
+    /** @return 0 成功；负数失败（libgit2 错误码，-16 = {@link #RC_NEED_AUTH} 需要登录） */
     public static native int push(String name, String branch);
 
     /**

@@ -59,6 +59,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.storage.AppStorage
 import java.io.File
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -179,6 +180,26 @@ fun GitScreen(
         }
     }
 
+    /**
+     * Git 页克隆一步：clone 成功返回 true。
+     *
+     * 服务器要求登录（401）时 clone 只负责弹凭据对话框、不自动重试：登记项目是在
+     * clone 返回之后才做的，必须由调用方整体重跑。这里等对话框结束——保存了凭据
+     * 就再 clone 一次，取消则维持失败。
+     */
+    suspend fun runCloneOnce(url: String, target: String, branch: String): Boolean {
+        val ok = runCatching { GitController.clone(url, target, branch) }.getOrDefault(false)
+        if (ok) return true
+        if (GitController.authChallenge.value == null) return false
+        GitController.authChallenge.first { it == null }
+        GitController.clearMessage()
+        val hasCreds = runCatching {
+            AppStorage.gitCredentials.credentialsFor(url) != null
+        }.getOrDefault(false)
+        if (!hasCreds) return false
+        return runCatching { GitController.clone(url, target, branch) }.getOrDefault(false)
+    }
+
     if (showClone) {
         CloneDialog(
             projectPath = projectPath,
@@ -201,8 +222,7 @@ fun GitScreen(
                         )
                         return@launch
                     }
-                    val ok = runCatching { GitController.clone(url, target, branch) }
-                        .getOrDefault(false)
+                    val ok = runCloneOnce(url, target, branch)
                     // 克隆结果登记为项目（克隆下来的目录本身就是项目，可在「项目」页打开）
                     if (ok) runCatching { AppStorage.projects.adopt(File(target)) }
                 }
