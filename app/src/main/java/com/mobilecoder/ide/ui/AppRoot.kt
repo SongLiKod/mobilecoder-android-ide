@@ -42,6 +42,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -113,6 +114,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
@@ -151,6 +154,7 @@ import com.mobilecoder.ide.feature.ssh.SshScreen
 import com.mobilecoder.ide.feature.terminal.TerminalScreen
 import java.io.File
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /** 全局导航目的地（app 负责全局导航：TECH.md 7）。 */
@@ -607,6 +611,15 @@ fun AppRoot(
                     navController.navigateToSub(destination.route)
                 }
             },
+        )
+
+        // Git 服务器账号密码对话框：克隆 / 拉取 / 推送被 401 拦下时全局弹出
+        // （首页克隆、Git 页、终端 git 命令都会触发），保存进凭据库后重试原操作
+        GitAuthDialog(
+            onSubmit = { user, pass ->
+                dotScope.launch { runCatching { GitController.submitAuthChallenge(user, pass) } }
+            },
+            onCancel = { GitController.cancelAuthChallenge() },
         )
     }
 }
@@ -1065,6 +1078,86 @@ private fun HomeScreen(
         )
     }
 
+    /**
+     * 首页克隆全流程：目标目录检查 → 登记项目 → 克隆 → 打开。
+     *
+     * 抽成可重跑的本地挂起函数：服务器要求登录（401）时 controller 只负责弹凭据
+     * 对话框、不自动重试（登记与打开都在这里），凭据保存后由这里完整重跑一次。
+     */
+    suspend fun runCloneFlow(url: String, branch: String, target: String) {
+        val dir = File(target)
+        val hasFiles = dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
+
+        // ① 目标已存在（上次克隆已完成但当时没登记成功）→ 直接登记并打开
+        if (hasFiles) {
+            if (File(dir, ".git").exists()) {
+                val existing = AppStorage.projects.adopt(dir)
+                if (existing != null) {
+                    showClone = false
+                    AppStorage.projects.markOpened(existing.relativePath)
+                    AppState.open(existing)
+                    projects = AppStorage.projects.list()
+                    onOpenProject()
+                    return
+                }
+                cloneNotice = "目录里已是 Git 仓库，但不在项目目录内，无法加入列表：$target"
+            } else {
+                cloneNotice = "目标目录已存在且不是 Git 仓库：$target\n（请换一个目标目录）"
+            }
+            return
+        }
+
+        // ② 先登记再克隆：克隆过程中即使异常退出，项目也已经在列表里
+        runCatching {
+            dir.parentFile?.mkdirs()
+            dir.mkdirs()
+        }
+        val registered = runCatching { AppStorage.projects.adopt(dir) }.getOrNull()
+        val ok = runCatching { GitController.cloneOnly(url, target, branch) }
+            .getOrDefault(false)
+        if (!ok) {
+            // 服务器要求登录：等凭据对话框结束——保存了凭据就重跑整个流程
+            //（含项目登记与打开；controller 层对 cloneOnly 不自动重试）
+            if (GitController.authChallenge.value != null) {
+                GitController.authChallenge.first { it == null }
+                GitController.clearMessage()
+                val hasCreds = runCatching {
+                    AppStorage.gitCredentials.credentialsFor(url) != null
+                }.getOrDefault(false)
+                if (hasCreds) {
+                    runCloneFlow(url, branch, target)
+                    return
+                }
+            }
+            val text = GitController.message.value?.text
+            GitController.clearMessage()
+            val hint = if (registered != null) {
+                "\n（目录已登记到项目列表，可删除后重试）"
+            } else {
+                ""
+            }
+            cloneNotice = (text ?: "克隆失败：请检查仓库地址与网络") + hint
+            // 空壳目录不留垃圾：登记过且没拉下任何文件 → 撤销登记
+            if (registered != null && dir.listFiles()?.isEmpty() != false) {
+                runCatching { AppStorage.projects.delete(registered.relativePath) }
+            }
+            return
+        }
+
+        val meta = runCatching { AppStorage.projects.adopt(dir) }.getOrNull()
+            ?: registered
+        if (meta == null) {
+            // 克隆成功但目录不在项目目录内：无法登记为项目
+            cloneNotice = "克隆完成：$target\n（不在项目目录内，未加入项目列表）"
+            return
+        }
+        showClone = false
+        AppStorage.projects.markOpened(meta.relativePath)
+        AppState.open(meta)
+        projects = AppStorage.projects.list()
+        onOpenProject()
+    }
+
     if (showClone) {
         CloneRepoDialog(
             busy = gitBusy,
@@ -1079,66 +1172,7 @@ private fun HomeScreen(
             },
             onClone = { url, branch, target ->
                 cloneNotice = null
-                scope.launch {
-                    val dir = File(target)
-                    val hasFiles = dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
-
-                    // ① 目标已存在（上次克隆已完成但当时没登记成功）→ 直接登记并打开
-                    if (hasFiles) {
-                        if (File(dir, ".git").exists()) {
-                            val existing = AppStorage.projects.adopt(dir)
-                            if (existing != null) {
-                                showClone = false
-                                AppStorage.projects.markOpened(existing.relativePath)
-                                AppState.open(existing)
-                                projects = AppStorage.projects.list()
-                                onOpenProject()
-                                return@launch
-                            }
-                            cloneNotice = "目录里已是 Git 仓库，但不在项目目录内，无法加入列表：$target"
-                        } else {
-                            cloneNotice = "目标目录已存在且不是 Git 仓库：$target\n（请换一个目标目录）"
-                        }
-                        return@launch
-                    }
-
-                    // ② 先登记再克隆：克隆过程中即使异常退出，项目也已经在列表里
-                    runCatching {
-                        dir.parentFile?.mkdirs()
-                        dir.mkdirs()
-                    }
-                    val registered = runCatching { AppStorage.projects.adopt(dir) }.getOrNull()
-                    val ok = runCatching { GitController.cloneOnly(url, target, branch) }
-                        .getOrDefault(false)
-                    if (!ok) {
-                        val text = GitController.message.value?.text
-                        GitController.clearMessage()
-                        val hint = if (registered != null) {
-                            "\n（目录已登记到项目列表，可删除后重试）"
-                        } else {
-                            ""
-                        }
-                        cloneNotice = (text ?: "克隆失败：请检查仓库地址与网络") + hint
-                        // 空壳目录不留垃圾：登记过且没拉下任何文件 → 撤销登记
-                        if (registered != null && dir.listFiles()?.isEmpty() != false) {
-                            runCatching { AppStorage.projects.delete(registered.relativePath) }
-                        }
-                        return@launch
-                    }
-
-                    val meta = runCatching { AppStorage.projects.adopt(dir) }.getOrNull()
-                        ?: registered
-                    if (meta == null) {
-                        // 克隆成功但目录不在项目目录内：无法登记为项目
-                        cloneNotice = "克隆完成：$target\n（不在项目目录内，未加入项目列表）"
-                        return@launch
-                    }
-                    showClone = false
-                    AppStorage.projects.markOpened(meta.relativePath)
-                    AppState.open(meta)
-                    projects = AppStorage.projects.list()
-                    onOpenProject()
-                }
+                scope.launch { runCloneFlow(url, branch, target) }
             },
         )
     }
@@ -1493,6 +1527,76 @@ private fun RenameProjectDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/**
+ * Git 服务器账号密码对话框（全局唯一，由 GitController.authChallenge 触发）。
+ *
+ * 克隆 / 拉取 / 推送被服务器 401 拦下时弹出：保存后凭据按主机（origin）入库，
+ * 同一主机的后续操作与其它仓库都免输，并在「Git 页 → 仓库设置」里可删除。
+ */
+@Composable
+private fun GitAuthDialog(
+    onSubmit: (String, String) -> Unit,
+    onCancel: () -> Unit,
+) {
+    val challenge by GitController.authChallenge.collectAsStateWithLifecycle()
+    var username by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
+
+    val current = challenge ?: return
+    // 换一次挑战就重置输入（避免上一次的用户名串到下一个主机）
+    LaunchedEffect(current) {
+        username = ""
+        password = ""
+    }
+
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("服务器要求登录") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "${current.origin} 需要账号密码才能继续。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it },
+                    label = { Text("用户名") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("密码") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = if (current.retry != null) {
+                        "保存后自动重试本次操作；凭据只保存在本机，下次该主机免输。"
+                    } else {
+                        "保存后凭据按主机生效，请重新执行刚才的命令。"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSubmit(username.trim(), password) },
+                enabled = username.isNotBlank(),
+            ) { Text("保存并重试") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("取消") }
         },
     )
 }

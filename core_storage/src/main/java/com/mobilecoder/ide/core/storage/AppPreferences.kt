@@ -45,6 +45,14 @@ class AppPreferences(
     suspend fun setHttpsPassword(value: String) =
         set(KEY_HTTPS_PASS, if (value.isEmpty()) "" else crypto.encryptToString(value))
 
+    /**
+     * 多主机 Git 凭据 JSON（结构见 [GitCredentialStore]：origin / 用户名 /
+     * 加密后的密码 / 保存时间）。克隆地址内嵌凭据与 401 弹窗输入都落到这一份，
+     * 「Git 页 → 仓库设置」里可统一查看、删除。
+     */
+    suspend fun gitCredentialsJson(): String = get(KEY_GIT_CREDENTIALS) ?: ""
+    suspend fun setGitCredentialsJson(value: String) = set(KEY_GIT_CREDENTIALS, value)
+
     // ---------------- 编辑器 ----------------
 
     suspend fun editorFontSize(): Int = getInt(KEY_EDITOR_FONT, 14)
@@ -307,6 +315,7 @@ class AppPreferences(
         private val KEY_GIT_EMAIL = stringPreferencesKey("git_user_email")
         private val KEY_HTTPS_USER = stringPreferencesKey("https_user")
         private val KEY_HTTPS_PASS = stringPreferencesKey("https_pass_enc")
+        private val KEY_GIT_CREDENTIALS = stringPreferencesKey("git_credentials_json")
         private val KEY_EDITOR_FONT = intPreferencesKey("editor_font_size")
         private val KEY_EDITOR_LINENUM = stringPreferencesKey("editor_line_numbers")
         private val KEY_EDITOR_WRAP = stringPreferencesKey("editor_word_wrap")

@@ -30,8 +30,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.SectionHeader
 import com.mobilecoder.ide.core.common.ui.StatChip
+import com.mobilecoder.ide.core.storage.GitCredentialEntry
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -50,6 +52,9 @@ fun SettingsTab(
     val repo by GitController.repo.collectAsStateWithLifecycle()
     val identity by GitController.identity.collectAsStateWithLifecycle()
     val ignoreRules by GitController.ignoreRules.collectAsStateWithLifecycle()
+    val credentials by GitController.credentials.collectAsStateWithLifecycle()
+
+    LaunchedEffect(Unit) { runCatching { GitController.loadCredentials() } }
 
     Column(
         modifier = modifier
@@ -62,6 +67,15 @@ fun SettingsTab(
         IdentityCard(identity = identity) { name, email ->
             scope.launch { runCatching { GitController.saveIdentity(name, email) } }
         }
+        CredentialsCard(
+            entries = credentials,
+            onRemove = { origin ->
+                scope.launch { runCatching { GitController.removeCredential(origin) } }
+            },
+            onClear = {
+                scope.launch { runCatching { GitController.clearSavedCredentials() } }
+            },
+        )
         IgnoreCard(
             rules = ignoreRules,
             onAdd = { rule ->
@@ -242,6 +256,110 @@ private fun IgnoreCard(
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("清空忽略规则") }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 服务器凭据（HTTP(S) 账号密码，按主机保存）
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun CredentialsCard(
+    entries: List<GitCredentialEntry>,
+    onRemove: (String) -> Unit,
+    onClear: () -> Unit,
+) {
+    // 待确认的删除操作：null = 无待确认项（凭据是敏感数据，删除前需二次确认）
+    var pendingRemoveOrigin by rememberSaveable { mutableStateOf<String?>(null) }
+    var confirmClearAll by rememberSaveable { mutableStateOf(false) }
+
+    SettingCard(title = "服务器凭据（HTTP(S) 账号密码）") {
+        Text(
+            text = "两种方式写入：① 克隆地址里写 协议://用户名:密码@主机/仓库.git；" +
+                "② 服务器要求登录时在弹窗里输入。凭据按主机保存一次即可复用，" +
+                "删除后该主机下次操作会重新要求登录。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        if (entries.isEmpty()) {
+            Text(
+                text = "暂无已保存的凭据",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            entries.forEach { entry ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = entry.origin,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = "用户名：" + entry.username.ifBlank { "（未填写）" },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        OutlinedButton(onClick = { pendingRemoveOrigin = entry.origin }) {
+                            Text("删除")
+                        }
+                    }
+                }
+            }
+            OutlinedButton(
+                onClick = { confirmClearAll = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("清空全部凭据")
+            }
+        }
+    }
+
+    // 删除单条凭据（弹出确认框，误删不可恢复）
+    pendingRemoveOrigin?.let { origin ->
+        AppAlertDialog(
+            title = "删除该主机凭据？",
+            message = "将删除 $origin 的已保存账号密码，删除后下次访问该主机会重新要求登录。",
+            onDismiss = { pendingRemoveOrigin = null },
+            confirmLabel = "删除",
+            dismissLabel = "取消",
+            destructive = true,
+            onConfirm = {
+                pendingRemoveOrigin = null
+                onRemove(origin)
+            },
+        )
+    }
+
+    // 清空全部凭据（弹出确认框）
+    if (confirmClearAll) {
+        AppAlertDialog(
+            title = "清空全部凭据？",
+            message = "将删除全部 ${entries.size} 条已保存的服务器账号密码，" +
+                "此操作不可撤销，各主机下次操作会重新要求登录。",
+            onDismiss = { confirmClearAll = false },
+            confirmLabel = "清空",
+            dismissLabel = "取消",
+            destructive = true,
+            onConfirm = {
+                confirmClearAll = false
+                onClear()
+            },
+        )
     }
 }
 

@@ -5,6 +5,8 @@ import com.mobilecoder.ide.core.nativebridge.GitNative
 import com.mobilecoder.ide.core.nativebridge.GitProgressCallback
 import com.mobilecoder.ide.core.nativebridge.NativeRuntime
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.core.storage.GitCredentialEntry
+import com.mobilecoder.ide.core.storage.GitUrlCreds
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -119,6 +121,14 @@ object GitController {
 
     private val _ignoreRules = MutableStateFlow<List<String>>(emptyList())
     val ignoreRules: StateFlow<List<String>> = _ignoreRules.asStateFlow()
+
+    private val _authChallenge = MutableStateFlow<GitAuthChallenge?>(null)
+    /** 服务器要求登录（401）时非空；UI 订阅它弹账号密码对话框（全局唯一）。 */
+    val authChallenge: StateFlow<GitAuthChallenge?> = _authChallenge.asStateFlow()
+
+    private val _credentials = MutableStateFlow<List<GitCredentialEntry>>(emptyList())
+    /** 已保存的服务器登录凭据（「Git 页 → 仓库设置」里查看 / 删除）。 */
+    val credentials: StateFlow<List<GitCredentialEntry>> = _credentials.asStateFlow()
 
     // ---------------- 生命周期 ----------------
 
@@ -537,15 +547,23 @@ object GitController {
                 }
                 _progressLog.value = emptyList()
                 _progress.value = GitProgress("clone", url, -1, -1)
-                if (!prepareCredentials(url)) return@withBusy false
+                // 地址里内嵌的 用户名:密码 先入库、再用干净地址克隆（密码不进 .git/config）
+                val cleanUrl = adoptUrlCredentials(url.trim())
+                if (!prepareCredentials(cleanUrl)) return@withBusy false
                 val rc = try {
-                    GitNative.clone(url.trim(), targetPath.trim(), branch.trim())
+                    GitNative.clone(cleanUrl, targetPath.trim(), branch.trim())
                 } finally {
                     runCatching { GitNative.clearCredentials() }
                     _progress.value = null
                 }
                 if (rc != 0) {
-                    postError("克隆失败：" + nativeError("请检查地址与网络"))
+                    if (rc == GitNative.RC_NEED_AUTH) {
+                        // 不带 retry：登记项目是在 clone 返回之后才做的，
+                        // 由调用方（Git 页 / 首页克隆流程）等凭据对话框结束再整体重跑
+                        postAuthRequired(cleanUrl, null)
+                    } else {
+                        postError("克隆失败：" + nativeError("请检查地址与网络"))
+                    }
                     false
                 } else {
                     val opened = openRepoLocked(targetPath)
@@ -589,14 +607,22 @@ object GitController {
                 _progressLog.value = emptyList()
                 _progress.value = GitProgress("clone", url, -1, -1)
                 try {
-                    if (!prepareCredentials(url)) return@withBusy false
+                    // 地址里内嵌的 用户名:密码 先入库、再用干净地址克隆（密码不进 .git/config）
+                    val cleanUrl = adoptUrlCredentials(url.trim())
+                    if (!prepareCredentials(cleanUrl)) return@withBusy false
                     val rc = try {
-                        GitNative.clone(url.trim(), targetPath.trim(), branch.trim())
+                        GitNative.clone(cleanUrl, targetPath.trim(), branch.trim())
                     } finally {
                         runCatching { GitNative.clearCredentials() }
                     }
                     if (rc != 0) {
-                        postError("克隆失败：" + nativeError("请检查地址与网络"))
+                        if (rc == GitNative.RC_NEED_AUTH) {
+                            // 不带 retry：调用方（首页克隆流程）在凭据对话框结束后
+                            // 会重跑“登记 + 克隆 + 打开”的完整流程
+                            postAuthRequired(cleanUrl, null)
+                        } else {
+                            postError("克隆失败：" + nativeError("请检查地址与网络"))
+                        }
                         false
                     } else {
                         true
@@ -1086,14 +1112,14 @@ object GitController {
 
     /** @return 0 成功 / -1 失败 */
     suspend fun fetch(remote: String): Int = withRepo(-1) {
-        withBusy(-1) { fetchLocked(remote) }
+        withBusy(-1) { fetchLocked(remote) { fetch(remote) } }
     }
 
     /** 拉取 = fetch + merge(当前分支)。 @return 0 成功 / 1 冲突 / 2 已是最新 / -1 失败 */
     suspend fun pull(remote: String): Int = withRepo(-1) {
         withBusy(-1) {
             if (!ensureEngine() || !ensureOpen()) return@withBusy -1
-            val rc = fetchLocked(remote)
+            val rc = fetchLocked(remote) { pull(remote) }
             if (rc != 0) return@withBusy rc
             val branchName = _head.value?.branch.orEmpty()
             if (branchName.isBlank()) {
@@ -1133,6 +1159,8 @@ object GitController {
                 }
                 refreshLocked(all = true)
                 postInfo("推送成功：$branch → $remote（已设置上游）")
+            } else if (rc == GitNative.RC_NEED_AUTH) {
+                postAuthRequired(url) { push(remote, branch) }
             } else {
                 postError("推送失败：" + nativeError("请检查凭据与权限"))
             }
@@ -1183,6 +1211,79 @@ object GitController {
             refreshLocked(all = false)
             postInfo("已清空忽略规则")
         }
+    }
+
+    // ---------------- 服务器凭据（HTTP(S) 账号密码，按主机保存） ----------------
+
+    /**
+     * 把地址里内嵌的 `协议://用户名:密码@主机/…` 存进凭据库，返回剥掉凭据的地址。
+     *
+     * 这样密码不进 `.git/config`，同一主机的其它仓库 / 后续 fetch、push 都能复用，
+     * 也才能在「Git 页 → 仓库设置 → 服务器凭据」里统一删除；地址里没写凭据时原样返回。
+     */
+    suspend fun adoptUrlCredentials(url: String): String {
+        val trimmed = url.trim()
+        val parsed = GitUrlCreds.parse(trimmed) ?: return trimmed
+        if (parsed.username.isBlank()) return trimmed
+        val saved = runCatching {
+            AppStorage.gitCredentials.save(trimmed, parsed.username, parsed.password)
+        }.getOrNull()
+        if (saved != null) refreshCredentials()
+        return parsed.cleanUrl
+    }
+
+    /** 保存服务器账号密码（凭据对话框提交 / 地址内嵌凭据入库）。 */
+    suspend fun saveCredential(url: String, username: String, password: String) {
+        val saved = runCatching {
+            AppStorage.gitCredentials.save(url, username.trim(), password)
+        }.getOrNull()
+        if (saved != null) refreshCredentials()
+    }
+
+    /** 读取已保存凭据列表（「仓库设置」页打开时刷新一次）。 */
+    suspend fun loadCredentials() = refreshCredentials()
+
+    /** 删除一条已保存凭据（该主机下次操作会重新要求登录）。 */
+    suspend fun removeCredential(origin: String) {
+        runCatching { AppStorage.gitCredentials.remove(origin) }
+        refreshCredentials()
+    }
+
+    /** 清空全部已保存凭据。 */
+    suspend fun clearSavedCredentials() {
+        runCatching { AppStorage.gitCredentials.clear() }
+        refreshCredentials()
+    }
+
+    private suspend fun refreshCredentials() {
+        _credentials.value =
+            runCatching { AppStorage.gitCredentials.list() }.getOrDefault(emptyList())
+    }
+
+    /** 凭据对话框「保存并重试」：入库后重跑当初失败的那次操作。 */
+    suspend fun submitAuthChallenge(username: String, password: String) {
+        val challenge = _authChallenge.value ?: return
+        _authChallenge.value = null
+        if (username.isNotBlank()) saveCredential(challenge.origin, username, password)
+        challenge.retry?.invoke()
+    }
+
+    /** 凭据对话框「取消」：不保存，本次操作保持失败。 */
+    fun cancelAuthChallenge() {
+        _authChallenge.value = null
+    }
+
+    /**
+     * 网络操作因“服务器要求登录”结束（终端 `git pull/push` 等用）：弹凭据对话框。
+     * 终端命令无法自动重跑，凭据保存后由用户重新执行命令即可。
+     */
+    fun notifyAuthRequired(url: String) = postAuthRequired(url, null)
+
+    /** 弹凭据对话框；[retry] 非空时保存凭据后自动重跑（在互斥锁之外执行）。 */
+    private fun postAuthRequired(url: String, retry: (suspend () -> Unit)?) {
+        postError("服务器要求登录：请在弹出的窗口输入账号密码")
+        val origin = GitUrlCreds.originOf(url).ifBlank { url.trim() }
+        _authChallenge.value = GitAuthChallenge(origin, retry)
     }
 
     // ---------------- 内部工具 ----------------
@@ -1260,7 +1361,11 @@ object GitController {
         return rc
     }
 
-    private suspend fun fetchLocked(remote: String): Int {
+    /**
+     * 拉取核心。[authRetry] 为服务器要求登录时凭据保存后的重跑动作
+     * （fetch / pull 各自传入自己的公开入口，以便在互斥锁之外重跑）。
+     */
+    private suspend fun fetchLocked(remote: String, authRetry: (suspend () -> Unit)? = null): Int {
         if (!ensureEngine()) return -1
         if (!ensureOpen()) return -1
         if (remote.isBlank()) {
@@ -1282,6 +1387,8 @@ object GitController {
         if (rc == 0) {
             refreshLocked(all = true)
             postInfo("拉取完成：$remote")
+        } else if (rc == GitNative.RC_NEED_AUTH) {
+            postAuthRequired(url, authRetry)
         } else {
             postError("拉取失败：" + nativeError("请检查地址、网络与凭据"))
         }
@@ -1294,8 +1401,17 @@ object GitController {
         return when {
             lower.startsWith("http://") || lower.startsWith("https://") -> {
                 val prefs = AppStorage.preferences
-                val user = runCatching { prefs.httpsUser() }.getOrDefault("")
-                val pass = runCatching { prefs.httpsPassword() }.getOrDefault("")
+                // ① 凭据库：401 弹窗输入 / 地址内嵌凭据入库，按 origin（主机）取
+                val saved = runCatching {
+                    AppStorage.gitCredentials.credentialsFor(url)
+                }.getOrNull()
+                // ② 远程地址里仍带凭据的情况（如用终端 clone 的仓库、旧配置）
+                val embedded = GitUrlCreds.parse(url)
+                // ③ 旧版全局单凭据（无 UI 入口，仅兜底）
+                val legacyUser = runCatching { prefs.httpsUser() }.getOrDefault("")
+                val legacyPass = runCatching { prefs.httpsPassword() }.getOrDefault("")
+                val user = saved?.first ?: embedded?.username ?: legacyUser
+                val pass = saved?.second ?: embedded?.password ?: legacyPass
                 runCatching { GitNative.setCredentials(user, pass, "", "", "", "") }
                 true
             }
