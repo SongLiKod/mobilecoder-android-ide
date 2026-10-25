@@ -3,6 +3,7 @@ package com.mobilecoder.ide.feature.git
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -10,7 +11,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
@@ -19,10 +22,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -76,8 +82,10 @@ fun ChangesTab(
     val stats by GitController.diffStats.collectAsStateWithLifecycle()
     val identity by GitController.identity.collectAsStateWithLifecycle()
     val busy by GitController.busy.collectAsStateWithLifecycle()
+    val commits by GitController.commits.collectAsStateWithLifecycle()
 
     var commitMessage by rememberSaveable { mutableStateOf("") }
+    var historyOpen by rememberSaveable { mutableStateOf(false) }
     var expandedKey by rememberSaveable { mutableStateOf("") }
     var pendingRestore by remember { mutableStateOf<RestoreRequest?>(null) }
     var pendingDelete by remember { mutableStateOf<GitStatusEntry?>(null) }
@@ -127,6 +135,35 @@ fun ChangesTab(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                Box {
+                    TextButton(
+                        onClick = {
+                            historyOpen = true
+                            // 历史为空（仓库刚绑定 / 尚未加载）时按需补拉一批
+                            if (commits.isEmpty()) {
+                                scope.launch { runCatching { GitController.ensureRecentCommits() } }
+                            }
+                        },
+                        enabled = !busy,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.History,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("历史")
+                    }
+                    CommitHistoryMenu(
+                        expanded = historyOpen,
+                        commits = commits,
+                        onDismiss = { historyOpen = false },
+                        onPick = { message ->
+                            commitMessage = message
+                            historyOpen = false
+                        },
+                    )
+                }
                 Button(
                     onClick = {
                         scope.launch {
@@ -277,6 +314,83 @@ fun ChangesTab(
         )
     }
 }
+
+// ---------------------------------------------------------------------------
+// 提交信息历史（最近提交说明下拉：点击条目把说明填入提交信息框）
+// ---------------------------------------------------------------------------
+
+/**
+ * 「历史」下拉：按时间倒序列出最近提交的说明（同文案去重），每条附带短 hash 与
+ * 相对时间；点击即把该说明填入提交信息输入框。无提交记录时给出空态提示。
+ */
+@Composable
+private fun CommitHistoryMenu(
+    expanded: Boolean,
+    commits: List<GitCommit>,
+    onDismiss: () -> Unit,
+    onPick: (String) -> Unit,
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        modifier = Modifier.widthIn(min = 240.dp, max = 320.dp),
+    ) {
+        val recent = remember(commits) { commits.distinctBy { it.summary }.take(RECENT_MESSAGE_LIMIT) }
+        if (recent.isEmpty()) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = "暂无提交记录",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                onClick = onDismiss,
+                enabled = false,
+            )
+        } else {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = "最近提交（点击填入）",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                onClick = onDismiss,
+                enabled = false,
+            )
+            recent.forEach { commit ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(
+                                text = commit.summary.ifBlank { "（无提交说明）" },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = "${commit.shortOid} · ${relativeTime(commit.time)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    },
+                    onClick = {
+                        if (commit.summary.isNotBlank()) onPick(commit.summary) else onDismiss()
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** 提交信息历史下拉最多展示的条数。 */
+private const val RECENT_MESSAGE_LIMIT = 20
 
 // ---------------------------------------------------------------------------
 // 冲突提醒横幅（点击进入冲突处理子页）
