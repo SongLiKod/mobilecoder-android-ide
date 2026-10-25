@@ -296,6 +296,26 @@ object EnvDownloader {
         }
     }
 
+    /**
+     * 拉取小体积文本（apt `Packages` 索引等），供调用方解析「上游当前版本」。
+     *
+     * 网络层异常 / 超时 / HTTP 非 2xx 一律返回 null（**不抛**），调用方据此退回兜底逻辑。
+     * internal = 供 [RootfsManager] 解析 Termux 仓库最新 proot 版本用。
+     */
+    internal fun fetchText(url: String, timeoutMs: Int = 10_000): String? = runCatching {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        try {
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (MobileCoder-IDE)")
+            if (conn.responseCode !in 200..299) return@runCatching null
+            conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } finally {
+            runCatching { conn.disconnect() }
+        }
+    }.getOrNull()
+
     /** 用户点了「取消」（[RootfsManager] 的多段下载也靠它统一中断）。 */
     internal fun throwIfCancelled() {
         if (cancelled) throw DownloadCancelled("已取消下载")

@@ -41,7 +41,7 @@ object ToolInstaller {
         if (failure != null) {
             emit("[ERROR] Linux 环境安装失败：${failure.message}")
             emit("       rootfs 源：Ubuntu 官方 cdimage / 清华 TUNA（ubuntu-base 约 30MB）；")
-            emit("       proot 三件套：Termux 官方仓库（固定地址，约 140KB）。")
+            emit("       proot 三件套：Termux 官方仓库（版本实时解析，约 140KB）。")
             emit("       全部失败通常是网络不可达，可切换官方源/国内镜像重试。")
             emit("       自救：「构建环境」→ Linux 环境 → 导入本地 ubuntu-base-*.tar.gz（官方 cdimage 可下载）。")
             return false

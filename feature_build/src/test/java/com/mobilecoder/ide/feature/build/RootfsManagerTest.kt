@@ -54,8 +54,10 @@ class RootfsManagerTest {
     }
 
     @Test
-    fun prootDebUrls_areThreeTermuxDebsPerArch() {
-        val arm = RootfsManager.prootDebUrls("aarch64")
+    fun prootFallbackDebUrls_areThreeTermuxDebsPerArch() {
+        // 兜底地址只保证**结构**正确（索引拉不到时才用，不做真源可达断言，
+        // 否则上游一升版 CI 又红 —— 真源校验见 LiveRootfsVerificationTest）
+        val arm = RootfsManager.prootFallbackDebUrls("aarch64")
         assertEquals(3, arm.size)
         assertTrue(arm.all { it.startsWith("https://packages.termux.dev/") })
         assertTrue(arm.all { it.endsWith(".deb") })
@@ -64,9 +66,55 @@ class RootfsManagerTest {
         assertTrue(arm.any { it.contains("/libt/libtalloc/libtalloc_") })
         assertTrue(arm.any { it.contains("/liba/libandroid-shmem/libandroid-shmem_") })
 
-        val x64 = RootfsManager.prootDebUrls("x64")
+        val x64 = RootfsManager.prootFallbackDebUrls("x64")
         assertTrue(x64.all { it.contains("_x86_64.deb") })
         assertEquals(3, x64.map { it.substringAfterLast('/') }.distinct().size)
+    }
+
+    // ---- 包索引解析（实时版本解析的纯函数部分） ----
+
+    /** 模拟上游 `dists/stable/main/binary-<arch>/Packages` 的关键片段。 */
+    private val sampleIndex = """
+        Package: zlib1g
+        Version: 1.3
+        Filename: pool/main/z/zlib1g/zlib1g_1.3_aarch64.deb
+
+        Package: proot
+        Depends: libtalloc2
+        Filename: pool/main/p/proot/proot_9.9.9_aarch64.deb
+
+        Package: libtalloc
+         续行以空白开头，不能被当成字段
+        Filename: pool/main/libt/libtalloc/libtalloc_2.9.9_aarch64.deb
+
+        Package: libandroid-shmem
+        Filename: pool/main/liba/libandroid-shmem/libandroid-shmem_0.8_aarch64.deb
+    """.trimIndent()
+
+    @Test
+    fun parseDebFilenames_takesFilenameOfWantedPackages_only() {
+        val found = RootfsManager.parseDebFilenames(
+            sampleIndex,
+            listOf("proot", "libtalloc", "libandroid-shmem"),
+        )
+        assertEquals(setOf("proot", "libtalloc", "libandroid-shmem"), found.keys)
+        assertEquals("pool/main/p/proot/proot_9.9.9_aarch64.deb", found["proot"])
+        assertEquals("pool/main/libt/libtalloc/libtalloc_2.9.9_aarch64.deb", found["libtalloc"])
+        assertEquals(
+            "pool/main/liba/libandroid-shmem/libandroid-shmem_0.8_aarch64.deb",
+            found["libandroid-shmem"],
+        )
+        // 不在关注列表里的包不会被收进来
+        assertFalse(found.containsKey("zlib1g"))
+    }
+
+    @Test
+    fun parseDebFilenames_handlesCrlf_andDropsStanzaWithoutFilename() {
+        val crlf = "Package: proot\r\nVersion: 1\r\nFilename: pool/main/p/proot/proot_1_aarch64.deb\r\n\r\n" +
+            "Package: libtalloc\r\nVersion: 1\r\n\r\n" // 无 Filename → 丢弃
+        val found = RootfsManager.parseDebFilenames(crlf, listOf("proot", "libtalloc"))
+        assertEquals("pool/main/p/proot/proot_1_aarch64.deb", found["proot"])
+        assertFalse(found.containsKey("libtalloc"))
     }
 
     // ------------------------------------------------------------------
