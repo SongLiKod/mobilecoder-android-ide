@@ -22,9 +22,11 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FindReplace
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -32,6 +34,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -138,7 +141,7 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
         cursor - EditorController.offsetOfLine(text, cursorLine) + 1
     }
 
-    val matchCount = remember(text, find.query) { findMatchesOf(text, find.query).size }
+    val matchCount = remember(text, find.query) { findAll(text, find.query).size }
 
     Column(modifier = modifier.fillMaxSize()) {
         // ---------------- 工具行：文件树开关 + Tab + ⋮ 菜单 ----------------
@@ -194,6 +197,13 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                         searchOpen = true
                         EditorController.setSearchOpen(true)
                     },
+                    onFindReplace = {
+                        menuOpen = false
+                        if (activeTab != null && activeTab.editable) {
+                            EditorController.setFindOpen(true)
+                            EditorController.setReplaceOpen(true)
+                        }
+                    },
                     canSave = activeTab != null,
                     saveDirty = activeTab?.dirty == true,
                     onSave = {
@@ -223,6 +233,11 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                     onRedo = {
                         menuOpen = false
                         activeTab?.let { EditorController.redo(it.path) }
+                    },
+                    formatAvailable = activeTab?.editable == true,
+                    onFormatFile = {
+                        menuOpen = false
+                        EditorController.formatActiveFile()
                     },
                     onGotoLine = {
                         menuOpen = false
@@ -305,9 +320,17 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                         query = find.query,
                         total = matchCount,
                         current = find.index,
+                        replace = find.replace,
+                        replaceOpen = find.replaceOpen,
                         onQueryChange = { EditorController.setFindQuery(it) },
                         onNext = { EditorController.stepFind(1, matchCount) },
                         onPrev = { EditorController.stepFind(-1, matchCount) },
+                        onToggleReplace = {
+                            EditorController.setReplaceOpen(!find.replaceOpen)
+                        },
+                        onReplaceChange = { EditorController.setReplaceQuery(it) },
+                        onReplace = { EditorController.replaceCurrent() },
+                        onReplaceAll = { EditorController.replaceAllInActive() },
                         onClose = { EditorController.setFindOpen(false) },
                         modifier = Modifier.align(Alignment.TopCenter),
                     )
@@ -574,9 +597,13 @@ private fun EditorBody(
     }
 
     val highlighter = remember(colors, tab.language) { SyntaxHighlighter(colors) }
-    val matches = remember(text, find.query) { findMatchesOf(text, find.query) }
+    val matches = remember(text, find.query) { findAll(text, find.query) }
     val matchIndex = if (matches.isEmpty()) -1 else find.index.coerceIn(0, matches.size - 1)
-    val transformation = remember(highlighter, appliedFolds, matches, matchIndex, find.query) {
+    // 诊断（编译错误 + 结构级 lint）→ 正文偏移区间，供下划线标注
+    val diagnostics = remember(text, analysis.issues) { issueRangesOf(text, analysis.issues) }
+    val transformation = remember(
+        highlighter, appliedFolds, matches, matchIndex, find.query, diagnostics,
+    ) {
         EditorVisualTransformation(
             highlighter = highlighter,
             language = tab.language,
@@ -585,6 +612,7 @@ private fun EditorBody(
             findMatches = matches,
             findCurrent = matchIndex,
             findQueryLength = find.query.length,
+            diagnostics = diagnostics,
         )
     }
 
@@ -800,6 +828,11 @@ private fun ProjectSearchOverlay(
     val root by EditorController.projectRoot.collectAsStateWithLifecycle()
     // 检索范围（本地状态）：全项目 = 项目内容检索；当前文件 = 转入文件内查找
     var searchWholeProject by remember { mutableStateOf(true) }
+    // 跨文件替换：默认收起，展开后输入替换内容 → 二次确认 → 交给控制器写盘
+    var replaceOpen by rememberSaveable { mutableStateOf(false) }
+    var replaceText by rememberSaveable { mutableStateOf("") }
+    var confirmReplace by remember { mutableStateOf(false) }
+    val affectedFiles = remember(search.hits) { search.hits.mapTo(HashSet()) { it.file }.size }
 
     Column(
         modifier = modifier.background(MaterialTheme.colorScheme.background),
@@ -818,12 +851,56 @@ private fun ProjectSearchOverlay(
                 textStyle = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f),
             )
+            IconButton(
+                onClick = { replaceOpen = !replaceOpen },
+                enabled = search.query.isNotBlank(),
+            ) {
+                Icon(
+                    imageVector = if (replaceOpen) {
+                        Icons.Default.FindReplace
+                    } else {
+                        Icons.Default.SwapVert
+                    },
+                    contentDescription = if (replaceOpen) "收起替换" else "展开替换",
+                    tint = if (replaceOpen) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
             IconButton(onClick = onDismiss) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "关闭",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+
+        if (replaceOpen) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp)
+                    .padding(bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = replaceText,
+                    onValueChange = { replaceText = it },
+                    singleLine = true,
+                    placeholder = { Text("替换为") },
+                    textStyle = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    onClick = { confirmReplace = true },
+                    enabled = search.query.isNotBlank() && search.hits.isNotEmpty() && !search.running,
+                ) {
+                    Text("全部替换")
+                }
             }
         }
 
@@ -911,6 +988,22 @@ private fun ProjectSearchOverlay(
                 }
             }
         }
+    }
+    // 跨文件替换的二次确认：命中文件数为检索上限内的下界；未打开的文件直接写盘、不可撤销
+    if (confirmReplace) {
+        AppAlertDialog(
+            title = "全项目替换？",
+            message = "将把「${search.query}」全部替换为「$replaceText」，至少涉及 $affectedFiles 个文件。\n" +
+                "未在编辑器中打开的文件会直接写入磁盘，无法撤销，建议先提交 Git 或备份。",
+            confirmLabel = "替换",
+            destructive = true,
+            onConfirm = {
+                confirmReplace = false
+                onDismiss()
+                EditorController.replaceAllInProject(search.query, replaceText)
+            },
+            onDismiss = { confirmReplace = false },
+        )
     }
 }
 
@@ -1014,14 +1107,22 @@ private fun OpenFileOverlay(
 // 工具
 // ---------------------------------------------------------------------------
 
-/** 查找文件内全部命中下标（大小写不敏感，最多 5000 个）。 */
-internal fun findMatchesOf(text: String, query: String): List<Int> {
-    if (query.isEmpty() || text.isEmpty()) return emptyList()
-    val out = ArrayList<Int>()
-    var index = text.indexOf(query, 0, ignoreCase = true)
-    while (index >= 0 && out.size < 5000) {
-        out.add(index)
-        index = text.indexOf(query, index + query.length, true)
+/**
+ * 把诊断问题（[EditorIssue.line] / [column]，1 起始）折算成正文偏移区间：
+ * 从问题位置划到**行尾**——移动端不便精确到 token，整行标注更易辨认与点中；
+ * 列越界自动裁剪到行尾，行号越界直接跳过。
+ */
+internal fun issueRangesOf(text: String, issues: List<EditorIssue>): List<IssueRange> {
+    if (issues.isEmpty() || text.isEmpty()) return emptyList()
+    val out = ArrayList<IssueRange>(issues.size)
+    for (issue in issues) {
+        val lineStart = EditorController.offsetOfLine(text, issue.line)
+        if (lineStart > text.length) continue
+        val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
+        val start = (lineStart + (issue.column - 1).coerceAtLeast(0))
+            .coerceIn(lineStart, lineEnd.coerceAtLeast(lineStart))
+        val end = maxOf(lineEnd, start + 1).coerceAtMost(text.length)
+        if (end > start) out.add(IssueRange(start, end, issue.isError))
     }
-    return out
+    return out.sortedBy { it.start }
 }

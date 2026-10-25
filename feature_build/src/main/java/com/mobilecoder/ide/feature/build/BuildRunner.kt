@@ -84,6 +84,15 @@ object BuildRunner {
     private val _jumpTarget = MutableStateFlow<BuildError?>(null)
     val jumpTarget: StateFlow<BuildError?> = _jumpTarget.asStateFlow()
 
+    /**
+     * 跳转脉冲：每次 [requestJump] +1。
+     *
+     * StateFlow 对「相同值」去重，用户连点同一条错误不会再次发射，
+     * 消费方用 `combine(jumpTarget, jumpTick)` 才能每次都触发编辑器定位。
+     */
+    private val _jumpTick = MutableStateFlow(0)
+    val jumpTick: StateFlow<Int> = _jumpTick.asStateFlow()
+
     /** 本次构建产物。 */
     private val _artifacts = MutableStateFlow<List<BuildArtifact>>(emptyList())
     val artifacts: StateFlow<List<BuildArtifact>> = _artifacts.asStateFlow()
@@ -252,6 +261,7 @@ object BuildRunner {
     /** 记录跳转目标（错误行点击时调用，供编辑器联动）。 */
     fun requestJump(error: BuildError) {
         _jumpTarget.value = error
+        _jumpTick.value += 1
         if (error.file != null && error.inProject) {
             append("跳转目标：${error.location}", BuildLogLevel.INFO)
         }
@@ -788,6 +798,13 @@ object BuildRunner {
         }
     }
 
+    /** Kotlin 行首 `e:` / `w:` 判级：`w:`（含大写）为警告，其余为错误。 */
+    private fun isWarningLevel(line: String): Boolean = line.startsWith("w:", ignoreCase = true)
+
+    /** Java / 资源行里的 `警告` / `warning` 关键字 → 警告级（编辑器按黄色标注）。 */
+    private fun isWarningKeyword(kind: String): Boolean =
+        kind.equals("警告", ignoreCase = true) || kind.equals("warning", ignoreCase = true)
+
     /**
      * 错误定位（TECH 4.6 编译错误高亮）：
      *  - Kotlin：`e: file:///path/File.kt:12:5 message`、`w: file://…`
@@ -818,6 +835,7 @@ object BuildRunner {
                     line = m.groupValues[2].toIntOrNull(),
                     column = m.groupValues[3].toIntOrNull(),
                     raw = trimmed,
+                    warning = isWarningLevel(trimmed),
                 ),
             )
         }
@@ -829,6 +847,7 @@ object BuildRunner {
                         file = m.groupValues[1],
                         line = m.groupValues[2].toIntOrNull(),
                         raw = trimmed,
+                        warning = isWarningLevel(trimmed),
                     ),
                 )
             }
@@ -837,10 +856,11 @@ object BuildRunner {
             (RE_JAVA.find(trimmed) ?: RE_JAVA_REL.find(trimmed))?.let { m ->
                 found.add(
                     BuildError(
-                        message = m.groupValues[3].ifBlank { trimmed },
+                        message = m.groupValues[4].ifBlank { trimmed },
                         file = m.groupValues[1],
                         line = m.groupValues[2].toIntOrNull(),
                         raw = trimmed,
+                        warning = isWarningKeyword(m.groupValues[3]),
                     ),
                 )
             }
@@ -1167,13 +1187,13 @@ object BuildRunner {
     private val RE_KOTLIN_NO_COL =
         Regex("""^[eEwW]:\s*file://(/[^\s:]+):(\d+)\s*(.*)$""")
 
-    /** Java/资源：`/path/File.java:12: 错误: xxx` */
+    /** Java/资源：`/path/File.java:12: 错误: xxx`（组 3 是错误/警告关键字，决定判级）。 */
     private val RE_JAVA =
-        Regex("""^(/[^\s:]+\.(?:java|kt|kts|xml|gradle|properties)):(\d+):\s*(?:错误|error|警告|warning)\s*[:：]?\s*(.*)$""")
+        Regex("""^(/[^\s:]+\.(?:java|kt|kts|xml|gradle|properties)):(\d+):\s*((?:错误|error|警告|warning))\s*[:：]?\s*(.*)$""")
 
     /** 相对路径：`app/src/main/java/Foo.java:12: 错误: xxx` */
     private val RE_JAVA_REL =
-        Regex("""^([\w][\w./\-]*\.(?:java|kt|kts|xml|gradle|properties)):(\d+):\s*(?:错误|error|警告|warning)\s*[:：]?\s*(.*)$""")
+        Regex("""^([\w][\w./\-]*\.(?:java|kt|kts|xml|gradle|properties)):(\d+):\s*((?:错误|error|警告|warning))\s*[:：]?\s*(.*)$""")
 
     /** Gradle 任务失败：`Execution failed for task ':app:compileDebugKotlin'` */
     private val RE_TASK =

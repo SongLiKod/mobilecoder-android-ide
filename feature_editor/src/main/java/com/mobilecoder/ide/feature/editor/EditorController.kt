@@ -66,11 +66,18 @@ object EditorController {
         val previewPane: Boolean = true,
     )
 
-    /** 文件内查找状态。 */
+    /**
+     * 文件内查找状态。
+     *
+     * @param replaceOpen 替换行是否展开（默认收起，只查找不打扰）
+     * @param replace     替换内容（字面量，不支持正则 / 变量展开）
+     */
     data class FindState(
         val open: Boolean = false,
         val query: String = "",
         val index: Int = 0,
+        val replaceOpen: Boolean = false,
+        val replace: String = "",
     )
 
     /** 全局项目检索状态。 */
@@ -191,6 +198,13 @@ object EditorController {
     private var searchJob: Job? = null
     private var messageJob: Job? = null
 
+    // ---- 编译级诊断（构建页解析出的错误 → 编辑器标注）----
+    // 结构级 lint 与外部诊断分表存放、合并写回 analysis.issues，避免互相覆盖；
+    // 两张表都在 [diagLock] 下读写（scheduleAnalysis 与 setDiagnostics 可能并发）。
+    private val diagLock = Any()
+    private val structuralIssues = HashMap<String, List<EditorIssue>>()
+    private val diagnostics = HashMap<String, MutableList<EditorIssue>>()
+
     // ------------------------------------------------------------------
     // 初始化
     // ------------------------------------------------------------------
@@ -286,11 +300,19 @@ object EditorController {
     /** 「全部展开」整树重建的深度上限：真实源码路径远小于此值，同时给 IO 一个上界。 */
     private const val MAX_EXPAND_DEPTH = 32
 
+    /** 跨文件替换时单个文件的读盘上限（4MB；编辑器里已打开的文件不受此限）。 */
+    private const val MAX_REPLACE_BYTES = 4L * 1024 * 1024
+
     /** 绑定当前项目（切换项目时关闭旧项目 Tab 并重建文件树）。 */
     fun setProject(path: String) {
         if (path.isBlank() || _projectRoot.value == path) return
         _projectRoot.value = path
         _collapsedDirs.value = emptySet()
+        // 上一个项目的构建诊断不带到新项目（BuildRunner 侧也要等下次构建才刷新）
+        synchronized(diagLock) {
+            diagnostics.clear()
+            structuralIssues.clear()
+        }
         collapseByDefault = true // 新项目树默认全部折叠（refreshTree 消费）
         _tabs.value = _tabs.value.filter { it.path.startsWith(path) }
         histories.keys.retainAll(_tabs.value.mapTo(HashSet()) { it.path })
@@ -408,15 +430,15 @@ object EditorController {
     // 打开 / 关闭 / 保存
     // ------------------------------------------------------------------
 
-    /** 打开文件（[targetLine] > 0 时打开后跳转到该行）。 */
-    fun openFile(file: File, targetLine: Int = 0) {
+    /** 打开文件（[targetLine] > 1 时打开后跳到该行，[targetColumn] 定位列，1 起始）。 */
+    fun openFile(file: File, targetLine: Int = 0, targetColumn: Int = 1) {
         val path = file.absolutePath
         val existing = _tabs.value.firstOrNull { it.path == path }
         if (existing != null) {
             locateInTree(path)
             _activePath.value = path
             refreshHistory()
-            if (targetLine > 1) jumpTo(path, targetLine, 1)
+            if (targetLine > 1) jumpTo(path, targetLine, targetColumn)
             return
         }
         scope.launch {
@@ -439,7 +461,9 @@ object EditorController {
             } else {
                 file.name
             }
-            val offset = if (targetLine > 1) offsetOfLine(content, targetLine) else 0
+            val base = if (targetLine > 1) offsetOfLine(content, targetLine) else 0
+            val offset = (base + (targetColumn - 1).coerceAtLeast(0))
+                .coerceIn(0, content.length)
             val tab = EditorTab(
                 path = path,
                 name = file.name,
@@ -470,6 +494,7 @@ object EditorController {
         if (index < 0) return
         analysisJobs.remove(path)?.cancel()
         histories.remove(path)
+        synchronized(diagLock) { structuralIssues.remove(keyOf(path)) }
         if (_snippetSession.value?.path == path) endSnippetSession()
         if (_snippetPanel.value.open && _activePath.value == path) dismissSnippetPanel()
         val rest = _tabs.value.filterNot { it.path == path }
@@ -825,9 +850,11 @@ object EditorController {
     private fun scheduleAnalysis(path: String, text: String, language: Language) {
         analysisJobs.remove(path)?.cancel()
         if (text.isEmpty()) {
+            val merged = CodeAnalysisResult(mergedIssues(path, emptyList()), emptyList())
+            synchronized(diagLock) { structuralIssues[keyOf(path)] = emptyList() }
             _tabs.value = _tabs.value.map {
                 if (it.path == path) {
-                    it.copy(analysis = CodeAnalysisResult(emptyList(), emptyList()))
+                    it.copy(analysis = merged)
                 } else {
                     it
                 }
@@ -839,8 +866,11 @@ object EditorController {
             val result = withContext(Dispatchers.Default) { analyzeCode(text, language) }
             val tab = _tabs.value.firstOrNull { it.path == path } ?: return@launch
             if (tab.value.text != text) return@launch
+            // 结构级 lint 单独记账，合并交给 mergedIssues（诊断注入时还要再合并一次）
+            synchronized(diagLock) { structuralIssues[keyOf(path)] = result.issues }
+            val merged = result.copy(issues = mergedIssues(path, result.issues))
             _tabs.value = _tabs.value.map {
-                if (it.path == path) it.copy(analysis = result) else it
+                if (it.path == path) it.copy(analysis = merged) else it
             }
         }
     }
@@ -1185,6 +1215,148 @@ object EditorController {
         _find.value = _find.value.copy(index = index.coerceAtLeast(0))
     }
 
+    /** 展开 / 收起查找条下方的替换行（FindBar 左侧箭头）。 */
+    fun setReplaceOpen(open: Boolean) {
+        _find.value = _find.value.copy(replaceOpen = open)
+    }
+
+    fun setReplaceQuery(replacement: String) {
+        _find.value = _find.value.copy(replace = replacement)
+    }
+
+    /**
+     * 替换**当前命中**并落到下一处（逐个替换）。
+     *
+     * 与普通编辑同走 [onEditorValue]：进撤销历史、触发实时检查与自动保存。
+     */
+    fun replaceCurrent() {
+        val path = _activePath.value ?: return
+        val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        if (!tab.editable) return
+        val find = _find.value
+        if (find.query.isEmpty()) {
+            showMessage("请输入查找内容")
+            return
+        }
+        val matches = findAll(tab.value.text, find.query)
+        if (matches.isEmpty()) {
+            showMessage("无匹配")
+            return
+        }
+        val at = find.index.coerceIn(0, matches.size - 1)
+        val start = matches[at]
+        val next = replaceRange(tab.value.text, start, find.query.length, find.replace)
+        val caret = (start + find.replace.length).coerceIn(0, next.length)
+        onEditorValue(
+            path,
+            TextFieldValue(text = next, selection = TextRange(caret), composition = null),
+        )
+        // 命中列表随替换变化：把下标收在合法范围内（UI 的 total 会同步重算）
+        val after = findAll(next, find.query).size
+        _find.value = _find.value.copy(index = at.coerceAtMost((after - 1).coerceAtLeast(0)))
+    }
+
+    /** 当前文件**全部替换**，并提示替换处数。 */
+    fun replaceAllInActive() {
+        val path = _activePath.value ?: return
+        val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        if (!tab.editable) return
+        val find = _find.value
+        if (find.query.isEmpty()) {
+            showMessage("请输入查找内容")
+            return
+        }
+        val text = tab.value.text
+        val matches = findAll(text, find.query)
+        if (matches.isEmpty()) {
+            showMessage("无匹配")
+            return
+        }
+        val outcome = replaceAllIn(text, find.query, find.replace)
+        val caret = remapOffset(
+            matches = matches,
+            queryLength = find.query.length,
+            replacement = find.replace,
+            offset = tab.value.selection.start,
+        ).coerceAtMost(outcome.text.length)
+        onEditorValue(
+            path,
+            TextFieldValue(text = outcome.text, selection = TextRange(caret), composition = null),
+        )
+        _find.value = _find.value.copy(index = 0)
+        showMessage("已替换 ${outcome.count} 处")
+    }
+
+    /**
+     * **跨文件替换**（全项目检索面板的「全部替换」）。
+     *
+     * 遍历复用 [FileRepository.walkFiles]（与检索同口径：跳过隐藏项 / 构建产物、
+     * 深度 ≤ 10）；**编辑器里已打开的文件改缓冲区**（撤销历史 + 自动保存），
+     * 其余直接落盘 —— 双写会把未保存的编辑覆盖掉。大小写不敏感，与查找口径一致。
+     */
+    fun replaceAllInProject(query: String, replacement: String) {
+        val root = _projectRoot.value
+        if (root == null) {
+            showMessage("未打开项目")
+            return
+        }
+        if (query.isEmpty()) {
+            showMessage("请输入查找内容")
+            return
+        }
+        scope.launch {
+            val openTabs = _tabs.value.associateBy { keyOf(it.path) }
+            val pending = ArrayList<Pair<String, String>>()
+            var files = 0
+            var count = 0
+            withContext(Dispatchers.IO) {
+                FileRepository.walkFiles(File(root)) { file ->
+                    val open = openTabs[keyOf(file.path)]
+                    if (open != null) {
+                        val outcome = replaceAllIn(open.value.text, query, replacement)
+                        if (outcome.count > 0) {
+                            files++
+                            count += outcome.count
+                            pending.add(open.path to outcome.text)
+                        }
+                        return@walkFiles true
+                    }
+                    if (!FileRepository.isTextFile(file) || file.length() > MAX_REPLACE_BYTES) {
+                        return@walkFiles true
+                    }
+                    val text = runCatching { file.readText(Charsets.UTF_8) }.getOrNull()
+                        ?: return@walkFiles true
+                    val outcome = replaceAllIn(text, query, replacement)
+                    if (outcome.count > 0 && FileRepository.writeText(file, outcome.text)) {
+                        files++
+                        count += outcome.count
+                    }
+                    true
+                }
+            }
+            pending.forEach { (path, next) -> applyBufferReplace(path, next) }
+            if (files == 0) {
+                showMessage("没有找到「$query」")
+            } else {
+                showMessage("已在 $files 个文件中替换 $count 处")
+                setSearchQuery(query) // 内容已变，刷新检索命中
+            }
+        }
+    }
+
+    /** 跨文件替换时把改写后的正文套进打开中的缓冲区（单步撤销）。 */
+    private fun applyBufferReplace(path: String, next: String) {
+        val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        if (next == tab.value.text) return
+        recordHistory(path, tab.value, next.length - tab.value.text.length)
+        val caret = tab.value.selection.start.coerceIn(0, next.length)
+        _tabs.value = _tabs.value.map {
+            if (it.path == path) it.copy(value = TextFieldValue(next, TextRange(caret))) else it
+        }
+        scheduleAnalysis(path, next, tab.language)
+        scheduleAutoSave(path)
+    }
+
     fun setSearchOpen(open: Boolean) {
         _search.value = if (open) {
             _search.value.copy(open = true)
@@ -1218,6 +1390,119 @@ object EditorController {
     fun openHit(hit: FileRepository.SearchHit) {
         setSearchOpen(false)
         openFile(hit.file, targetLine = hit.line)
+    }
+
+    // ------------------------------------------------------------------
+    // 编译级诊断（构建页解析出的错误 → 编辑器标注）
+    // ------------------------------------------------------------------
+
+    /**
+     * 注入编译级诊断（AppRoot 收集 `BuildRunner.errors` 后调用；空列表即清空）。
+     *
+     * [items] 按文件归并与结构级 lint 合并后写回 [EditorTab.analysis]，于是
+     * **问题面板、行号槽、状态栏计数、正文下划线四处一次到位**——
+     * 与构建页「点击错误 → requestJump」构成「构建 → 定位 → 修改」闭环。
+     */
+    fun setDiagnostics(items: List<EditorDiagnostic>) {
+        scope.launch {
+            synchronized(diagLock) {
+                diagnostics.clear()
+                for (item in items) {
+                    if (item.file.isBlank()) continue
+                    val list = diagnostics.getOrPut(keyOf(item.file)) { ArrayList() }
+                    list.add(EditorIssue(item.line, item.column, item.message, item.isError))
+                }
+            }
+            remergeIssues()
+        }
+    }
+
+    /** 外部诊断到达后，把每个打开的 Tab 的 analysis.issues 重新合并一遍。 */
+    private fun remergeIssues() {
+        _tabs.value = _tabs.value.map { tab ->
+            val structural = synchronized(diagLock) { structuralIssues[keyOf(tab.path)] }
+                ?: tab.analysis.issues
+            val merged = tab.analysis.copy(issues = mergedIssues(tab.path, structural))
+            if (merged == tab.analysis) tab else tab.copy(analysis = merged)
+        }
+    }
+
+    /** 结构级 lint + 编译级诊断合并（按行列排序），统一供问题面板 / 行号槽 / 下划线消费。 */
+    private fun mergedIssues(path: String, structural: List<EditorIssue>): List<EditorIssue> {
+        val extra = synchronized(diagLock) { diagnostics[keyOf(path)] }
+        if (extra.isNullOrEmpty()) return structural
+        return (structural + extra).sortedWith(compareBy({ it.line }, { it.column }))
+    }
+
+    /**
+     * 路径归一（诊断表的键）：Android 上 `/data/data` → `/data/user/0` 是符号链接，
+     * 构建错误给的是 canonical 路径而 Tab 存的是 absolutePath，不归一就对不上。
+     */
+    private fun keyOf(path: String): String =
+        runCatching { File(path).canonicalPath }.getOrDefault(path)
+
+    // ------------------------------------------------------------------
+    // 格式化
+    // ------------------------------------------------------------------
+
+    /**
+     * 格式化当前文件：proot 内跑 ktfmt（Kotlin / Java）或 prettier（JS / TS / HTML …），
+     * 工具由软件市场安装，见 [CodeFormatter]。
+     *
+     * 走**落盘格式化**（ktfmt 不支持 stdin）：先把未保存的编辑保存掉 → 跑格式化器 →
+     * 读回新内容套进缓冲区。整个格式化记为**一步撤销**。
+     */
+    fun formatActiveFile() {
+        val context = appContext ?: return
+        val path = _activePath.value ?: return
+        val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        if (!tab.editable) {
+            showMessage("当前文件不可编辑")
+            return
+        }
+        val root = _projectRoot.value
+        if (root == null) {
+            showMessage("未打开项目")
+            return
+        }
+        scope.launch {
+            if (tab.dirty) saveNow(path, silent = true)
+            val result = withContext(Dispatchers.IO) {
+                CodeFormatter.format(context, File(root), path)
+            }
+            if (!result.ok) {
+                showMessage(result.message)
+                return@launch
+            }
+            val text = result.text
+            if (text == null) {
+                showMessage("格式化完成，但读回文件失败：${tab.name}")
+                return@launch
+            }
+            if (!result.changed) {
+                showMessage("已是标准格式，无需改动")
+                return@launch
+            }
+            applyFormatted(path, text)
+            showMessage("已格式化（${result.tool}）")
+        }
+    }
+
+    /** 格式化结果写回缓冲区：单步撤销 + 重新分析 + savedText 对齐磁盘。 */
+    private fun applyFormatted(path: String, text: String) {
+        val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        if (text == tab.value.text) return
+        recordHistory(path, tab.value, text.length - tab.value.text.length)
+        val caret = tab.value.selection.start.coerceIn(0, text.length)
+        _tabs.value = _tabs.value.map {
+            if (it.path == path) {
+                it.copy(value = TextFieldValue(text, TextRange(caret)), savedText = text)
+            } else {
+                it
+            }
+        }
+        scheduleAnalysis(path, text, tab.language)
+        refreshHistory()
     }
 
     // ------------------------------------------------------------------

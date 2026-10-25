@@ -78,9 +78,11 @@ MobileCoder = 代码编辑器 + 内置完整终端 + proot Linux 环境
 - **12 种语言语法高亮**：Kotlin / Java / XML / Gradle / 属性文件 / JSON / JavaScript / TypeScript / Dart / Shell / Markdown / 纯文本；自写单次线性扫描高亮器，>20 万字符自动跳过高亮保证输入流畅
 - 代码折叠（配对花括号 / 块注释，折叠偏移量正确映射光标）、行号槽、自动缩进（回车继承缩进、闭括号反缩进）
 - **代码大纲 / 方法导航**：Kotlin、Java、JS/TS、Dart、Markdown 标题、HTML 结构、JSON 键、Shell 函数等启发式符号提取
-- **静态代码检查**：括号配对错误、未闭合字符串 / 注释、Git 合并冲突标记检测（结构级 lint，非编译诊断）
+- **静态代码检查**：括号配对错误、未闭合字符串 / 注释、Git 合并冲突标记检测（结构级 lint，与构建诊断合并后进同一问题面板）
 - 多文件 Tab（脏标记 + 关闭确认）、文件树抽屉（新建 / 重命名 / 删除 / 长按拖拽移动；`.apk` 长按菜单可直接**安装**）
-- 文件内查找（5000 命中上限）+ **全项目内容检索**（点击命中跳转到行）
+- **查找 / 替换**：文件内查找（5000 命中上限）支持逐个替换与一键全部替换，**全项目替换**复用内容检索的遍历（执行前二次确认）；另有**全项目内容检索**（点击命中跳转到行）
+- **编译级诊断标注**：构建解析出的 Kotlin / Java / Gradle 错误与警告按文件注入编辑器，与结构级 lint 合并写回 Tab，问题面板 / 行号槽 / 状态栏计数 / 正文标注四处一次生效；正文按区间**下划线 + 红（错误）/ 黄（警告）底色**标注，构建页点「错误」自动开文件并跳到行列，构成**构建 → 定位 → 修改**闭环
+- **格式化当前文件**（⋮ 菜单）：proot 内调 `ktfmt`（`.kt` / `.kts` / `.java`）或 `prettier`（`.js` / `.ts` / `.html` / `.css` / `.json` / `.yaml` 等），工具由软件市场一键安装，缺失（或没装 JDK）时提示去对应页面安装；整个格式化记为**一步撤销**
 - **代码片段（Snippets）**：内置 60+ 常用模板（Kotlin / Java / JS / TS / HTML / Shell / 通用），编辑器里敲触发词（如 `fori`、`composable`）弹出候选面板，点按即插入并按 `$1…$9 / $0` 依次跳位；自定义片段增删改 + SAF JSON 导入导出，持久化在 `files/snippets/snippets.json`（同语言同触发词的自定义覆盖内置，删除即恢复）
 - 撤销 / 重做历史（每文件独立，连续打字 800ms 内合并为一步，容量 120 步）
 - 自动保存（800ms 防抖）、跳转行号、双指缩放字号（10–28）、每 Tab 独立滚动位置
@@ -142,13 +144,14 @@ MobileCoder = 代码编辑器 + 内置完整终端 + proot Linux 环境
 
 ### 2.7 软件市场（`feature_build/Market*`）
 
-安装到 proot guest 的一键工具目录，当前 11 项：
+安装到 proot guest 的一键工具目录，当前 13 项：
 
 | 类别 | 条目 |
 | --- | --- |
 | 二进制包 | Node.js 22.2.0（npm 包管理基础） |
-| npm | **opencode**（AI 编程 Agent CLI，依赖 Node.js） |
+| npm | **opencode**（AI 编程 Agent CLI，依赖 Node.js）、**Prettier**（JS / TS / HTML 格式化器，依赖 Node.js） |
 | apt（Ubuntu noble 源） | Git、Python 3、C/C++ 工具链（gcc/make）、tmux、ripgrep、fzf、jq、vim、fd |
+| jar 包 | **ktfmt 0.64**（Kotlin / Java 格式化器，Maven Central uber-jar + `/usr/local/bin` 包装脚本，需要 JDK 11+） |
 
 - 自包含 bash 脚本在 guest 内执行，阶段标记 + curl 进度解析出 0–100% 进度条，装完以「探测目标路径存在」复核，可取消、可复制脚本重跑
 
@@ -329,7 +332,8 @@ BuildRunner.start(BuildRequest{projectDir, variant, clean, extraTasks})
   5. 组装 cmd = "sh ./gradlew <tasks> --no-daemon --stacktrace"
   6. BuildForegroundService.startBuild() + WAKE_LOCK
   7. CliNative.exec(Proot.wrap(sh -c cmd), cwd, env, callback)
-  8. 日志行缓冲 → 分级(五级) → 4 条正则解析错误 → requestJump 跳编辑器
+  8. 日志行缓冲 → 分级(五级) → 4 条正则解析错误（区分 error / warning）→ 注入编辑器做下划线标注；
+     构建页点「错误」由 requestJump + jumpTick 触发 AppRoot 跳编辑器指定行列
   9. 内存看门狗 1.5s：≥90% 系统占用或超限 → SIGKILL
  10. 退出码 0 → scanApks(**/build/outputs/apk/**/*.apk) → 通知 + build_history + HistoryStore
 ```
@@ -596,8 +600,8 @@ App 内构建 / 软件市场需要一次性准备运行环境（在「环境中�
 5. **环境组件下载无哈希校验**
    JDK/Gradle/Node/rootfs 依靠结构探测 + exec 探针保证完整性；SHA-256 校验目前仅用于 App 自升级 APK。
 
-6. **编辑器无替换功能、无编译级诊断**
-   查找支持命中跳转但没有替换；代码检查是结构级 lint（括号/字符串/冲突标记），不做类型检查。编辑器为原生实现（技术文档早期方案中的 WebView/Monaco 未采用）。
+6. **编辑器无 LSP / 类型检查，诊断依赖一次构建**
+   文件内查找替换、全项目替换、编译级诊断标注、格式化都已具备；但诊断来自**构建日志的正则解析**（要先跑一次构建，不是实时语义分析），结构级 lint 仍只做括号 / 字符串 / 冲突标记。没有 LSP、没有增量语法与类型检查；格式化依赖软件市场安装的 `ktfmt` / `prettier`（缺失时菜单引导安装）。编辑器为原生实现（技术文档早期方案中的 WebView/Monaco 未采用）。
 
 7. **单仓库句柄**
    `git_jni.c` 全局只有一个 `g_repo`，Git 页与终端 `git` 共用一把锁串行执行；并行操作多个仓库不被支持。

@@ -14,6 +14,25 @@ data class EditorIssue(
     val isError: Boolean,
 )
 
+/**
+ * 编辑器外注入的**编译级诊断**（构建错误 / 警告）。
+ *
+ * AppRoot 把 `BuildRunner.errors` 映射成本类型，经 [EditorController.setDiagnostics]
+ * 注入后与结构级 [EditorIssue] 合并，进问题面板 / 行号槽 / 正文下划线。
+ *
+ * @param file 绝对路径（构建侧给的是 canonical 路径）
+ * @param line 1 起始行号
+ * @param column 1 起始列号
+ * @param isError false = 警告（`w:` / `warning:`），按黄色标注
+ */
+data class EditorDiagnostic(
+    val file: String,
+    val line: Int,
+    val column: Int,
+    val message: String,
+    val isError: Boolean,
+)
+
 /** 可折叠区域（1 起始行号，[endLine] > [startLine]，两端行保留可见）。 */
 data class FoldRegion(val startLine: Int, val endLine: Int)
 

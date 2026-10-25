@@ -28,17 +28,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.FindReplace
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material.icons.filled.UnfoldMore
@@ -563,70 +566,128 @@ fun GotoLineDialog(
 // 文件内查找条
 // ---------------------------------------------------------------------------
 
+/**
+ * 文件内查找条：上行查找（命中计数 / 上下个 / 关闭），下行可展开替换。
+ *
+ * 替换是**字面量**替换：命中按大小写不敏感匹配（与 [findAll] 同口径），
+ * 写入的替换文本原样保留。
+ */
 @Composable
 fun FindBar(
     query: String,
     total: Int,
     current: Int,
+    replace: String,
+    replaceOpen: Boolean,
     onQueryChange: (String) -> Unit,
     onNext: () -> Unit,
     onPrev: () -> Unit,
+    onToggleReplace: () -> Unit,
+    onReplaceChange: (String) -> Unit,
+    onReplace: () -> Unit,
+    onReplaceAll: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+            .background(MaterialTheme.colorScheme.surface),
     ) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = onQueryChange,
-            singleLine = true,
-            placeholder = { Text("在文件中查找", style = MaterialTheme.typography.bodySmall) },
-            textStyle = MaterialTheme.typography.bodyMedium,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { onNext() }),
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = if (query.isBlank()) {
-                ""
-            } else if (total > 0) {
-                "${current + 1}/$total"
-            } else {
-                "无结果"
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = if (total > 0) {
-                MaterialTheme.colorScheme.onSurface
-            } else {
-                MaterialTheme.colorScheme.error
-            },
-        )
-        IconButton(onClick = onPrev, enabled = total > 0) {
-            Icon(
-                imageVector = Icons.Default.KeyboardArrowUp,
-                contentDescription = "上一个",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                singleLine = true,
+                placeholder = { Text("在文件中查找", style = MaterialTheme.typography.bodySmall) },
+                textStyle = MaterialTheme.typography.bodyMedium,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { onNext() }),
+                modifier = Modifier.weight(1f),
             )
+            Text(
+                text = if (query.isBlank()) {
+                    ""
+                } else if (total > 0) {
+                    "${current + 1}/$total"
+                } else {
+                    "无结果"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = if (total > 0) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
+            )
+            IconButton(onClick = onPrev, enabled = total > 0) {
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowUp,
+                    contentDescription = "上一个",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onClick = onNext, enabled = total > 0) {
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = "下一个",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onClick = onToggleReplace) {
+                Icon(
+                    imageVector = if (replaceOpen) {
+                        Icons.Default.FindReplace
+                    } else {
+                        Icons.Default.SwapVert
+                    },
+                    contentDescription = if (replaceOpen) "收起替换" else "展开替换",
+                    tint = if (replaceOpen) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+            IconButton(onClick = onClose) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "关闭查找",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
-        IconButton(onClick = onNext, enabled = total > 0) {
-            Icon(
-                imageVector = Icons.Default.KeyboardArrowDown,
-                contentDescription = "下一个",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        IconButton(onClick = onClose) {
-            Icon(
-                imageVector = Icons.Default.Close,
-                contentDescription = "关闭查找",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+
+        if (replaceOpen) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp)
+                    .padding(bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                OutlinedTextField(
+                    value = replace,
+                    onValueChange = onReplaceChange,
+                    singleLine = true,
+                    placeholder = { Text("替换为", style = MaterialTheme.typography.bodySmall) },
+                    textStyle = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onReplace, enabled = total > 0) {
+                    Text("替换")
+                }
+                TextButton(onClick = onReplaceAll, enabled = total > 0) {
+                    Text("全部替换")
+                }
+            }
         }
     }
 }
@@ -644,6 +705,7 @@ fun EditorOptionsMenu(
     canRedo: Boolean,
     onOpenFile: () -> Unit,
     onSearch: () -> Unit,
+    onFindReplace: () -> Unit,
     canSave: Boolean,
     saveDirty: Boolean,
     onSave: () -> Unit,
@@ -654,6 +716,9 @@ fun EditorOptionsMenu(
     previewOpen: Boolean = false,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
+    /** 格式化可用（有可编辑的活动文件）；false 时置灰。 */
+    formatAvailable: Boolean = false,
+    onFormatFile: () -> Unit = {},
     onGotoLine: () -> Unit,
     onOpenOutline: () -> Unit,
     onOpenSnippets: () -> Unit = {},
@@ -679,6 +744,13 @@ fun EditorOptionsMenu(
                 Icon(Icons.Default.Search, contentDescription = null)
             },
             onClick = onSearch,
+        )
+        DropdownMenuItem(
+            text = { Text("查找 / 替换") },
+            leadingIcon = {
+                Icon(Icons.Default.FindReplace, contentDescription = null)
+            },
+            onClick = onFindReplace,
         )
         DropdownMenuItem(
             text = {
@@ -738,6 +810,14 @@ fun EditorOptionsMenu(
             },
             enabled = canRedo,
             onClick = onRedo,
+        )
+        DropdownMenuItem(
+            text = { Text("格式化当前文件") },
+            leadingIcon = {
+                Icon(Icons.Default.AutoFixHigh, contentDescription = null)
+            },
+            enabled = formatAvailable,
+            onClick = onFormatFile,
         )
         DropdownMenuItem(
             text = { Text("跳转到行…") },

@@ -5,9 +5,19 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 
 /**
- * 编辑器文本变换：语法高亮 + 文件内查找命中高亮 + 代码折叠。
+ * 正文里的一段诊断标注（原坐标系，即未折叠 / 未变换的字符偏移）。
+ *
+ * @param start 起始偏移（含）
+ * @param end 结束偏移（不含）
+ * @param isError true=错误（红底），false=警告（黄底）
+ */
+data class IssueRange(val start: Int, val end: Int, val isError: Boolean)
+
+/**
+ * 编辑器文本变换：语法高亮 + 文件内查找命中高亮 + 诊断标注 + 代码折叠。
  *
  * 折叠通过删减原文区间实现（区间内文本在渲染时隐藏，替换为「… n 行」标记行），
  * 并提供原文 ↔ 渲染文本的光标映射，保证选区 / 光标 / 点击定位正确。
@@ -20,6 +30,8 @@ class EditorVisualTransformation(
     private val findMatches: List<Int>,
     private val findCurrent: Int,
     private val findQueryLength: Int,
+    /** 诊断区间（编译错误 / 警告 + 结构级 lint，原坐标系），下划线 + 底色标注。 */
+    private val diagnostics: List<IssueRange> = emptyList(),
 ) : VisualTransformation {
 
     override fun filter(text: AnnotatedString): TransformedText {
@@ -42,6 +54,29 @@ class EditorVisualTransformation(
                         end,
                     )
                 }
+            }
+            annotated = builder.toAnnotatedString()
+        }
+
+        // 诊断标注：错误 / 警告各按底色区分，配下划线模拟 IDE 的波浪线
+        if (diagnostics.isNotEmpty() && diagnostics.size <= MAX_DIAGNOSTIC_PAINT) {
+            val builder = AnnotatedString.Builder(annotated)
+            for (range in diagnostics) {
+                val start = range.start.coerceIn(0, annotated.length)
+                val end = range.end.coerceIn(start, annotated.length)
+                if (end <= start) continue
+                builder.addStyle(
+                    SpanStyle(
+                        textDecoration = TextDecoration.Underline,
+                        background = if (range.isError) {
+                            colors.error.copy(alpha = 0.18f)
+                        } else {
+                            colors.warning.copy(alpha = 0.20f)
+                        },
+                    ),
+                    start,
+                    end,
+                )
             }
             annotated = builder.toAnnotatedString()
         }
@@ -75,6 +110,9 @@ class EditorVisualTransformation(
 
     companion object {
         private const val MAX_FIND_PAINT = 2000
+
+        /** 诊断条数上限（[CodeAnalysis] 的 MAX_ISSUES 也是 200，这里留足余量）。 */
+        private const val MAX_DIAGNOSTIC_PAINT = 400
     }
 }
 

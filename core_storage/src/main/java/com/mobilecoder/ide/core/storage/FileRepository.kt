@@ -251,35 +251,59 @@ object FileRepository {
         }.getOrNull()
     }
 
-    /** 全文检索（文件名 + 内容），返回「文件路径 : 行号 : 行内容」。 */
+    /**
+     * 全文检索（文件名 + 内容），返回「文件路径 : 行号 : 行内容」。
+     *
+     * 遍历交给 [walkFiles]（同口径：跳过隐藏项与忽略名单、深度 ≤ 10）。
+     */
     fun search(root: File, query: String, limit: Int = 200): List<SearchHit> {
         if (query.isBlank()) return emptyList()
         val needle = query.lowercase()
         val hits = ArrayList<SearchHit>()
+        walkFiles(root) { file ->
+            if (hits.size >= limit) return@walkFiles false
+            if (file.name.lowercase().contains(needle)) {
+                hits.add(SearchHit(file, 0, file.name))
+            }
+            if (isTextFile(file)) {
+                val lines = runCatching { file.readLines(Charsets.UTF_8) }.getOrDefault(emptyList())
+                for ((index, line) in lines.withIndex()) {
+                    if (line.lowercase().contains(needle)) {
+                        hits.add(SearchHit(file, index + 1, line.trim().take(200)))
+                        if (hits.size >= limit) break
+                    }
+                }
+            }
+            hits.size < limit
+        }
+        return hits
+    }
+
+    /**
+     * 深度优先遍历 [root] 下的文件（目录优先 + 名称不区分大小写排序，与
+     * [listChildren] 同序）；跳过隐藏项（`.` 开头）与忽略名单（[isIgnored]），
+     * 深度上限 10 层 —— **[search]、跨文件替换等共用的遍历口径**。
+     *
+     * @param onFile 逐个文件回调；返回 `false` 即整体停止（命中数达上限时提前收工）
+     */
+    fun walkFiles(root: File, onFile: (File) -> Boolean) {
+        var stopped = false
         fun walk(dir: File, depth: Int) {
-            if (hits.size >= limit || depth > 10) return
+            if (stopped || depth > 10) return
             for (child in listChildren(dir, showHidden = false)) {
-                if (hits.size >= limit) return
+                if (stopped) return
                 if (isIgnored(child.name, childDepth = depth)) continue
                 if (child.isDirectory) {
                     walk(child.file, depth + 1)
                     continue
                 }
-                if (child.name.lowercase().contains(needle)) {
-                    hits.add(SearchHit(child.file, 0, child.name))
-                }
-                if (!isTextFile(child.file)) continue
-                val lines = runCatching { child.file.readLines(Charsets.UTF_8) }.getOrDefault(emptyList())
-                for ((index, line) in lines.withIndex()) {
-                    if (line.lowercase().contains(needle)) {
-                        hits.add(SearchHit(child.file, index + 1, line.trim().take(200)))
-                        if (hits.size >= limit) break
-                    }
+                if (!onFile(child.file)) {
+                    stopped = true
+                    return
                 }
             }
         }
         walk(root, 1)
-        return hits
     }
 
     data class SearchHit(val file: File, val line: Int, val preview: String)

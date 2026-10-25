@@ -3,12 +3,9 @@ package com.mobilecoder.ide.feature.ai
 import android.content.Context
 import com.mobilecoder.ide.core.common.cli.CliEngine
 import com.mobilecoder.ide.core.common.linux.Proot
-import com.mobilecoder.ide.core.nativebridge.CliCallback
-import com.mobilecoder.ide.core.nativebridge.CliNative
+import com.mobilecoder.ide.core.common.linux.ProotRunner
 import com.mobilecoder.ide.core.storage.AppStorage
 import java.io.File
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * `run_command` / `git_*` 工具的执行通道（Issue 6：打通「改代码 → 跑命令 → 看结果」）。
@@ -19,8 +16,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  *     直接交给 [CliEngine.runCaptured]——与终端里的 `git …` 共用**同一把引擎锁**
  *     与 [com.mobilecoder.ide.feature.git.GitController] 的仓库句柄，天然互斥、无死锁
  *     （两处的加锁顺序都是「引擎锁 → Git 锁」）；
- *  2. **其余命令**：`/bin/sh -c <command>` 经 [Proot.wrap] 包进 proot 执行，
- *     复用 [CliNative.exec]（与构建页 / 预览页同一条子进程链路），
+ *  2. **其余命令**：交给共享执行通道 [ProotRunner.run]（`/bin/sh -c <command>`
+ *     经 [Proot.wrap] 包进 proot，复用 `CliNative.exec`，与编辑器格式化 / 预览
+ *     同一条子进程链路），
  *     stdout / stderr 分开捕获，超时或取消时 SIGKILL 整个进程组。
  *
  * 为什么不直接跑 shell：Android 设备上没有 `git` 可执行文件（rootfs 默认也没有），
@@ -98,13 +96,15 @@ object AiCommandRunner {
                 timedOut = false,
                 inProcess = false,
             )
-        val workdir = cwd.takeIf { it.isDirectory } ?: return AiCommandOutput(
-            exitCode = -1,
-            stdout = "",
-            stderr = "工作目录不存在：${cwd.absolutePath}",
-            timedOut = false,
-            inProcess = false,
-        )
+        if (!cwd.isDirectory) {
+            return AiCommandOutput(
+                exitCode = -1,
+                stdout = "",
+                stderr = "工作目录不存在：${cwd.absolutePath}",
+                timedOut = false,
+                inProcess = false,
+            )
+        }
         val hint = if (linuxReady()) {
             null
         } else {
@@ -112,55 +112,23 @@ object AiCommandRunner {
                 "请到「构建环境」页安装后再试"
         }
 
-        val argv = Proot.wrap(context, arrayOf("/bin/sh", "-c", command), workdir.absolutePath)
-        val stdout = StringBuilder()
-        val stderr = StringBuilder()
-        val exit = CompletableDeferred<Int>()
-        val callback = object : CliCallback {
-            override fun onOutput(pid: Int, stream: Int, data: ByteArray?) {
-                if (data == null || data.isEmpty()) return
-                val text = String(data, Charsets.UTF_8)
-                val buffer = if (stream == 2) stderr else stdout
-                synchronized(buffer) {
-                    if (buffer.length < MAX_STREAM_CHARS) {
-                        buffer.append(text, 0, text.length.coerceAtMost(MAX_STREAM_CHARS - buffer.length))
-                    }
-                }
-            }
-
-            override fun onExit(pid: Int, code: Int) {
-                exit.complete(code)
-            }
-        }
-
-        val env = envArray(context)
-        runCatching { File(context.cacheDir, "tmp").mkdirs() }
-        var pid = -1
-        try {
-            pid = CliNative.exec(argv, workdir.absolutePath, env, callback)
-            if (pid < 0) {
-                return AiCommandOutput(
-                    exitCode = -1,
-                    stdout = "",
-                    stderr = "无法启动命令进程：并发进程数已达上限或系统拒绝 fork，请稍后重试",
-                    timedOut = false,
-                    inProcess = false,
-                    hint = hint,
-                )
-            }
-            val code = if (timeoutMs > 0) withTimeoutOrNull(timeoutMs) { exit.await() } else exit.await()
-            val out = synchronized(stdout) { stdout.toString() }
-            val err = synchronized(stderr) { stderr.toString() }
-            if (code == null) {
-                return AiCommandOutput(124, out, err, timedOut = true, inProcess = false, hint = hint)
-            }
-            return AiCommandOutput(code, out, err, timedOut = false, inProcess = false, hint = hint)
-        } finally {
-            // 超时或协程被取消（用户点了停止）→ 子进程与 proot 一并回收，绝不留孤儿
-            if (pid > 0 && !exit.isCompleted) {
-                runCatching { CliNative.killProcess(pid, 9) }
-            }
-        }
+        // 起进程 / 收流 / 超时回收全部交给共享执行通道（与格式化、预览同一条链路）
+        val result = ProotRunner.run(
+            context = context,
+            command = command,
+            cwd = cwd,
+            env = envArray(context),
+            timeoutMs = timeoutMs,
+            maxChars = MAX_STREAM_CHARS,
+        )
+        return AiCommandOutput(
+            exitCode = result.exitCode,
+            stdout = result.stdout,
+            stderr = result.stderr,
+            timedOut = result.timedOut,
+            inProcess = false,
+            hint = hint,
+        )
     }
 
     // ------------------------------------------------------------------
@@ -172,26 +140,18 @@ object AiCommandRunner {
      * 因此这里必须把 PATH / HOME / JAVA_HOME 等一次给全）。
      */
     private suspend fun envArray(context: Context): Array<String> {
-        val files = context.filesDir
-        val sdk = File(files, "sdk")
-        val entries = buildList {
-            add("HOME=${files.absolutePath}")
-            add("TMPDIR=${File(context.cacheDir, "tmp").absolutePath}")
-            add("PATH=${Proot.pathFor(File(files, "bin").absolutePath)}")
-            add("LANG=C.UTF-8")
-            add("LC_ALL=C.UTF-8")
-            add("SHELL=/system/bin/sh")
-            resolveJavaHome(context)?.let { add("JAVA_HOME=$it") }
-            add("ANDROID_HOME=${sdk.absolutePath}")
-            add("ANDROID_SDK_ROOT=${sdk.absolutePath}")
-            add("GRADLE_USER_HOME=${File(files, ".gradle").absolutePath}")
-            add("MOBILECODER_HOME=${files.absolutePath}")
-            add("JAVA_OPTS=-Dfile.encoding=UTF-8")
-            add("GRADLE_OPTS=-Dorg.gradle.daemon=false")
-            add("NODE_OPTIONS=--max-old-space-size=1536")
+        val sdk = File(context.filesDir, "sdk")
+        val extra = buildMap {
+            resolveJavaHome(context)?.let { put("JAVA_HOME", it) }
+            put("ANDROID_HOME", sdk.absolutePath)
+            put("ANDROID_SDK_ROOT", sdk.absolutePath)
+            put("GRADLE_USER_HOME", File(context.filesDir, ".gradle").absolutePath)
+            put("MOBILECODER_HOME", context.filesDir.absolutePath)
+            put("JAVA_OPTS", "-Dfile.encoding=UTF-8")
+            put("GRADLE_OPTS", "-Dorg.gradle.daemon=false")
+            put("NODE_OPTIONS", "--max-old-space-size=1536")
         }
-        // proot 执行通道所需变量（Linux 环境未就绪时为空）
-        return entries.toTypedArray<String>() + Proot.envEntries(context)
+        return ProotRunner.baseEnv(context, extra = extra)
     }
 
     /**

@@ -251,9 +251,12 @@ class MarketInstallerTest {
     }
 
     @Test
-    fun catalog_nodeOpencodeAndNineAptTools() {
+    fun catalog_nodeOpencodeNineAptToolsAndTwoFormatters() {
         assertEquals(
-            listOf("nodejs", "opencode", "git", "python", "buildtools", "tmux", "ripgrep", "fzf", "jq", "vim", "fd"),
+            listOf(
+                "nodejs", "opencode", "git", "python", "buildtools", "tmux",
+                "ripgrep", "fzf", "jq", "vim", "fd", "ktfmt", "prettier",
+            ),
             MarketInstaller.items.map { it.id },
         )
         val node = MarketInstaller.items.first { it.id == "nodejs" }
@@ -265,6 +268,15 @@ class MarketInstallerTest {
         assertEquals("latest", opencode.version)
         assertEquals("usr/local/bin/opencode", opencode.probe)
         assertEquals("latest", MarketInstaller.versionLabel(opencode.version))
+
+        // 格式化器条目：探测点与脚本落位一致，版本徽标分别显示 v0.64 / latest
+        val ktfmt = MarketInstaller.items.first { it.id == "ktfmt" }
+        assertEquals(MarketInstaller.KTFMT_VERSION, ktfmt.version)
+        assertEquals("usr/local/bin/ktfmt", ktfmt.probe)
+        assertEquals("v${MarketInstaller.KTFMT_VERSION}", MarketInstaller.versionLabel(ktfmt.version))
+        val prettier = MarketInstaller.items.first { it.id == "prettier" }
+        assertEquals("latest", prettier.version)
+        assertEquals("usr/local/bin/prettier", prettier.probe)
 
         // 探测点均为 rootfs 下真实路径约定；文案非空；apt 条目徽标显示 apt（版本随源）
         MarketInstaller.items.forEach { item ->
@@ -292,9 +304,10 @@ class MarketInstallerTest {
         MarketInstaller.aptSpecs.keys.forEach { id ->
             assertTrue("orphan apt spec: $id", MarketInstaller.items.any { it.id == id })
         }
-        // 除 nodejs/opencode 外全部走 apt 路由（不会误落到 node 下载脚本）
+        // 除 nodejs/opencode/ktfmt/prettier 外全部走 apt 路由（不会误落到 node 下载脚本）
+        val scripted = setOf("nodejs", "opencode", "ktfmt", "prettier")
         MarketInstaller.items
-            .filter { it.id != "nodejs" && it.id != "opencode" }
+            .filter { it.id !in scripted }
             .forEach { item ->
                 val spec = MarketInstaller.aptSpecs[item.id] ?: error("missing apt spec: ${item.id}")
                 val script = MarketInstaller.scriptFor(item, "/d/tmp", "/d/work", "arm64")
@@ -369,6 +382,88 @@ class MarketInstallerTest {
         val opencodeScript = MarketInstaller.scriptFor(opencode, "/d/tmp", "/d/work", "arm64")
         assertTrue(opencodeScript.contains("install -g @opencode/cli"))
         assertFalse(opencodeScript.contains("nodejs.org"))
+
+        // 格式化器条目各自路由，不会误落到 node 下载 / npm opencode 脚本
+        val ktfmt = MarketInstaller.items.first { it.id == "ktfmt" }
+        val ktfmtScript = MarketInstaller.scriptFor(ktfmt, "/d/tmp", "/d/work", "arm64")
+        assertEquals(MarketInstaller.ktfmtScript(), ktfmtScript)
+        assertFalse(ktfmtScript.contains("nodejs.org"))
+        assertFalse(ktfmtScript.contains("@opencode/cli"))
+        assertFalse(ktfmtScript.contains("apt install -y git"))
+
+        val prettier = MarketInstaller.items.first { it.id == "prettier" }
+        val prettierScript = MarketInstaller.scriptFor(prettier, "/d/tmp", "/d/work", "arm64")
+        assertEquals(MarketInstaller.prettierScript(), prettierScript)
+        assertFalse(prettierScript.contains("nodejs.org"))
+    }
+
+    // ---- ktfmt / prettier：格式化器安装脚本 ----
+
+    @Test
+    fun ktfmtScript_requiresJava_thenDownloadsUberJarAndWritesWrapper() {
+        val script = MarketInstaller.ktfmtScript()
+        assertTrue(script.startsWith("set -e"))
+        // Java 前置检查：$JAVA_HOME → command -v java → SDK 目录 glob，缺失即引导去环境中心
+        assertTrue(script.contains("\$JAVA_HOME"))
+        assertTrue(script.contains("command -v java"))
+        assertTrue(script.contains("未找到 Java 运行时：ktfmt 需要 JDK 11+，请先到「环境中心」安装 JDK"))
+        assertTrue(script.contains("exit 3"))
+        // 官方源优先，失败回退阿里云镜像（均为带进度条的 curl）
+        assertTrue(script.contains(MarketInstaller.KTFMT_URL))
+        assertTrue(script.contains("|| curl -# -fL -k '${MarketInstaller.KTFMT_MIRROR_URL}'"))
+        // 包装脚本落位与探测点一致；heredoc 用引号定界，$JAVA_HOME 运行时才展开
+        assertTrue(script.contains("cat > /usr/local/bin/ktfmt <<'MC_KTFMT'"))
+        assertTrue(script.contains("exec \"\$J\" -jar /opt/ktfmt/ktfmt.jar \"\$@\""))
+        assertTrue(script.contains("chmod 755 /usr/local/bin/ktfmt"))
+        // 端到端校验：临时 .kt 文件真的跑一遍格式化
+        assertTrue(script.contains("ktfmt-check.kt"))
+        assertTrue(script.contains("/usr/local/bin/ktfmt \"\$KTCHK\" >/dev/null"))
+    }
+
+    @Test
+    fun ktfmtScript_markers_mapToProgress() {
+        val markers = MarketInstaller.ktfmtScript().lines()
+            .filter { it.startsWith("echo '") }
+            .map { it.removePrefix("echo '").removeSuffix("'").removePrefix(MarketInstaller.STAGE_PREFIX) }
+        assertEquals(
+            listOf(
+                "检查 Java 运行环境",
+                "安装依赖（apt：ca-certificates / curl）",
+                "下载 ktfmt ${MarketInstaller.KTFMT_VERSION}（Maven Central，失败回退阿里云镜像）",
+                "写入 /usr/local/bin/ktfmt",
+                "校验安装",
+                "完成",
+            ),
+            markers,
+        )
+        assertEquals(
+            listOf(0.10f, -1f, 0.35f, 0.92f, 0.96f, 1f),
+            markers.map { MarketInstaller.stageProgress(it) },
+        )
+    }
+
+    @Test
+    fun prettierScript_isNpmGlobal_withMirrorFallbackAndProbeVerify() {
+        val script = MarketInstaller.prettierScript()
+        assertTrue(script.startsWith("set -e"))
+        // npm 缺失 → 明确提示并失败（引导先装 Node.js），与 opencode 同口径
+        assertTrue(script.contains("未找到 npm：请先在软件市场安装 Node.js"))
+        assertTrue(script.contains("exit 3"))
+        // 市场 npm 优先（全局前缀 /usr/local），官方源失败回退 npmmirror
+        assertTrue(script.contains("/usr/local/bin/npm install -g prettier ||"))
+        assertTrue(script.contains("    npm install -g prettier ||"))
+        assertTrue(script.contains("--registry=https://registry.npmmirror.com"))
+        // 校验落点与 /usr/local/bin/prettier 探测点一致
+        assertTrue(script.contains("/usr/local/bin/prettier --version"))
+
+        val markers = script.lines()
+            .filter { it.startsWith("echo '") }
+            .map { it.removePrefix("echo '").removeSuffix("'").removePrefix(MarketInstaller.STAGE_PREFIX) }
+        assertEquals(
+            listOf("检查 Node.js 运行环境", "安装 prettier（npm install -g）", "校验安装", "完成"),
+            markers,
+        )
+        assertEquals(listOf(0.10f, -1f, 0.96f, 1f), markers.map { MarketInstaller.stageProgress(it) })
     }
 
     @Test
@@ -390,6 +485,31 @@ class MarketInstallerTest {
             MarketInstaller.nodeScript("/d/tmp", "/d/work", "22.2.0", "arm64")
                 .contains("echo '${MarketInstaller.STAGE_PREFIX}完成'"),
         )
+    }
+
+    @Test
+    fun installScripts_areBashParseable() {
+        // 有 bash 才校验（CI / Linux / macOS 都有；Windows 开发机上自动跳过）
+        org.junit.Assume.assumeTrue(
+            "环境无 bash，跳过语法校验",
+            runCatching {
+                ProcessBuilder("bash", "-c", "command -v bash").start().waitFor() == 0
+            }.getOrDefault(false),
+        )
+        val scripts = listOf(
+            "nodejs" to MarketInstaller.nodeScript("/d/tmp", "/d/work", "22.2.0", "arm64"),
+            "opencode" to MarketInstaller.opencodeScript(),
+            "ktfmt" to MarketInstaller.ktfmtScript(),
+            "prettier" to MarketInstaller.prettierScript(),
+            "apt" to MarketInstaller.aptScript(MarketInstaller.AptSpec(listOf("git"), listOf("git --version"))),
+        )
+        for ((name, script) in scripts) {
+            val process = ProcessBuilder("bash", "-n").start()
+            process.outputStream.use { it.write(script.toByteArray(Charsets.UTF_8)) }
+            val code = process.waitFor()
+            val err = process.errorStream.readBytes().toString(Charsets.UTF_8)
+            assertEquals("$name 脚本 bash -n 解析失败：$err", 0, code)
+        }
     }
 
     private companion object {

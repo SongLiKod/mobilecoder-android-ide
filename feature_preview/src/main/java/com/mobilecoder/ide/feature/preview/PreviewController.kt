@@ -3,7 +3,7 @@ package com.mobilecoder.ide.feature.preview
 import android.content.Context
 import android.net.Uri
 import com.mobilecoder.ide.core.common.linux.Proot
-import com.mobilecoder.ide.core.nativebridge.CliCallback
+import com.mobilecoder.ide.core.common.linux.ProotRunner
 import com.mobilecoder.ide.core.nativebridge.CliNative
 import com.mobilecoder.ide.feature.build.BuildEnvironment
 import java.io.File
@@ -184,7 +184,7 @@ object PreviewController {
      * `npm run dev`，从输出里识别到回环地址后把 [PreviewState.status] 置为
      * [ServerStatus.RUNNING]，WebView 即可加载。
      *
-     * 复用构建页同一套执行链路：`Proot.wrap` + `CliNative.exec` + 完整 env 数组。
+     * 复用共享执行通道 [ProotRunner]：`Proot.wrap` + `CliNative.exec` + 完整 env 数组。
      */
     fun startDevServer() {
         val context = appContext ?: return
@@ -274,9 +274,15 @@ object PreviewController {
         BuildEnvironment.tmpDir(context).mkdirs()
         BuildEnvironment.gradleUserHome(context).mkdirs()
 
-        // ---- 3) 起进程（Linux 就绪 → 整条命令在 proot 内执行）----
-        val argv = Proot.wrap(context, arrayOf("/bin/sh", "-c", cmd), projectDir.absolutePath)
-        val newPid = CliNative.exec(argv, projectDir.absolutePath, envArray, callback())
+        // ---- 3) 起进程（Linux 就绪 → 整条命令在 proot 内执行，通道见 ProotRunner）----
+        val newPid = ProotRunner.spawn(
+            context = context,
+            command = cmd,
+            cwd = projectDir,
+            env = envArray,
+            onChunk = { _, text -> feed(text) },
+            onExit = { exitedPid, code -> handleExit(exitedPid, code) },
+        )
         if (newPid < 0) {
             return fail("无法启动 dev server：并发进程数已达上限或系统拒绝 fork，请稍后重试")
         }
@@ -302,23 +308,20 @@ object PreviewController {
     }
 
     /**
-     * dev server 子进程的环境变量（[CliNative.exec] 的 envArray 会**整体替换**
-     * 子进程环境，必须给全；与 BuildRunner.buildEnvArray 同源，去掉 Gradle 专用项）。
+     * dev server 子进程的环境变量（[ProotRunner.baseEnv] 组装，[CliNative.exec]
+     * 的 envArr 会**整体替换**子进程环境，必须给全；与 BuildRunner.buildEnvArray
+     * 同源，去掉 Gradle 专用项）。
      */
-    private fun devEnvArray(context: Context): Array<String> {
-        val files = context.filesDir
-        return buildList {
-            add("HOME=${files.absolutePath}")
-            add("TMPDIR=${BuildEnvironment.tmpDir(context).absolutePath}")
-            // guest 标准路径排在 bionic 前：proot 内拿到 Linux 工具链
-            add("PATH=${Proot.pathFor(BuildEnvironment.binDir(context).absolutePath)}")
-            add("LANG=C.UTF-8")
-            add("LC_ALL=C.UTF-8")
-            add("SHELL=/system/bin/sh")
-            add("MOBILECODER_HOME=${files.absolutePath}")
-            add("NODE_ENV=development")
-        }.toTypedArray<String>() + Proot.envEntries(context)
-    }
+    private fun devEnvArray(context: Context): Array<String> = ProotRunner.baseEnv(
+        context = context,
+        // guest 标准路径排在 bionic 前：proot 内拿到 Linux 工具链
+        path = Proot.pathFor(BuildEnvironment.binDir(context).absolutePath),
+        tmpDir = BuildEnvironment.tmpDir(context),
+        extra = mapOf(
+            "MOBILECODER_HOME" to context.filesDir.absolutePath,
+            "NODE_ENV" to "development",
+        ),
+    )
 
     private fun fail(message: String) {
         appendLog(message)
@@ -331,30 +334,23 @@ object PreviewController {
     // 子进程回调（读线程 → 状态流）
     // ------------------------------------------------------------------
 
-    private fun callback(): CliCallback = object : CliCallback {
-
-        override fun onOutput(pid: Int, stream: Int, data: ByteArray?) {
-            if (data == null || data.isEmpty()) return
-            feed(String(data, Charsets.UTF_8))
-        }
-
-        override fun onExit(pid: Int, code: Int) {
-            flushLine()
-            if (pid == this@PreviewController.pid) this@PreviewController.pid = -1
-            val current = _state.value
-            if (current.status == ServerStatus.STOPPED) return
-            if (sawUrl && current.status == ServerStatus.RUNNING) {
-                // 用户手动停止 / 页面崩了：回到 STOPPED，让「启动预览」按钮重新出现
-                _state.update {
-                    it.copy(status = ServerStatus.STOPPED, serverUrl = "", message = "")
-                }
-                return
+    /** 子进程退出（[ProotRunner.spawn] 的 onExit）：收尾切行 + 按当前状态收尾。 */
+    private fun handleExit(pid: Int, code: Int) {
+        flushLine()
+        if (pid == this@PreviewController.pid) this@PreviewController.pid = -1
+        val current = _state.value
+        if (current.status == ServerStatus.STOPPED) return
+        if (sawUrl && current.status == ServerStatus.RUNNING) {
+            // 用户手动停止 / 页面崩了：回到 STOPPED，让「启动预览」按钮重新出现
+            _state.update {
+                it.copy(status = ServerStatus.STOPPED, serverUrl = "", message = "")
             }
-            fail(
-                if (code == 0) "dev server 已退出（未输出可用地址）"
-                else "dev server 启动失败（退出码 $code）",
-            )
+            return
         }
+        fail(
+            if (code == 0) "dev server 已退出（未输出可用地址）"
+            else "dev server 启动失败（退出码 $code）",
+        )
     }
 
     /** 切行喂给 [handleLine]；`\r` 当作进度条覆盖，丢弃当前半行。 */

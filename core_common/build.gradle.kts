@@ -32,6 +32,10 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.core)
 
+    // ProotRunner（proot 子进程执行通道）要调 CliNative.exec；core_native 是
+    // 无外部依赖的最底层，方向上是「通用工具层 → JNI 桥」，不构成环。
+    implementation(project(":core_native"))
+
     // 主题主题色 → Material3 ColorScheme 的映射（见 theme/MobileCoderTheme.kt）
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)

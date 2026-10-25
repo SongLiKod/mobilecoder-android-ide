@@ -88,6 +88,17 @@ object MarketInstaller {
     /** 脚本阶段标记前缀（安装脚本 echo，运行时解析为阶段文案）。 */
     const val STAGE_PREFIX = "###MC:"
 
+    /** ktfmt 版本（[items] 里 ktfmt 条目的版本号，脚本下载地址共用）。 */
+    const val KTFMT_VERSION = "0.64"
+
+    /** ktfmt uber-jar 官方下载地址（Maven Central）。 */
+    const val KTFMT_URL =
+        "https://repo1.maven.org/maven2/com/facebook/ktfmt/$KTFMT_VERSION/ktfmt-$KTFMT_VERSION-with-dependencies.jar"
+
+    /** ktfmt uber-jar 回退地址（阿里云 Maven 镜像，国内直连更快）。 */
+    const val KTFMT_MIRROR_URL =
+        "https://maven.aliyun.com/repository/central/com/facebook/ktfmt/$KTFMT_VERSION/ktfmt-$KTFMT_VERSION-with-dependencies.jar"
+
     /** 日志保留上限（超出丢最旧）。 */
     private const val LOG_LIMIT = 500
 
@@ -183,6 +194,22 @@ object MarketInstaller {
             summary = "现代文件查找器（命令 fdfind）：语法友好、默认跳过 .gitignore 忽略项",
             detail = "apt（fd-find）· Ubuntu 24.04（noble）源 · 命令为 fdfind",
             probe = "usr/bin/fdfind",
+        ),
+        MarketItem(
+            id = "ktfmt",
+            name = "ktfmt",
+            version = KTFMT_VERSION,
+            summary = "Kotlin / Java 代码格式化器（Meta 出品）：编辑器「格式化当前文件」用它排版 .kt / .java",
+            detail = "Maven Central uber-jar（失败回退阿里云镜像）· 需要 JDK 11+ · 装到 /usr/local/bin",
+            probe = "usr/local/bin/ktfmt",
+        ),
+        MarketItem(
+            id = "prettier",
+            name = "Prettier",
+            version = "latest",
+            summary = "JS / TS / HTML / CSS 代码格式化器：编辑器「格式化当前文件」用它排版前端文件",
+            detail = "npm install -g（registry.npmjs.org，失败回退 npmmirror）· 依赖 Node.js · 装到 /usr/local/bin",
+            probe = "usr/local/bin/prettier",
         ),
     )
 
@@ -409,7 +436,7 @@ object MarketInstaller {
     /**
      * 按条目路由安装脚本（市场目录 → 脚本，JVM 单测覆盖）：
      * apt 类条目走 [aptScript]（[aptSpecs] 规格表）；opencode 走 npm；
-     * nodejs 走 tarball 落位 /usr/local。
+     * ktfmt 走 uber-jar 下载；prettier 走 npm；nodejs 走 tarball 落位 /usr/local。
      */
     internal fun scriptFor(
         item: MarketItem,
@@ -420,6 +447,8 @@ object MarketInstaller {
         aptSpecs[item.id]?.let { return aptScript(it) }
         return when (item.id) {
             "opencode" -> opencodeScript()
+            "ktfmt" -> ktfmtScript()
+            "prettier" -> prettierScript()
             else -> nodeScript(tmpDir, workDir, item.version, arch)
         }
     }
@@ -447,6 +476,84 @@ object MarketInstaller {
         "fi",
         "echo '${STAGE_PREFIX}校验安装'",
         "/usr/local/bin/opencode --version",
+        "echo '${STAGE_PREFIX}完成'",
+        "",
+    ).joinToString("\n")
+
+    /**
+     * ktfmt 安装脚本（自包含，guest 内直接执行）：
+     *  1. 检查 Java 运行时（`$JAVA_HOME` → `command -v java` → 常见 SDK 目录 glob），
+     *     没有则明确提示去环境中心装 JDK 后失败（ktfmt 最低要求 JDK 11）
+     *  2. apt 装 ca-certificates / curl
+     *  3. 下载 Maven Central 的 uber-jar（失败回退阿里云镜像）到 /opt/ktfmt/ktfmt.jar
+     *  4. 生成 /usr/local/bin/ktfmt 包装脚本（运行时再解析一次 java，装完 JDK 才能用）
+     *  5. 用临时 .kt 文件跑一遍格式化做端到端校验
+     */
+    internal fun ktfmtScript(): String = listOf(
+        "set -e",
+        "echo '${STAGE_PREFIX}检查 Java 运行环境'",
+        "JAVA_BIN=''",
+        "if [ -n \"\$JAVA_HOME\" ] && [ -x \"\$JAVA_HOME/bin/java\" ]; then JAVA_BIN=\"\$JAVA_HOME/bin/java\"; fi",
+        "if [ -z \"\$JAVA_BIN\" ] && command -v java >/dev/null 2>&1; then JAVA_BIN=\"\$(command -v java)\"; fi",
+        "if [ -z \"\$JAVA_BIN\" ]; then",
+        "    for d in \$HOME/sdk/*/bin/java \$HOME/sdk/jdk/bin/java /opt/jdk*/bin/java /usr/lib/jvm/*/bin/java; do",
+        "        if [ -x \"\$d\" ]; then JAVA_BIN=\"\$d\"; break; fi",
+        "    done",
+        "fi",
+        "if [ -z \"\$JAVA_BIN\" ]; then",
+        "    echo '未找到 Java 运行时：ktfmt 需要 JDK 11+，请先到「环境中心」安装 JDK'",
+        "    exit 3",
+        "fi",
+        "\"\$JAVA_BIN\" -version 2>&1 || true",
+        "echo '${STAGE_PREFIX}安装依赖（apt：ca-certificates / curl）'",
+        "apt update",
+        "apt install -y ca-certificates curl",
+        "echo '${STAGE_PREFIX}下载 ktfmt $KTFMT_VERSION（Maven Central，失败回退阿里云镜像）'",
+        "mkdir -p /opt/ktfmt",
+        "rm -f /opt/ktfmt/ktfmt.jar",
+        "curl -# -fL -k '$KTFMT_URL' -o /opt/ktfmt/ktfmt.jar || curl -# -fL -k '$KTFMT_MIRROR_URL' -o /opt/ktfmt/ktfmt.jar",
+        "echo '${STAGE_PREFIX}写入 /usr/local/bin/ktfmt'",
+        "cat > /usr/local/bin/ktfmt <<'MC_KTFMT'",
+        "#!/bin/sh",
+        "# ktfmt 包装脚本（软件市场生成）：解析 java 后执行 uber-jar",
+        "J=''",
+        "if [ -n \"\$JAVA_HOME\" ] && [ -x \"\$JAVA_HOME/bin/java\" ]; then J=\"\$JAVA_HOME/bin/java\"; fi",
+        "if [ -z \"\$J\" ] && command -v java >/dev/null 2>&1; then J=\"\$(command -v java)\"; fi",
+        "if [ -z \"\$J\" ]; then echo 'ktfmt: 未找到 Java 运行时（需要 JDK 11+）' >&2; exit 3; fi",
+        "exec \"\$J\" -jar /opt/ktfmt/ktfmt.jar \"\$@\"",
+        "MC_KTFMT",
+        "chmod 755 /usr/local/bin/ktfmt",
+        "echo '${STAGE_PREFIX}校验安装'",
+        "KTCHK=\"\${TMPDIR:-/tmp}/ktfmt-check.kt\"",
+        "printf 'fun  main( ) { println( 1 ) }\\n' > \"\$KTCHK\"",
+        "/usr/local/bin/ktfmt \"\$KTCHK\" >/dev/null",
+        "rm -f \"\$KTCHK\"",
+        "echo '${STAGE_PREFIX}完成'",
+        "",
+    ).joinToString("\n")
+
+    /**
+     * prettier 安装脚本（自包含，guest 内直接执行）：
+     *  1. 检查 npm：优先市场 Node.js 的 `/usr/local/bin/npm`（全局前缀即 /usr/local，
+     *     与 /usr/local/bin/prettier 探测点一致），缺失则引导先装 Node.js
+     *  2. `npm install -g prettier`（官方源，失败回退 npmmirror）
+     *  3. 校验 `/usr/local/bin/prettier --version`
+     */
+    internal fun prettierScript(): String = listOf(
+        "set -e",
+        "echo '${STAGE_PREFIX}检查 Node.js 运行环境'",
+        "if [ ! -x /usr/local/bin/npm ] && ! command -v npm >/dev/null; then",
+        "    echo '未找到 npm：请先在软件市场安装 Node.js'",
+        "    exit 3",
+        "fi",
+        "echo '${STAGE_PREFIX}安装 prettier（npm install -g）'",
+        "if [ -x /usr/local/bin/npm ]; then",
+        "    /usr/local/bin/npm install -g prettier || /usr/local/bin/npm install -g prettier --registry=https://registry.npmmirror.com",
+        "else",
+        "    npm install -g prettier || npm install -g prettier --registry=https://registry.npmmirror.com",
+        "fi",
+        "echo '${STAGE_PREFIX}校验安装'",
+        "/usr/local/bin/prettier --version",
         "echo '${STAGE_PREFIX}完成'",
         "",
     ).joinToString("\n")
@@ -562,6 +669,7 @@ object MarketInstaller {
         stage.startsWith("检查") -> 0.10f
         stage.startsWith("安装") -> -1f
         stage.startsWith("下载") -> 0.35f
+        stage.startsWith("写入") -> 0.92f
         stage.startsWith("解压") -> 0.92f
         stage.startsWith("校验") -> 0.96f
         stage.startsWith("清理") -> 0.98f

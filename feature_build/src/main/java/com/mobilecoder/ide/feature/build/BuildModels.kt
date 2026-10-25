@@ -87,6 +87,8 @@ data class BuildError(
     val raw: String = "",
     /** 文件是否位于当前工程内（在工程内才可跳转编辑器）。 */
     val inProject: Boolean = false,
+    /** true = 警告（Kotlin `w:`、`警告:` / `warning:`），编辑器按黄色标注。 */
+    val warning: Boolean = false,
 ) {
     /** 展示用位置文本：`文件:行:列`。 */
     val location: String

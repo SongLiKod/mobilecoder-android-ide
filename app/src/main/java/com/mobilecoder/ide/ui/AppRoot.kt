@@ -141,10 +141,12 @@ import com.mobilecoder.ide.core.storage.AppStorage
 import com.mobilecoder.ide.core.storage.ProjectMeta
 import com.mobilecoder.ide.core.storage.ProjectTemplate
 import com.mobilecoder.ide.feature.ai.AiScreen
+import com.mobilecoder.ide.feature.build.BuildRunner
 import com.mobilecoder.ide.feature.build.BuildScreen
 import com.mobilecoder.ide.feature.build.EnvironmentScreen
 import com.mobilecoder.ide.feature.history.HistoryScreen
 import com.mobilecoder.ide.feature.editor.EditorController
+import com.mobilecoder.ide.feature.editor.EditorDiagnostic
 import com.mobilecoder.ide.feature.editor.EditorScreen
 import com.mobilecoder.ide.feature.git.GitController
 import com.mobilecoder.ide.feature.git.GitHead
@@ -154,6 +156,8 @@ import com.mobilecoder.ide.feature.ssh.SshScreen
 import com.mobilecoder.ide.feature.terminal.TerminalScreen
 import java.io.File
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -224,6 +228,46 @@ fun AppRoot(
         if (!path.isNullOrBlank()) {
             runCatching { GitController.bind(path) }
         }
+    }
+
+    // ---- ① 构建诊断注入编辑器：构建解析出的错误 / 警告按文件合并进 Tab 的
+    //      analysis.issues，问题面板、行号槽、状态栏计数、正文下划线四处一次到位。
+    //      只保留当前工程内的条目（路径归一后不在工程内的一律丢弃）。 ----
+    val buildErrors by BuildRunner.errors.collectAsStateWithLifecycle()
+    LaunchedEffect(buildErrors, projectDirPath) {
+        val dir = projectDirPath
+        val diagnostics = if (dir.isNullOrBlank()) {
+            emptyList()
+        } else {
+            buildErrors.mapNotNull { error ->
+                val raw = error.file ?: return@mapNotNull null
+                val line = error.line ?: return@mapNotNull null
+                val target = editorFileUnder(dir, raw) ?: return@mapNotNull null
+                EditorDiagnostic(
+                    file = target.absolutePath,
+                    line = line,
+                    column = (error.column ?: 1).coerceAtLeast(1),
+                    message = error.message,
+                    isError = !error.warning,
+                )
+            }
+        }
+        EditorController.setDiagnostics(diagnostics)
+    }
+
+    // ---- ② 构建页「点击错误」→ 编辑器定位：jumpTarget 是同值去重的 StateFlow，
+    //      用 combine(jumpTarget, jumpTick) 才能每次都触发（重复点同一个错误也跳）。 ----
+    LaunchedEffect(projectDirPath) {
+        combine(BuildRunner.jumpTarget, BuildRunner.jumpTick) { target, _ -> target }
+            .filterNotNull()
+            .collect { error ->
+                val dir = projectDirPath ?: return@collect
+                val raw = error.file ?: return@collect
+                val target = editorFileUnder(dir, raw) ?: return@collect
+                navController.navigateTo(AppDestination.EDITOR.route)
+                EditorController.openFile(target, error.line ?: 0, error.column ?: 1)
+                EditorController.requestEditorFocus()
+            }
     }
 
     // 底栏高亮：停留在二级页时高亮其来源 tab（更多 → 构建、编辑 → ▶ 构建）
@@ -799,6 +843,22 @@ private fun ProjectGuard(
         return
     }
     content(root)
+}
+
+/**
+ * 把构建错误里的 canonical 路径折算成编辑器使用的**工程内绝对路径**，不在工程内返回 null。
+ *
+ * 构建侧给的是 `File.canonicalFile` 路径（Android 上 `/data/data` 会解析成
+ * `/data/user/0`），而编辑器 Tab 的 key 来自工程根（AppStorage 的绝对路径）——
+ * 两边都 canonical 化后再按相对路径拼回，跳转与诊断标注才对得上同一个 Tab。
+ */
+private fun editorFileUnder(projectDir: String, canonicalPath: String): File? {
+    val root = File(projectDir)
+    val canonRoot = runCatching { root.canonicalPath }.getOrDefault(root.path)
+    val canon = runCatching { File(canonicalPath).canonicalPath }.getOrDefault(canonicalPath)
+    val prefix = canonRoot.trimEnd('/') + "/"
+    if (!canon.startsWith(prefix)) return null
+    return File(root, canon.removePrefix(prefix))
 }
 
 private fun NavHostController.navigateTo(route: String) {
