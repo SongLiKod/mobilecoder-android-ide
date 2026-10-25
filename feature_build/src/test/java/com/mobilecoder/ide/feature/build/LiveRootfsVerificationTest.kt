@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume
@@ -15,10 +16,15 @@ import org.junit.rules.TemporaryFolder
  * 真源验证：内置 rootfs 镜像与 proot 三件套地址**实测可达**且内容形态正确
  * （rootfs = gzip tar，deb = ar 归档），并把最小的 `.deb` 真解包断言目录布局。
  *
+ * proot 三件套的版本**由 [RootfsManager.resolveProotDebUrls] 实时解析**，因此
+ * 上游升版不再需要改代码/改测试 —— 本组测的是「解析出来的地址仍然活着」，
+ * 外加一条对账：解析结果必须等于上游 `Packages` 索引里的 `Filename`
+ * （防止索引挂了却悄悄退回写死的兜底地址）。
+ *
  * 分级策略：
  *  - **连接不上**（超时 / DNS / TLS，网络层异常）→ [Assume] 整体跳过，不红；
- *  - **服务器有响应**但状态码异常 / 魔数不对 → 判定失败 —— 能抓住
- *    「域名还在但包没了 / 换路径 / 挂错内容」三类回归。
+ *  - **服务器有响应**但状态码异常 / 魔数不对 / 解析与索引对不上 → 判定失败 ——
+ *    能抓住「域名还在但包没了 / 换路径 / 索引结构变了 / 挂错内容」几类回归。
  */
 class LiveRootfsVerificationTest {
 
@@ -80,10 +86,14 @@ class LiveRootfsVerificationTest {
         }
     }
 
+    /** 实时解析的三件套地址（索引拉不到时内部退回兜底地址，后续断言照样跑）。 */
+    private fun resolvedProotDebs(arch: String): List<String> =
+        runBlocking { RootfsManager.resolveProotDebUrls(arch) }
+
     @Test
     fun prootDebs_allSixAreReachableArArchives() {
         listOf("aarch64", "x64").forEach { arch ->
-            RootfsManager.prootDebUrls(arch).forEach { url ->
+            resolvedProotDebs(arch).forEach { url ->
                 val head = fetchVerifiedHead(url)
                 assertTrue("$url 缺 ar 魔数（!<arch>）", head.size >= 3)
                 assertEquals("$url[0]", 0x21, head[0].toInt() and 0xff) // '!'
@@ -93,12 +103,38 @@ class LiveRootfsVerificationTest {
         }
     }
 
+    /**
+     * 解析结果必须与上游 `Packages` 索引里的 `Filename` 逐条对得上 ——
+     * 防止索引拉取/解析悄悄失败后**一直退回写死的兜底地址**（那种情况下
+     * 上面的可达性断言今天还能过，等到兜底地址也 404 才会炸）。
+     */
+    @Test
+    fun prootDebs_resolutionMatchesLiveIndex_notStaleFallback() {
+        listOf("aarch64", "x64").forEach { arch ->
+            val index = EnvDownloader.fetchText(RootfsManager.termuxPackagesIndex(arch))
+            Assume.assumeTrue("包索引不可达（$arch），跳过对账", index != null)
+            val expected = RootfsManager.parseDebFilenames(
+                index!!,
+                listOf("proot", "libtalloc", "libandroid-shmem"),
+            )
+            assertEquals("索引里没解析出三件套（结构变了？）：${expected.keys}", 3, expected.size)
+
+            val resolved = resolvedProotDebs(arch)
+            expected.forEach { (pkg, path) ->
+                assertTrue(
+                    "$pkg 的解析结果不含索引路径 $path（退回兜底地址了？）：$resolved",
+                    resolved.any { it.endsWith(path) },
+                )
+            }
+        }
+    }
+
     @Test
     fun smallestDeb_fullDownloadAndExtract_matchesExpectedLayout() {
         // libandroid-shmem 是三件套里最小的（十几 KB）：真下载 + 真解包。
         // Termux deb 的 data.tar 带 `data/data/com.termux/files/usr/…` 前缀，
         // 归位规则（placeProotFiles 按路径后缀匹配）必须照常消费。
-        val url = RootfsManager.prootDebUrls("aarch64").last()
+        val url = resolvedProotDebs("aarch64").first { it.contains("libandroid-shmem") }
         fetchVerifiedHead(url) // 可达 + 魔数
 
         val conn = URL(url).openConnection() as HttpURLConnection

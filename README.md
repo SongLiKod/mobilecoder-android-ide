@@ -343,7 +343,7 @@ BuildRunner.start(BuildRequest{projectDir, variant, clean, extraTasks})
 | Node.js | 20.18.0（市场内 22.2.0） | ≈50MB | nodejs.org ↔ npmmirror |
 | Android SDK | cmdline-tools → android-35 / build-tools 35.0.0 | 视组件 | dl.google.com |
 | Linux rootfs | Ubuntu 24.04.5 base | ≈30MB | cdimage.ubuntu.com ↔ 清华 TUNA |
-| proot 三件套 | proot 5.1.107 / libtalloc / libandroid-shmem | ≈140KB | packages.termux.dev |
+| proot 三件套 | proot / libtalloc / libandroid-shmem（版本按上游 `Packages` 索引**实时解析**） | ≈140KB | packages.termux.dev |
 
 > 环境包**不做哈希校验**，依靠结构探测（`bin/java`、`bin/bash`、marker 文件、exec probe）保证完整性；SHA-256 校验仅用于 App 自升级。
 

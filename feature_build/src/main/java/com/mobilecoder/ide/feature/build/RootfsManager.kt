@@ -26,9 +26,9 @@ import kotlinx.coroutines.withContext
  * 安装管线（三段，逐级进度回报、可取消）：
  *  1. **rootfs**：按候选源下载 `ubuntu-base-<ver>-base-<arch>.tar.gz` → 解压落位
  *     （结构校验：必须含 `bin/bash`）；
- *  2. **proot 三件套**：固定下载 Termux 官方仓库的 `.deb`（proot / libtalloc /
- *     libandroid-shmem，合计约 140KB），[ArchiveExtractor.extractDeb] 解包后
- *     按 `usr/bin|usr/libexec|usr/lib` 归位；
+ *  2. **proot 三件套**：拉 Termux 仓库 `Packages` 索引解析**当前版本**后下载
+ *     `.deb`（proot / libtalloc / libandroid-shmem，合计约 140KB），
+ *     [ArchiveExtractor.extractDeb] 解包后按 `usr/bin|usr/libexec|usr/lib` 归位；
  *  3. **首启配置**：写 `etc/resolv.conf`（DNS）、`etc/apt/sources.list`（按所选源
  *     写 Ubuntu 官方或清华 TUNA 镜像）、`etc/hosts`、`etc/hostname`，最后落 marker。
  *
@@ -74,20 +74,93 @@ object RootfsManager {
         "ubuntu-base-$rootfsVersion-base-${ubuntuArch(arch)}.tar.gz"
 
     /**
-     * Termux 官方仓库的 proot 三件套（固定地址，随 [EnvSource] 不变，
-     * **2026-10 实测六个 .deb（2 架构）均 HTTP 2xx + ar 魔数**；
-     * 上游 2026-10-19 升版：proot 5.1.107.96 → 5.1.107.98，旧地址 404 ——
-     * 由 LiveRootfsVerificationTest 实测抓出；更早 2026-10-02 升版
-     * （proot 5.1.107.95 → .96、libtalloc 2.4.3 → 2.5.0）亦同）。
+     * Termux 官方仓库基址（proot 三件套的下载域）。
+     *
+     * **版本不写死**：上游几乎每个月都会升版（2026-10 一个月内连升三次，
+     * 旧地址即 404），写死版本号意味着每次上游升版都得改一次代码才不红 ——
+     * 因此安装时改拉仓库的 `Packages` 索引实时解析当前 `Filename`，
+     * 索引拉不到才退回 [prootFallbackDebUrls] 的固定地址。
      */
-    fun prootDebUrls(arch: String): List<String> {
-        val tuxArch = if (arch == "aarch64") "aarch64" else "x86_64"
-        val base = "https://packages.termux.dev/apt/termux-main/pool/main"
+    private const val TERMUX_REPO = "https://packages.termux.dev/apt/termux-main"
+
+    /** proot 三件套的 Debian 包名（索引解析 / 下载顺序）。 */
+    private val PROOT_PACKAGES = listOf("proot", "libtalloc", "libandroid-shmem")
+
+    /** ABI token → Termux 架构 token（aarch64→aarch64 / 其余→x86_64）。 */
+    private fun termuxArch(arch: String): String = if (arch == "aarch64") "aarch64" else "x86_64"
+
+    /** apt 包索引地址（`Filename` 字段 = 相对仓库根的 `.deb` 路径）。internal = 真源校验要拿它对账。 */
+    internal fun termuxPackagesIndex(arch: String): String =
+        "$TERMUX_REPO/dists/stable/main/binary-${termuxArch(arch)}/Packages"
+
+    /**
+     * **实时**解析 proot 三件套地址：拉上游 `Packages` 索引 → 取每个包当前的
+     * `Filename` 拼成完整 URL（拿到的就是仓库里最新版）。
+     *
+     * 任一环失败（离线 / 超时 / 索引结构变化 / 包被移除）→ 整体退回
+     * [prootFallbackDebUrls]，保证「索引挂了但 `.deb` 还在」时安装仍可用。
+     *
+     * @param arch ABI token（`aarch64` / `x64`）
+     */
+    suspend fun resolveProotDebUrls(arch: String): List<String> = withContext(Dispatchers.IO) {
+        val found = EnvDownloader.fetchText(termuxPackagesIndex(arch))
+            ?.let { parseDebFilenames(it, PROOT_PACKAGES) }
+            ?.takeIf { m -> PROOT_PACKAGES.all { it in m } }
+            ?.takeIf { m -> PROOT_PACKAGES.all { m.getValue(it).startsWith("pool/") } }
+        if (found == null) {
+            prootFallbackDebUrls(arch)
+        } else {
+            // 按 PROOT_PACKAGES 固定顺序返回（索引里 stanza 顺序不保证）
+            PROOT_PACKAGES.map { "$TERMUX_REPO/${found.getValue(it)}" }
+        }
+    }
+
+    /**
+     * proot 三件套的**兜底**固定地址（索引拉不到时用），[LiveRootfsVerificationTest]
+     * 只对实时解析结果做真源校验，不校验这里——否则上游一升版 CI 又红。
+     *
+     * 2026-10-25 实测六个 `.deb`（2 架构）均 HTTP 206 + ar 魔数。
+     */
+    fun prootFallbackDebUrls(arch: String): List<String> {
+        val tuxArch = termuxArch(arch)
         return listOf(
-            "$base/p/proot/proot_5.1.107.98_$tuxArch.deb",
-            "$base/libt/libtalloc/libtalloc_2.5.0_$tuxArch.deb",
-            "$base/liba/libandroid-shmem/libandroid-shmem_0.7_$tuxArch.deb",
+            "$TERMUX_REPO/p/proot/proot_5.1.107.101_$tuxArch.deb",
+            "$TERMUX_REPO/libt/libtalloc/libtalloc_2.5.0_$tuxArch.deb",
+            "$TERMUX_REPO/liba/libandroid-shmem/libandroid-shmem_0.7_$tuxArch.deb",
         )
+    }
+
+    /**
+     * 解析 apt `Packages` 索引：为 [names] 里的每个包名取所在 stanza 的 `Filename`。
+     *
+     * 按 Debian control 约定只认**行首字段**（续行以空白开头，天然被忽略），
+     * 空行分隔 stanza；包名或文件名缺失的 stanza 直接丢弃。
+     *
+     * @return 包名 → 相对仓库根的 `.deb` 路径（未找到的包不进结果）
+     */
+    internal fun parseDebFilenames(index: String, names: List<String>): Map<String, String> {
+        val wanted = names.toSet()
+        val found = LinkedHashMap<String, String>()
+        var pkg: String? = null
+        var file: String? = null
+        fun flush() {
+            val p = pkg
+            val f = file
+            if (p != null && f != null && p in wanted && p !in found) found[p] = f
+            pkg = null
+            file = null
+        }
+        index.lineSequence().forEach { raw ->
+            val line = raw.removeSuffix("\r")
+            when {
+                // 续行以空白开头，天然不会命中下面两个行首字段
+                line.isBlank() -> flush()
+                line.startsWith("Package:") -> pkg = line.substringAfter(':').trim()
+                line.startsWith("Filename:") -> file = line.substringAfter(':').trim()
+            }
+        }
+        flush()
+        return found
     }
 
     // ------------------------------------------------------------------
@@ -158,7 +231,7 @@ object RootfsManager {
 
     /**
      * 从用户选择的本地 `ubuntu-base-*.tar.gz`（SAF 导入）完成安装：
-     * 解压落位 rootfs → 补装 proot 三件套（仍需网络，地址固定）→ 首启配置。
+     * 解压落位 rootfs → 补装 proot 三件套（仍需网络，版本实时解析）→ 首启配置。
      */
     suspend fun installFromArchive(
         context: Context,
@@ -323,7 +396,7 @@ object RootfsManager {
         onProgress: (Float) -> Unit,
     ) {
         val arch = EnvDownloader.primaryArch()
-        val urls = prootDebUrls(arch)
+        val urls = resolveProotDebUrls(arch)
         val cache = File(context.cacheDir, "envdl").apply { mkdirs() }
         val linux = Proot.linuxDir(context)
         urls.forEachIndexed { i, url ->
