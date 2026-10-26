@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
@@ -33,6 +34,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
@@ -50,6 +52,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
@@ -61,6 +68,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mobilecoder.ide.core.common.theme.LocalAppPalette
@@ -68,9 +76,11 @@ import com.mobilecoder.ide.core.common.ui.AppAlertDialog
 import com.mobilecoder.ide.core.common.ui.EmptyState
 import com.mobilecoder.ide.core.common.ui.isImeVisible
 import com.mobilecoder.ide.core.storage.AppStorage
+import com.mobilecoder.ide.feature.ai.AiRefactorDialog
 import com.mobilecoder.ide.feature.preview.PreviewController
 import com.mobilecoder.ide.feature.preview.PreviewKind
 import com.mobilecoder.ide.feature.preview.PreviewPane
+import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -114,6 +124,8 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
     var snippetManagerOpen by rememberSaveable { mutableStateOf(false) }
     val snippetPanel by EditorController.snippetPanel.collectAsStateWithLifecycle()
     val snippetSession by EditorController.snippetSession.collectAsStateWithLifecycle()
+    val inlineSuggestion by EditorController.inlineSuggestion.collectAsStateWithLifecycle()
+    val refactorRequest by EditorController.refactorRequest.collectAsStateWithLifecycle()
 
     // ---------------- 实时预览（Issue 13）----------------
     val previewState by PreviewController.state.collectAsStateWithLifecycle()
@@ -254,6 +266,24 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                         menuOpen = false
                         snippetManagerOpen = true
                     },
+                    aiRefactorAvailable = activeTab?.editable == true,
+                    onAiRefactor = {
+                        menuOpen = false
+                        activeTab?.let { tab ->
+                            val selection = tab.value.selection
+                            if (selection.collapsed) {
+                                EditorController.requestRefactor(tab.path)
+                            } else {
+                                EditorController.requestRefactor(
+                                    tab.path,
+                                    selection.min,
+                                    selection.max,
+                                )
+                            }
+                        }
+                    },
+                    aiCompleteEnabled = settings.aiComplete,
+                    onToggleAiComplete = { EditorController.toggleAiComplete() },
                     onToggleLineNumbers = { EditorController.toggleLineNumbers() },
                     onToggleWordWrap = { EditorController.toggleWordWrap() },
                     onToggleAutoSave = { EditorController.toggleAutoSave() },
@@ -311,6 +341,24 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
                         session = snippetSession?.takeIf { it.path == activeTab.path },
                         onNext = { EditorController.nextSnippetStop() },
                         onDone = { EditorController.endSnippetSession() },
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                }
+
+                // 行内补全操作条：软键盘没有 Tab / Esc 键，触屏也得能「接受 / 忽略」
+                // 过期判定与编辑器内的幽灵文本保持一致，避免幽灵隐藏了按钮还挂着
+                val ghostBar = inlineSuggestion?.takeIf {
+                    activeTab != null &&
+                        it.path == activeTab.path &&
+                        it.text.isNotEmpty() &&
+                        it.start == activeTab.value.selection.start &&
+                        it.anchorText == activeTab.value.text &&
+                        activeTab.value.composition == null
+                }
+                if (ghostBar != null && !snippetPanel.open) {
+                    InlineSuggestionBar(
+                        onAccept = { EditorController.acceptInlineSuggestion() },
+                        onReject = { EditorController.rejectInlineSuggestion() },
                         modifier = Modifier.align(Alignment.BottomCenter),
                     )
                 }
@@ -532,6 +580,29 @@ fun EditorScreen(projectPath: String, onOpenBuild: () -> Unit = {}, modifier: Mo
             onDismiss = { pendingClosePath = null },
         )
     }
+
+    // AI 重构（文件树长按菜单 / ⋮ 菜单）：发 AI → 先看 diff → 确认 → 建快照落盘，
+    // 应用 / 撤销都回灌编辑器 Tab（内容以编辑器内存态为准，不与自动保存打架）
+    refactorRequest?.let { request ->
+        val rootPath = projectPath.trimEnd('/')
+        // 只处理项目内文件：路径必须以「根 + 分隔符」开头，避免 /a/proj2 误配 /a/proj
+        val relative = if (request.path.startsWith("$rootPath/")) {
+            request.path.removePrefix("$rootPath/")
+        } else {
+            File(request.path).name
+        }
+        val target = tabs.firstOrNull { it.path == request.path }
+        AiRefactorDialog(
+            projectRoot = projectPath,
+            filePath = relative,
+            language = target?.language?.label ?: Language.of(File(request.path).name).label,
+            currentText = target?.value?.text,
+            selectionStart = request.selectionStart,
+            selectionEnd = request.selectionEnd,
+            onApplied = { newText -> EditorController.replaceFileContent(request.path, newText) },
+            onDismiss = { EditorController.clearRefactor() },
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +793,47 @@ private fun EditorBody(
         vScroll.scrollTo(target.roundToInt().coerceAtLeast(0))
     }
 
+    // ---------------- 行内 AI 补全（幽灵文本） ----------------
+    // 过期判定：正文 / 光标 / Tab / 输入法组字状态任一对不上就不展示
+    // （真正插入前 acceptInlineSuggestion 还会再校验一次，杜绝插错位置）
+    val suggestion by EditorController.inlineSuggestion.collectAsStateWithLifecycle()
+    val ghost = suggestion?.takeIf {
+        it.path == tab.path &&
+            it.anchorText == text &&
+            it.start == tab.value.selection.start &&
+            it.start <= text.length &&
+            tab.value.composition == null &&
+            it.text.isNotEmpty()
+    }
+    val ghostLines: List<String> = if (ghost == null) emptyList() else ghost.text.split('\n')
+
+    // 幽灵文本落点：行首 → 光标列的实测宽度（与正文同一套 style 量出来的）
+    val ghostPos: Pair<Float, Float>? = if (ghost == null || ghostLines.isEmpty()) {
+        null
+    } else {
+        val start = ghost.start
+        val line = EditorController.lineOfOffset(text, start)
+        val lineStart = EditorController.offsetOfLine(text, line).coerceIn(0, start)
+        var x = textMeasurer.measure(AnnotatedString(text.substring(lineStart, start)), style)
+            .size.width.toFloat()
+        val cellIndex = cellIndexByLine?.get(line) ?: (line - 1)
+        var y = tops?.getOrNull(cellIndex) ?: (cellIndex * lineHeightPx)
+        // 自动换行下光标可能已折行：按可视宽度回绕（近似定位，够幽灵文本用）
+        if (settings.wordWrap && boxWidth > 0) {
+            if (x >= boxWidth) {
+                y += lineHeightPx * (x / boxWidth).toInt()
+                x %= boxWidth
+            }
+            val firstWidth = textMeasurer.measure(AnnotatedString(ghostLines.first()), style)
+                .size.width.toFloat()
+            if (x + firstWidth > boxWidth) {
+                y += lineHeightPx
+                x = 0f
+            }
+        }
+        x to y
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -807,9 +919,88 @@ private fun EditorBody(
                     visualTransformation = transformation,
                     modifier = Modifier
                         .focusRequester(focusRequester)
+                        // 硬件键盘：Tab 接受 / Esc 拒绝补全（软键盘走底部操作条）
+                        .onPreviewKeyEvent { event ->
+                            if (event.type != KeyEventType.KeyDown || ghost == null) {
+                                return@onPreviewKeyEvent false
+                            }
+                            when (event.key) {
+                                Key.Tab -> {
+                                    EditorController.acceptInlineSuggestion()
+                                    true
+                                }
+
+                                Key.Escape -> {
+                                    EditorController.rejectInlineSuggestion()
+                                    true
+                                }
+
+                                else -> false
+                            }
+                        }
                         .then(if (settings.wordWrap) Modifier.fillMaxWidth() else Modifier),
                 )
+
+                // 幽灵文本：首行接在光标处，其余行回到行首（与 Copilot 一致的视觉）
+                if (ghost != null && ghostPos != null && ghostLines.isNotEmpty()) {
+                    val ghostColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                    Text(
+                        text = ghostLines.first(),
+                        style = style,
+                        color = ghostColor,
+                        maxLines = 1,
+                        modifier = Modifier.offset {
+                            IntOffset(ghostPos.first.roundToInt(), ghostPos.second.roundToInt())
+                        },
+                    )
+                    if (ghostLines.size > 1) {
+                        Text(
+                            text = ghostLines.drop(1).joinToString("\n"),
+                            style = style,
+                            color = ghostColor,
+                            modifier = Modifier.offset {
+                                IntOffset(0, (ghostPos.second + lineHeightPx).roundToInt())
+                            },
+                        )
+                    }
+                }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 行内补全操作条（触屏接受 / 忽略；提示硬件键 Tab、Esc）
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun InlineSuggestionBar(
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 8.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "AI 补全 · Tab 接受 / Esc 忽略",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            TextButton(onClick = onReject) { Text("忽略") }
+            TextButton(onClick = onAccept) { Text("接受") }
         }
     }
 }

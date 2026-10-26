@@ -84,6 +84,8 @@ MobileCoder = 代码编辑器 + 内置完整终端 + proot Linux 环境
 - **编译级诊断标注**：构建解析出的 Kotlin / Java / Gradle 错误与警告按文件注入编辑器，与结构级 lint 合并写回 Tab，问题面板 / 行号槽 / 状态栏计数 / 正文标注四处一次生效；正文按区间**下划线 + 红（错误）/ 黄（警告）底色**标注，构建页点「错误」自动开文件并跳到行列，构成**构建 → 定位 → 修改**闭环
 - **格式化当前文件**（⋮ 菜单）：proot 内调 `ktfmt`（`.kt` / `.kts` / `.java`）或 `prettier`（`.js` / `.ts` / `.html` / `.css` / `.json` / `.yaml` 等），工具由软件市场一键安装，缺失（或没装 JDK）时提示去对应页面安装；整个格式化记为**一步撤销**
 - **代码片段（Snippets）**：内置 60+ 常用模板（Kotlin / Java / JS / TS / HTML / Shell / 通用），编辑器里敲触发词（如 `fori`、`composable`）弹出候选面板，点按即插入并按 `$1…$9 / $0` 依次跳位；自定义片段增删改 + SAF JSON 导入导出，持久化在 `files/snippets/snippets.json`（同语言同触发词的自定义覆盖内置，删除即恢复）
+- **AI 行内补全**（`feature_ai/AiCompletion`）：光标处出「幽灵文本」（类 Copilot），硬件键盘 Tab 接受 / Esc 忽略，触屏走底部操作条；键入停顿 350ms 发非流式小请求（`max_tokens` 64、15s/60s 超时、自动清洗代码围栏与重复词干），任何失败静默降级为「无补全」绝不打断输入；⋮ 菜单可开关（默认开，持久化）；与片段候选面板、输入法组字互斥，正文 / 光标一变即过期
+- **AI 重构**（`feature_ai/AiRefactor`）：文件树长按菜单 / 编辑器 ⋮ 菜单发起，选中片段（附上下文）或整文件交给 AI 改写 → **行级 diff 预览**（可改「重构要求」重新生成）→ 确认后**先建改前快照再落盘**（快照失败拒绝写入），应用后仍可撤销 / 查看 Diff；输入源用编辑器内存态（含未保存修改），落盘后回灌编辑器 Tab
 - 撤销 / 重做历史（每文件独立，连续打字 800ms 内合并为一步，容量 120 步）
 - 自动保存（800ms 防抖）、跳转行号、双指缩放字号（10–28）、每 Tab 独立滚动位置
 
@@ -161,6 +163,8 @@ MobileCoder = 代码编辑器 + 内置完整终端 + proot Linux 环境
 - **9 个项目工具**的 function calling：文件类 `list_files`、`read_file`、`write_file`、`search_replace`、`delete_path`；命令类 `run_command`（proot 内 `/bin/sh -c` 执行构建 / 测试，stdout 与 stderr 分离、超时自动终止进程组）与只读 git 工具 `git_status`、`git_diff`、`git_log`（进程内 libgit2，与终端 Git 共用引擎锁与仓库句柄）。工具调用轮数上限可在设置里自定义，工具事件在对话中以 chips 展示
 - 工具安全约束：路径 canonical 化防穿越、禁删项目根、跳过 build/.git 等目录、`run_command` 危险命令拦截（`rm -rf /`、`shutdown`、`git reset --hard`、`curl … | sh` 等，见 `AiCommandGuard`）且恒需用户确认、单次结果 16000 字符截断、失败不抛异常
 - 会话持久化 `files/ai/sessions.json`；API Key 加密存储；可随时取消请求
+- **一次性小请求通道**（`AiOneShot` + `AiClient.complete`）：非流式、短超时、输出上限受控，供编辑器「AI 行内补全 / AI 重构」使用——与对话的工具调用循环解耦（不进会话、不占 busy），候选接口额度 / Key 失效时自动换下一个（最多试 3 个）
+- **会话导出 Markdown**（`AiExport`）：对话页顶部导出按钮，把提问 / 回复 / **工具调用记录**（工具名、目标、结果、参数 JSON）沉淀成 `.md` 文档；先用 AI 回复渲染器预览成文效果，再经 SAF 保存到用户指定位置，导出文件名自动安全化并带时间戳
 
 ### 2.9 记录页（`feature_history`）
 

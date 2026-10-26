@@ -24,9 +24,19 @@ object AiClient {
     @Volatile
     private var active: HttpURLConnection? = null
 
+    /** 行内补全小请求（高频：新请求启动时会掐掉自己上一条，避免挂起的读占住 IO 线程）。 */
+    @Volatile
+    private var activeCompletion: HttpURLConnection? = null
+
+    /** AI 重构等一次性小请求（低频，独立通道，不被补全顶掉）。 */
+    @Volatile
+    private var activeOneShot: HttpURLConnection? = null
+
     /** 取消当前请求（断开连接，阻塞读立即返回）。 */
     fun cancelActive() {
         runCatching { active?.disconnect() }
+        runCatching { activeCompletion?.disconnect() }
+        runCatching { activeOneShot?.disconnect() }
     }
 
     /**
@@ -129,10 +139,126 @@ object AiClient {
     }
 
     // ------------------------------------------------------------------
+    // 轻量补全端点（行内补全 / AI 重构的一次性小请求）
+    // ------------------------------------------------------------------
+
+    /**
+     * 一次**非流式**的小请求（`POST {baseUrl}/chat/completions`）。
+     *
+     * 与 [chat] 的区别：不开 SSE、[maxTokens] 受控、超时更短，用于「行内补全」
+     * 这类高频短请求，以及「AI 重构」这类不需要工具调用的一次性请求。
+     *
+     * @param endpoint  目标接口（地址 + 模型 + Key）
+     * @param messages  system + user 两条即可（无 tools）
+     * @param maxTokens 输出上限（补全给小值，避免长尾延迟）
+     * @param isCompletion true = 行内补全通道：新请求会先断开上一条**已被取消**的补全连接，
+     *   否则被取消请求的阻塞读会一直占着 Dispatchers.IO 线程（慢服务器下连续输入会拖累文件 IO）
+     * @return 助手文本（JSON null content 视为空串）
+     * @throws AiApiException 分类后的失败（与 [chat] 同一套分类）
+     */
+    suspend fun complete(
+        endpoint: AiEndpoint,
+        messages: List<ApiMessage>,
+        maxTokens: Int,
+        temperature: Double = 0.2,
+        isCompletion: Boolean = false,
+    ): String = withContext(Dispatchers.IO) {
+        val payload = JSONObject()
+            .put("model", endpoint.model)
+            .put("stream", false)
+            .put("temperature", temperature)
+            .put("max_tokens", maxTokens)
+            .put("messages", JSONArray(messages.map { toJson(it) }))
+            .toString()
+        // 补全通道：上一条必然已被 EditorController 取消（防抖会先 cancel），这里直接断开释放线程
+        if (isCompletion) runCatching { activeCompletion?.disconnect() }
+        val conn = open(endpoint, stream = false, track = false)
+        // 补全不能等 5 分钟：连接 15s、读 60s，超时即放弃（UI 静默降级）
+        conn.connectTimeout = 15_000
+        conn.readTimeout = 60_000
+        if (isCompletion) activeCompletion = conn else activeOneShot = conn
+        try {
+            conn.outputStream.use { out ->
+                out.write(payload.toByteArray(Charsets.UTF_8))
+                out.flush()
+            }
+            val code = conn.responseCode
+            val body = runCatching {
+                (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    ?.bufferedReader()?.use { it.readText() }
+            }.getOrNull().orEmpty()
+            if (code !in 200..299) throw httpError(code, body)
+            parseCompleteBody(code, body)
+        } catch (e: AiApiException) {
+            throw e
+        } catch (e: SocketTimeoutException) {
+            throw AiApiException(AiErrorKind.TIMEOUT, 0, "补全超时", retryable = true, cause = e)
+        } catch (e: IOException) {
+            throw AiApiException(
+                AiErrorKind.NETWORK,
+                0,
+                "网络错误：${e.message ?: "连接失败"}",
+                retryable = true,
+                cause = e,
+            )
+        } finally {
+            runCatching { conn.disconnect() }
+            if (isCompletion) {
+                if (activeCompletion === conn) activeCompletion = null
+            } else {
+                if (activeOneShot === conn) activeOneShot = null
+            }
+        }
+    }
+
+    /** 非流式响应体 → 助手文本（容错：个别代理无视 stream=false 仍回 SSE）。 */
+    private fun parseCompleteBody(code: Int, body: String): String {
+        val json = runCatching { JSONObject(body) }.getOrNull()
+        if (json == null) {
+            // SSE 兜底：把 data: 行里的 delta.content 拼起来
+            val sse = StringBuilder()
+            body.lineSequence()
+                .filter { it.trim().startsWith("data:") }
+                .map { it.trim().removePrefix("data:").trim() }
+                .filter { it.isNotEmpty() && it != "[DONE]" }
+                .forEach { data ->
+                    val chunk = runCatching { JSONObject(data) }.getOrNull() ?: return@forEach
+                    if (chunk.has("error")) throw aiErrorFromPayload(chunk)
+                    val choices = chunk.optJSONArray("choices") ?: return@forEach
+                    if (choices.length() == 0) return@forEach
+                    val content = choices.getJSONObject(0)
+                        .optJSONObject("delta")?.opt("content")
+                    if (content is String) sse.append(content)
+                }
+            return sse.toString()
+        }
+        if (json.has("error")) throw aiErrorFromPayload(json)
+        val choices = json.optJSONArray("choices")
+            ?: throw AiApiException(AiErrorKind.PARSE, code, "接口响应缺少 choices 字段", retryable = false)
+        if (choices.length() == 0) {
+            throw AiApiException(AiErrorKind.PARSE, code, "接口响应空 choices", retryable = false)
+        }
+        val message = choices.getJSONObject(0).optJSONObject("message")
+            ?: throw AiApiException(AiErrorKind.PARSE, code, "接口响应缺少 message 字段", retryable = false)
+        // 同 handleSseChunk：只接受真实 String，JSON null 不能变成字面量 "null"
+        return (message.opt("content") as? String).orEmpty()
+    }
+
+    // ------------------------------------------------------------------
     // 连接与请求体
     // ------------------------------------------------------------------
 
-    private fun open(endpoint: AiEndpoint, stream: Boolean = true): HttpURLConnection {
+    /**
+     * 打开一条 POST 连接。
+     *
+     * @param track 是否登记为「对话进行中的连接」（[active]）；补全小请求各记各的，
+     *   否则会顶掉正在流式输出的对话连接，停止按钮就点不到真正的那条了。
+     */
+    private fun open(
+        endpoint: AiEndpoint,
+        stream: Boolean = true,
+        track: Boolean = true,
+    ): HttpURLConnection {
         val conn = (URL(endpoint.endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
@@ -147,7 +273,7 @@ object AiClient {
                 setRequestProperty("Authorization", "Bearer ${endpoint.apiKey}")
             }
         }
-        active = conn
+        if (track) active = conn
         return conn
     }
 

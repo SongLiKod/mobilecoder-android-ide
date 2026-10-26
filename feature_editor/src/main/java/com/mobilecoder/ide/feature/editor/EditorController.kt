@@ -11,6 +11,7 @@ import com.mobilecoder.ide.core.storage.FileNode
 import com.mobilecoder.ide.core.storage.FileRepository
 import com.mobilecoder.ide.core.storage.SafImport
 import com.mobilecoder.ide.core.storage.SnippetStore
+import com.mobilecoder.ide.feature.ai.AiCompletion
 import com.mobilecoder.ide.feature.preview.PreviewController
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -64,6 +65,8 @@ object EditorController {
         val maxOpenMb: Int = 10,
         /** 侧边栏「实时预览」窗格总开关（Issue 13），设置页可关，默认开。 */
         val previewPane: Boolean = true,
+        /** 「AI 行内补全」总开关（光标处出幽灵文本），默认开。 */
+        val aiComplete: Boolean = true,
     )
 
     /**
@@ -124,6 +127,36 @@ object EditorController {
     /** 撤销 / 重做可用状态（对应活动文件，供工具栏按钮点亮）。 */
     data class HistoryAvailability(val canUndo: Boolean, val canRedo: Boolean)
 
+    /**
+     * 行内 AI 补全建议（类 Copilot 的「幽灵文本」）。
+     *
+     * @param path       归属文件（Tab 切走即失效，渲染前比对）
+     * @param text       待插入的补全文本
+     * @param start      插入点（发起请求时光标下标）
+     * @param anchorText 发起请求时的正文；正文一变即视为过期（不展示、不接受）
+     */
+    data class InlineSuggestion(
+        val path: String,
+        val text: String,
+        val start: Int,
+        val anchorText: String,
+    )
+
+    /**
+     * 「AI 重构」请求（文件树长按菜单 / 编辑器 ⋮ 菜单触发）。
+     *
+     * 编辑器侧只负责发请求，弹窗与 AI 调用由 AiRefactorDialog 承接（见 EditorScreen）。
+     *
+     * @param path 目标文件绝对路径
+     * @param selectionStart 选区起始下标；负数 = 整文件重构
+     * @param selectionEnd   选区结束下标（不含）
+     */
+    data class RefactorRequest(
+        val path: String,
+        val selectionStart: Int = -1,
+        val selectionEnd: Int = -1,
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _tabs = MutableStateFlow<List<EditorTab>>(emptyList())
@@ -179,6 +212,14 @@ object EditorController {
     private val _focusTick = MutableStateFlow(0)
     val focusTick: StateFlow<Int> = _focusTick.asStateFlow()
 
+    /** 行内 AI 补全建议（null = 无建议；UI 只订阅，不用自己算过期）。 */
+    private val _inlineSuggestion = MutableStateFlow<InlineSuggestion?>(null)
+    val inlineSuggestion: StateFlow<InlineSuggestion?> = _inlineSuggestion.asStateFlow()
+
+    /** 「AI 重构」待处理请求（null = 无；EditorScreen 订阅后弹出重构对话框）。 */
+    private val _refactorRequest = MutableStateFlow<RefactorRequest?>(null)
+    val refactorRequest: StateFlow<RefactorRequest?> = _refactorRequest.asStateFlow()
+
     /** 每个文件独立的撤销 / 重做历史。 */
     private val histories = HashMap<String, EditHistory<TextFieldValue>>()
 
@@ -197,6 +238,15 @@ object EditorController {
     private var findJob: Job? = null
     private var searchJob: Job? = null
     private var messageJob: Job? = null
+
+    /** 行内补全的防抖请求（每次键入都会取消上一次再重排）。 */
+    private var completionJob: Job? = null
+
+    /**
+     * 接受补全后的一次性抑制：接受本身也是一次正文变化，若不抑制会立刻
+     * 又发一轮补全请求（用户什么都没敲却不断冒出新建议）。
+     */
+    private var completionSuppress = false
 
     // ---- 编译级诊断（构建页解析出的错误 → 编辑器标注）----
     // 结构级 lint 与外部诊断分表存放、合并写回 analysis.issues，避免互相覆盖；
@@ -243,6 +293,7 @@ object EditorController {
                 maxOpenMb = runCatching { prefs.editorMaxOpenMb() }.getOrDefault(10)
                     .coerceIn(1, 1024),
                 previewPane = runCatching { prefs.editorPreviewPane() }.getOrDefault(true),
+                aiComplete = runCatching { prefs.editorAiComplete() }.getOrDefault(true),
             )
             val showHiddenChanged = loaded.showHiddenFiles != _settings.value.showHiddenFiles
             val hiddenNamesChanged = loaded.hiddenNames != _settings.value.hiddenNames
@@ -483,6 +534,7 @@ object EditorController {
     fun activate(path: String) {
         if (_tabs.value.any { it.path == path }) {
             if (_snippetPanel.value.open) dismissSnippetPanel()
+            rejectInlineSuggestion()
             _activePath.value = path
             locateInTree(path)
             refreshHistory()
@@ -497,6 +549,7 @@ object EditorController {
         synchronized(diagLock) { structuralIssues.remove(keyOf(path)) }
         if (_snippetSession.value?.path == path) endSnippetSession()
         if (_snippetPanel.value.open && _activePath.value == path) dismissSnippetPanel()
+        if (_inlineSuggestion.value?.path == path) rejectInlineSuggestion()
         val rest = _tabs.value.filterNot { it.path == path }
         _tabs.value = rest
         if (_activePath.value == path) {
@@ -583,6 +636,8 @@ object EditorController {
         val current = _tabs.value.firstOrNull { it.path == path } ?: return
         if (value.text == current.value.text) {
             if (value.selection != current.value.selection || value.composition != current.value.composition) {
+                // 光标挪动（点选 / 拖选）：幽灵文本的插入点已对不上，直接撤掉
+                _inlineSuggestion.value = null
                 _tabs.value = _tabs.value.map {
                     if (it.path == path) it.copy(value = value) else it
                 }
@@ -597,6 +652,153 @@ object EditorController {
         refreshSnippetPanel(path, value)
         scheduleAnalysis(path, value.text, current.language)
         scheduleAutoSave(path)
+        scheduleCompletion(path, value)
+    }
+
+    // ------------------------------------------------------------------
+    // AI 行内补全（光标处幽灵文本：Tab 接受 / Esc 拒绝）
+    // ------------------------------------------------------------------
+
+    /** 键入停顿多久才发补全请求（太短会把每个字母都变成一次网络请求）。 */
+    private const val COMPLETION_DEBOUNCE_MS = 350L
+
+    /**
+     * 防抖发起一次补全：停顿 [COMPLETION_DEBOUNCE_MS] 后取光标前后文发**小请求**
+     * （`max_tokens` 受控，见 AiClient.complete），回来时正文 / 光标已变则丢弃——
+     * 与 [scheduleAnalysis] 同一套过期判定。
+     *
+     * 任何失败都由 AiCompletion.suggest 内部静默降级为「无建议」，不打断输入。
+     */
+    private fun scheduleCompletion(path: String, value: TextFieldValue) {
+        completionJob?.cancel()
+        _inlineSuggestion.value = null
+        if (completionSuppress) {
+            completionSuppress = false
+            return
+        }
+        if (!_settings.value.aiComplete) return
+        if (path != _activePath.value) return
+        val tab = _tabs.value.firstOrNull { it.path == path }
+        if (tab == null || !tab.editable) return
+        // 与片段候选面板 / 跳位会话互斥：面板开着时不打扰
+        if (_snippetPanel.value.open) return
+        if (_snippetSession.value?.path == path) return
+        // 输入法组字中（拼音未上屏）与选中了内容时都不补全
+        if (value.composition != null) return
+        val cursor = value.selection.start
+        if (cursor <= 0 || value.selection.start != value.selection.max) return
+        val text = value.text
+        if (text.isBlank()) return
+
+        completionJob = scope.launch {
+            delay(COMPLETION_DEBOUNCE_MS)
+            val suggestion = AiCompletion.suggest(
+                prefix = text.take(cursor),
+                suffix = text.substring(cursor),
+                language = tab.language.label,
+            ) ?: return@launch
+            val live = _tabs.value.firstOrNull { it.path == path } ?: return@launch
+            if (live.value.text != text || live.value.selection.start != cursor) return@launch
+            if (_activePath.value != path || !_settings.value.aiComplete) return@launch
+            if (_snippetPanel.value.open) return@launch
+            _inlineSuggestion.value = InlineSuggestion(path, suggestion, cursor, text)
+        }
+    }
+
+    /**
+     * 接受补全：幽灵文本插入光标处、光标移到插入末尾。
+     *
+     * 插入前二次校验正文与光标（建议可能在展示后过期），过期则只清状态不插入。
+     * 插入是一步撤销（[recordHistory] 按整段 delta 记一次）。
+     */
+    fun acceptInlineSuggestion() {
+        val suggestion = _inlineSuggestion.value ?: return
+        completionJob?.cancel()
+        _inlineSuggestion.value = null
+        val tab = _tabs.value.firstOrNull { it.path == suggestion.path } ?: return
+        if (!tab.editable) return
+        if (tab.value.text != suggestion.anchorText || tab.value.selection.start != suggestion.start) {
+            return
+        }
+        val text = tab.value.text
+        val at = suggestion.start.coerceIn(0, text.length)
+        val newText = text.substring(0, at) + suggestion.text + text.substring(at)
+        val caret = (at + suggestion.text.length).coerceIn(0, newText.length)
+        // 接受本身是一次正文变化：抑制它触发的下一轮补全请求
+        completionSuppress = true
+        onEditorValue(
+            suggestion.path,
+            TextFieldValue(text = newText, selection = TextRange(caret), composition = null),
+        )
+        requestEditorFocus()
+    }
+
+    /** 拒绝补全（Esc / 点「忽略」），在途请求一并取消。 */
+    fun rejectInlineSuggestion() {
+        completionJob?.cancel()
+        completionSuppress = false
+        _inlineSuggestion.value = null
+    }
+
+    // ------------------------------------------------------------------
+    // AI 重构（文件树长按菜单 / 编辑器 ⋮ 菜单入口）
+    // ------------------------------------------------------------------
+
+    /**
+     * 发起一次「AI 重构」：只登记请求，弹窗（发 AI → 看 diff → 确认 → 落盘）
+     * 由 EditorScreen 订阅后挂载 AiRefactorDialog。
+     *
+     * @param path 目标文件绝对路径
+     * @param selectionStart 选区起始下标；负数 = 整文件重构
+     */
+    fun requestRefactor(path: String, selectionStart: Int = -1, selectionEnd: Int = -1) {
+        val file = java.io.File(path)
+        if (!file.isFile) {
+            showMessage("该文件不可重构：$path")
+            return
+        }
+        // 快照与落盘都按「相对项目根」寻址，项目外的文件一律拒绝，避免写到别处
+        val root = _projectRoot.value?.trimEnd('/', '\\')
+        if (root == null || !path.startsWith("$root/")) {
+            showMessage("仅支持项目内文件：${file.name}")
+            return
+        }
+        rejectInlineSuggestion()
+        _refactorRequest.value = RefactorRequest(path, selectionStart, selectionEnd)
+    }
+
+    /** 关闭「AI 重构」弹窗。 */
+    fun clearRefactor() {
+        _refactorRequest.value = null
+    }
+
+    /**
+     * 用给定内容整体替换某文件的编辑态（AI 重构「应用 / 撤销」后回灌）。
+     *
+     * 磁盘已由重构流程写入，这里同步 [EditorTab.savedText] 让 Tab 立刻变干净；
+     * 旧行号下的折叠下标不再可靠，一并清空。
+     */
+    fun replaceFileContent(path: String, newText: String) {
+        val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        if (tab.value.text == newText) return
+        recordHistory(path, tab.value, newText.length - tab.value.text.length)
+        val caret = tab.value.selection.start.coerceIn(0, newText.length)
+        _tabs.value = _tabs.value.map {
+            if (it.path == path) {
+                it.copy(
+                    value = TextFieldValue(text = newText, selection = TextRange(caret), composition = null),
+                    savedText = newText,
+                    collapsedFolds = emptySet(),
+                )
+            } else {
+                it
+            }
+        }
+        _inlineSuggestion.value = null
+        _snippetSession.value = null
+        _snippetPanel.value = SnippetPanelState()
+        scheduleAnalysis(path, newText, tab.language)
+        refreshHistory()
     }
 
     // ------------------------------------------------------------------
@@ -819,6 +1021,8 @@ object EditorController {
     private fun stepHistory(path: String, redo: Boolean) {
         val history = histories[path] ?: return
         val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        // 撤销 / 重做会整体改写正文，幽灵文本的锚点随之失效
+        rejectInlineSuggestion()
         val next = if (redo) history.redo(tab.value) else history.undo(tab.value)
         if (next == null) {
             refreshHistory()
@@ -921,6 +1125,7 @@ object EditorController {
 
     /** 跳转到指定行列（问题面板 / 检索结果 / 查找命中共用）。 */    fun jumpTo(path: String, line: Int, column: Int = 1) {
         val tab = _tabs.value.firstOrNull { it.path == path } ?: return
+        rejectInlineSuggestion()
         val base = offsetOfLine(tab.value.text, line)
         val offset = (base + column - 1).coerceIn(0, tab.value.text.length)
         _tabs.value = _tabs.value.map {
@@ -959,6 +1164,14 @@ object EditorController {
         val value = !_settings.value.autoSave
         _settings.value = _settings.value.copy(autoSave = value)
         persist { it.setEditorAutoSave(value) }
+    }
+
+    /** 「AI 行内补全」总开关：关掉即停发补全请求并清掉已展示的建议。 */
+    fun toggleAiComplete() {
+        val value = !_settings.value.aiComplete
+        _settings.value = _settings.value.copy(aiComplete = value)
+        persist { it.setEditorAiComplete(value) }
+        if (!value) rejectInlineSuggestion()
     }
 
     /**

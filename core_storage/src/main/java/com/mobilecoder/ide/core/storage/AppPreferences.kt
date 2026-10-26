@@ -121,6 +121,14 @@ class AppPreferences(
     suspend fun setEditorPreviewPane(value: Boolean) =
         set(KEY_EDITOR_PREVIEW_PANE, if (value) "1" else "0")
 
+    /**
+     * 编辑器「AI 行内补全」总开关（光标处出幽灵文本，Tab 接受 / Esc 拒绝），默认开。
+     * 关掉后不再发补全请求（已展示的建议一并清掉）。
+     */
+    suspend fun editorAiComplete(): Boolean = get(KEY_EDITOR_AI_COMPLETE) != "0"
+    suspend fun setEditorAiComplete(value: Boolean) =
+        set(KEY_EDITOR_AI_COMPLETE, if (value) "1" else "0")
+
     // ---------------- 终端 ----------------
 
     suspend fun terminalFontSize(): Int = getInt(KEY_TERM_FONT, 13)
@@ -325,6 +333,7 @@ class AppPreferences(
         private val KEY_EDITOR_UNOPENABLE_EXTS = stringPreferencesKey("editor_unopenable_exts")
         private val KEY_EDITOR_MAX_OPEN_MB = intPreferencesKey("editor_max_open_mb")
         private val KEY_EDITOR_PREVIEW_PANE = stringPreferencesKey("editor_preview_pane")
+        private val KEY_EDITOR_AI_COMPLETE = stringPreferencesKey("editor_ai_complete")
         private val KEY_TERM_FONT = intPreferencesKey("terminal_font_size")
         private val KEY_TERM_SCREEN_ON = stringPreferencesKey("terminal_screen_on")
         private val KEY_TERM_HISTORY = stringPreferencesKey("terminal_history")

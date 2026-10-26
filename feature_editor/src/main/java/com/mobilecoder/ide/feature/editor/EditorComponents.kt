@@ -28,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.FindReplace
+import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
@@ -722,6 +724,12 @@ fun EditorOptionsMenu(
     onGotoLine: () -> Unit,
     onOpenOutline: () -> Unit,
     onOpenSnippets: () -> Unit = {},
+    /** 「AI 重构」可用（有可编辑的活动文件）；false 时不显示该项。 */
+    aiRefactorAvailable: Boolean = false,
+    onAiRefactor: () -> Unit = {},
+    /** 「AI 行内补全」开关状态（右侧显示 ✓）。 */
+    aiCompleteEnabled: Boolean = true,
+    onToggleAiComplete: () -> Unit = {},
     onToggleLineNumbers: () -> Unit,
     onToggleWordWrap: () -> Unit,
     onToggleAutoSave: () -> Unit,
@@ -839,6 +847,33 @@ fun EditorOptionsMenu(
                 Icon(Icons.Default.PlaylistAdd, contentDescription = null)
             },
             onClick = onOpenSnippets,
+        )
+        // AI 重构：选中代码（或整文件）→ 发 AI → 先看 diff → 确认后建快照落盘
+        if (aiRefactorAvailable) {
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("AI 重构") },
+                leadingIcon = {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null)
+                },
+                onClick = onAiRefactor,
+            )
+        }
+        DropdownMenuItem(
+            text = { Text("AI 行内补全") },
+            leadingIcon = {
+                Icon(Icons.Default.FlashOn, contentDescription = null)
+            },
+            trailingIcon = {
+                if (aiCompleteEnabled) {
+                    Icon(
+                        Icons.Default.Check,
+                        contentDescription = "已开启",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            },
+            onClick = onToggleAiComplete,
         )
         DropdownMenuItem(
             text = { Text("行号") },

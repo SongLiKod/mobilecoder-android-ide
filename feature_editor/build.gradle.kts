@@ -33,6 +33,8 @@ dependencies {
     // 编辑器侧边栏的实时预览窗格（Issue 13）。仅内部使用，未在本模块公开签名里暴露
     // preview 的任何类型，故用 implementation 而非 api
     implementation(project(":feature_preview"))
+    // 行内 AI 补全 + 「AI 重构」入口：编辑器直接调 AiCompletion / AiRefactorDialog
+    implementation(project(":feature_ai"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

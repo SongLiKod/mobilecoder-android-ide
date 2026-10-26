@@ -33,6 +33,8 @@ dependencies {
     implementation(project(":core_native"))
 
     implementation(libs.androidx.core.ktx)
+    // 会话导出 Markdown：SAF CreateDocument（与片段导出同一套写法）
+    implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)

@@ -359,8 +359,9 @@ private suspend fun loadDetail(
     }
 }
 
+/** 单行差异渲染（`AiRefactorDialog` 的改动预览复用同一套配色 / 行号样式）。 */
 @Composable
-private fun DiffRowRow(
+internal fun DiffRowRow(
     row: AiDiffRow,
     palette: com.mobilecoder.ide.core.common.theme.AppPalette,
 ) {

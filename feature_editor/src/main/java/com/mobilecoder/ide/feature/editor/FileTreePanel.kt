@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
@@ -447,6 +448,9 @@ fun FileTreeDrawer(
                                                     ?: "已发起安装：${node.name}",
                                             )
 
+                                        TreeAction.AI_REFACTOR ->
+                                            EditorController.requestRefactor(node.file.path)
+
                                         TreeAction.DELETE -> pendingDelete = node
                                         TreeAction.MOVE -> pendingMove = node
                                     }
@@ -561,6 +565,7 @@ private enum class TreeAction {
     IMPORT_FILE,
     IMPORT_FOLDER,
     INSTALL,
+    AI_REFACTOR,
     DELETE,
     MOVE,
 }
@@ -755,6 +760,14 @@ private fun TreeRowItem(
                 leadingIcon = { Icon(Icons.Default.FileDownload, contentDescription = null) },
                 onClick = { onMenuItem(TreeAction.EXPORT) },
             )
+            // AI 重构：整文件交给 AI 改写 → 先看 diff → 确认后（建快照）落盘
+            if (!row.isDirectory) {
+                DropdownMenuItem(
+                    text = { Text("AI 重构") },
+                    leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
+                    onClick = { onMenuItem(TreeAction.AI_REFACTOR) },
+                )
+            }
             // 「导入」只对目录出现：文件进目录、目录作为子目录（重名自动加序号）
             if (row.isDirectory) {
                 DropdownMenuItem(

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -108,6 +109,7 @@ fun AiScreen(
     var historyView by rememberSaveable { mutableStateOf(false) }
     var pendingDeleteId by rememberSaveable { mutableStateOf("") }
     var diffSnapshotId by rememberSaveable { mutableStateOf("") }
+    var exportOpen by rememberSaveable { mutableStateOf(false) }
     var confirmRequest by remember { mutableStateOf<AiConfirmRequest?>(null) }
     var confirmDeferred by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
     val scope = rememberCoroutineScope()
@@ -191,6 +193,7 @@ fun AiScreen(
                 current?.id?.let { AiController.undoRound(projectPath, it, snapshotId) }
             },
             onShowDiff = { diffSnapshotId = it },
+            onExport = { exportOpen = true },
             onRetry = {
                 val last = current?.messages?.lastOrNull()
                 if (last?.role == "user") AiController.retryLast(projectPath)
@@ -244,6 +247,18 @@ fun AiScreen(
             onDismiss = { diffSnapshotId = "" },
         )
     }
+
+    // 会话导出为 Markdown（预览 + SAF 保存）
+    if (exportOpen) {
+        current?.let { session ->
+            AiExportDialog(
+                session = session,
+                projectName = File(projectPath).name,
+                endpointLabel = providers.activeEndpoint()?.label.orEmpty(),
+                onDismiss = { exportOpen = false },
+            )
+        } ?: run { exportOpen = false }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +286,7 @@ private fun ChatView(
     onOpenFile: (String) -> Unit,
     onUndo: (String) -> Unit,
     onShowDiff: (String) -> Unit,
+    onExport: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -370,6 +386,14 @@ private fun ChatView(
                 modifier = Modifier.size(40.dp),
             ) {
                 Icon(Icons.Default.Add, contentDescription = "新会话")
+            }
+            // 导出会话为 Markdown（含工具调用记录，沉淀成文档）
+            IconButton(
+                onClick = onExport,
+                enabled = current?.messages?.isNotEmpty() == true,
+                modifier = Modifier.size(40.dp),
+            ) {
+                Icon(Icons.Default.FileDownload, contentDescription = "导出为 Markdown")
             }
             IconButton(onClick = onOpenSettings, modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Default.Settings, contentDescription = "AI 接口设置")
