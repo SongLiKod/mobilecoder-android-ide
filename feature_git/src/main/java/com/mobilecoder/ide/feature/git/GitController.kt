@@ -787,6 +787,19 @@ object GitController {
 
     // ---------------- 历史 ----------------
 
+    /**
+     * 变更页「提交信息 → 历史」按需补拉最近提交：历史列表已有数据时直接复用，
+     * 为空才读一批（不影响日志页已加载的分页长度）。
+     */
+    suspend fun ensureRecentCommits() {
+        withRepo(Unit) {
+            if (!ensureOpen() || _commits.value.isNotEmpty()) return@withRepo
+            val list = parseLog(runCatching { GitNative.log(LOG_STEP) }.getOrDefault(""))
+            _commits.value = list
+            _logHasMore.value = list.size >= LOG_STEP
+        }
+    }
+
     /** 加载更多提交。 */
     suspend fun loadMoreLog() {
         withRepo(Unit) {
