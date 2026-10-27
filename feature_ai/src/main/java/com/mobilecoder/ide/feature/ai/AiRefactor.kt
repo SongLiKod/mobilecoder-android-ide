@@ -21,6 +21,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -115,6 +116,11 @@ fun AiRefactorDialog(
                 phase = Phase.ERROR
                 return@LaunchedEffect
             }
+            oversizedError(source.length, sliced)?.let {
+                errorText = it
+                phase = Phase.ERROR
+                return@LaunchedEffect
+            }
             val raw = AiOneShot.ask(
                 system = systemPrompt(),
                 user = userPrompt(
@@ -149,6 +155,12 @@ fun AiRefactorDialog(
             errorText = t.message ?: "请求失败"
             phase = Phase.ERROR
         }
+    }
+
+    // 弹窗关闭即断掉进行中的一次性请求：阻塞读立刻失败，而不是白等超时
+    //（重构通道读超时 300s，不掐断会占着 IO 线程直到超时）。只断本通道，不误伤会话/补全。
+    DisposableEffect(Unit) {
+        onDispose { AiClient.cancelOneShot() }
     }
 
     /** 确认应用：先建快照 → 写盘 → 回灌编辑器。 */
@@ -263,6 +275,20 @@ internal const val REFACOR_MAX_TOKENS = 4096
 
 /** 源码长度上限（超长文件整文件重构容易被截断，直接拦下）。 */
 internal const val MAX_SOURCE_CHARS = 300_000
+
+/**
+ * 整文件重构的体积闸门：超长文件整包发送必然超时 / 超上下文，直接拦下并提示改用选区。
+ * 选区模式不受限（prompt 只含选区 + 前后有限行数的上下文，总量有界）。
+ *
+ * @param sourceLength 源文件字符数
+ * @param sliced 是否选区模式
+ * @return null = 可以继续；非 null = 应展示的错误文案
+ */
+internal fun oversizedError(sourceLength: Int, sliced: Boolean): String? {
+    if (sliced || sourceLength <= MAX_SOURCE_CHARS) return null
+    return "文件过大（约 ${sourceLength / 1000}K 字符，整文件重构上限 ${MAX_SOURCE_CHARS / 1000}K）：" +
+        "请选中要重构的代码片段后重试"
+}
 
 /** 选区模式下附带的上下文行数（前 80 后 40，帮模型理解语境）。 */
 private const val CONTEXT_BEFORE_LINES = 80

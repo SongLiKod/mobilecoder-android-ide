@@ -1,18 +1,24 @@
 package com.mobilecoder.ide.feature.ai
 
+import kotlinx.coroutines.delay
+
 /**
  * 一次性请求通道：**不进会话、不带工具**，只问一句、拿一段文本回来。
  *
  * 「行内补全」与「AI 重构」共用——两者都要的是「小请求 → 纯文本」，
  * 与 [AiController.send] 的工具调用循环解耦（不占 busy、不写会话、不弹确认）。
  *
- * 复用对话同款的容灾思路：按 [AiProvidersConfig.candidates] 顺序尝试，
- * 额度 / Key / 模型 / 服务端失效时换下一个候选（最多 [MAX_CANDIDATES] 个）。
+ * 复用对话同款的容灾思路：可重试的瞬时故障（超时 / DNS 抖动 / 5xx / 限流）
+ * 先**同一候选原地重试一次**，仍失败或额度 / Key / 模型失效时按
+ * [AiProvidersConfig.candidates] 顺序换下一个候选（最多 [MAX_CANDIDATES] 个）。
  */
 internal object AiOneShot {
 
     /** 单次最多尝试的候选接口数（补全要快，不无限轮换）。 */
     private const val MAX_CANDIDATES = 3
+
+    /** 瞬时故障原地重试前的退避（给 DNS / 网络栈一点恢复时间）。 */
+    private const val RETRY_DELAY_MS = 800L
 
     /**
      * 发一次非流式小请求。
@@ -45,11 +51,24 @@ internal object AiOneShot {
         )
         var last: AiApiException? = null
         for (endpoint in candidates) {
-            try {
-                return AiClient.complete(endpoint, messages, maxTokens, temperature, isCompletion)
-            } catch (e: AiApiException) {
-                if (!switchable(e.kind)) throw e
-                last = e
+            var retriedSame = false
+            while (true) {
+                try {
+                    return AiClient.complete(endpoint, messages, maxTokens, temperature, isCompletion)
+                } catch (e: AiApiException) {
+                    // 瞬时故障（超时 / DNS 抖动 / 5xx / 限流）→ 同一候选稍候重试一次：
+                    // 与 AiController.send 的容灾一致，单接口配置也能扛住网络毛刺
+                    //（典型：Wi-Fi/数据切换时的 Unable to resolve host）。
+                    if (e.retryable && !retriedSame) {
+                        retriedSame = true
+                        last = e
+                        delay(RETRY_DELAY_MS)
+                        continue
+                    }
+                    if (!switchable(e.kind)) throw e
+                    last = e
+                    break
+                }
             }
         }
         throw last ?: AiApiException(AiErrorKind.UNKNOWN, 0, "请求失败", retryable = false)

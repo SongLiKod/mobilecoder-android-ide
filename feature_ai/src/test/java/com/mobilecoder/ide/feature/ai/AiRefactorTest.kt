@@ -126,4 +126,26 @@ class AiRefactorTest {
         val old = (1..40).joinToString("\n") { "line$it" }
         assertEquals("", warningOf(old, "x", sliced = true))
     }
+
+    // ------------------------------------------------------------------
+    // oversizedError（整文件体积闸门）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `oversized whole file is blocked with hint to select a slice`() {
+        val error = oversizedError(MAX_SOURCE_CHARS + 1, sliced = false)
+        assertTrue(error != null && error.contains("文件过大"))
+        assertTrue(error!!.contains("选中"))
+    }
+
+    @Test
+    fun `whole file within limit passes`() {
+        assertEquals(null, oversizedError(MAX_SOURCE_CHARS, sliced = false))
+        assertEquals(null, oversizedError(1_000, sliced = false))
+    }
+
+    @Test
+    fun `slice mode is not limited by file size`() {
+        assertEquals(null, oversizedError(MAX_SOURCE_CHARS * 10, sliced = true))
+    }
 }

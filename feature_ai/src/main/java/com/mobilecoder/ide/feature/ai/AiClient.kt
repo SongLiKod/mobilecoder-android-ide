@@ -40,6 +40,16 @@ object AiClient {
     }
 
     /**
+     * 只取消「一次性小请求」通道（AI 重构弹窗关闭时用）。
+     *
+     * 不走 [cancelActive]：后者会连聊天的流式连接、行内补全连接一起掐掉，
+     * 而关闭重构弹窗不应打断别的进行中请求。
+     */
+    fun cancelOneShot() {
+        runCatching { activeOneShot?.disconnect() }
+    }
+
+    /**
      * 发起一次流式对话。
      *
      * @param endpoint 目标接口（地址 + 模型 + Key）
@@ -173,9 +183,12 @@ object AiClient {
         // 补全通道：上一条必然已被 EditorController 取消（防抖会先 cancel），这里直接断开释放线程
         if (isCompletion) runCatching { activeCompletion?.disconnect() }
         val conn = open(endpoint, stream = false, track = false)
-        // 补全不能等 5 分钟：连接 15s、读 60s，超时即放弃（UI 静默降级）
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 60_000
+        // 超时按通道区分：
+        //  - 行内补全要快：连接 15s、读 60s（上下文 ~4KB、输出 ≤64 token），超时即放弃（UI 静默降级）；
+        //  - AI 重构是「大输入（整文件最多 30 万字符）+ 最多 4096 token 输出」的非流式请求，
+        //    服务端要算完才回包，大文件常超过 60s —— 给足 30s/300s（与流式对话 chat() 一致）。
+        conn.connectTimeout = if (isCompletion) 15_000 else 30_000
+        conn.readTimeout = if (isCompletion) 60_000 else 300_000
         if (isCompletion) activeCompletion = conn else activeOneShot = conn
         try {
             conn.outputStream.use { out ->
@@ -192,7 +205,18 @@ object AiClient {
         } catch (e: AiApiException) {
             throw e
         } catch (e: SocketTimeoutException) {
-            throw AiApiException(AiErrorKind.TIMEOUT, 0, "补全超时", retryable = true, cause = e)
+            // 文案按通道区分：重构弹窗里显示「补全超时」会让用户误判是行内补全功能报错
+            throw AiApiException(
+                AiErrorKind.TIMEOUT,
+                0,
+                if (isCompletion) {
+                    "补全超时"
+                } else {
+                    "请求超时（文件较大时生成较慢，可缩小选区后重试）"
+                },
+                retryable = true,
+                cause = e,
+            )
         } catch (e: IOException) {
             throw AiApiException(
                 AiErrorKind.NETWORK,
